@@ -7,6 +7,7 @@
 //   • если Telegram вернул 400 (не распарсил сущности) — ОДНА повторная попытка тем же
 //     чанком, но без тегов и без parse_mode (так 400 по сущностям невозможен), fellBack=true;
 //   • НИКОГДА не бросает — на любую ошибку возвращает { ok:false, error }.
+//   • адрес Bot API берётся из telegramApiBase() — по умолчанию api.telegram.org.
 // Возвращает { ok, fellBack, error } — вызывающий cron-скрипт по fellBack даёт агенту
 // обратную связь в ту же сессию, чтобы он переформатировал следующий отчёт.
 // htmlToPlain (HTML→plain с декодом сущностей) живёт в общем модуле — тот же
@@ -22,11 +23,40 @@ type TelegramResponse = {
   text: string;
 };
 
+const DEFAULT_API_BASE = "https://api.telegram.org";
+
+/**
+ * База Bot API. По умолчанию боевая; TELEGRAM_API_BASE подменяет её на локальный mock —
+ * этим replica-смоук проверяет доставку напоминания, не выходя в сеть.
+ * Мусор в переменной (пустая строка, не-URL, схема не http/https) НЕ ломает отправку:
+ * берётся боевая база, а промах виден в stderr — тихо отправить «в никуда» хуже, чем
+ * отправить туда, куда просили изначально.
+ */
+export function telegramApiBase(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const raw = String(env.TELEGRAM_API_BASE ?? "").trim();
+  if (!raw) return DEFAULT_API_BASE;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    console.error(`[telegram] TELEGRAM_API_BASE is not a URL: ${raw}`);
+    return DEFAULT_API_BASE;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    console.error(`[telegram] TELEGRAM_API_BASE is not http(s): ${raw}`);
+    return DEFAULT_API_BASE;
+  }
+  // Хвостовые слэши срезаются: путь метода добавляется как "/bot<token>/sendMessage".
+  return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+}
+
 async function post(
   bot: string,
   body: TelegramRequest,
 ): Promise<TelegramResponse> {
-  const res = await fetch(`https://api.telegram.org/bot${bot}/sendMessage`, {
+  const res = await fetch(`${telegramApiBase()}/bot${bot}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

@@ -580,6 +580,8 @@ mkdir -p "$HOME/.local/bin"
 # Path resolution only, so the same shim keeps working once the install moves to
 # ~/iva/versions/<version> behind the `current` symlink - and keeps working even if
 # that symlink is lost, which is what makes `iva update` able to repair it.
+# MIRRORED in scripts/replica-smoke.ts (writeIvaLauncher): the delivery check builds the
+# same wrapper in its sandbox. Change the wrapper here - change it there in the same edit.
 {
   printf '#!/bin/sh\n'
   printf 'IVA_ROOT="%s"\n' "$PROJECT_DIR"

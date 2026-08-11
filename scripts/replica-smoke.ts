@@ -1,7 +1,8 @@
 // Replica-смоук: одноразовая полностью изолированная установка ивы + mock-провайдер.
 // Проверяет то, что юнит-тесты не видят: прод-билд eve, старт сервера, первый реальный
-// ответ через провайдера и restart/resume сессии. Ни .env, ни Telegram-токена, ни живого
-// vault — только временная директория и закрытый allowlist переменных окружения.
+// ответ через провайдера, restart/resume сессии и доставку напоминания в Telegram.
+// Ни хостового .env, ни настоящего бота, ни живого vault — только временная директория,
+// закрытый allowlist переменных окружения и локальные mock-серверы.
 // Запуск: npm run replica (в CI — шаг после build). По мотивам stabilization-форка
 // mamysh/iva (PR #7), переписано под upstream.
 import { spawn } from "node:child_process";
@@ -22,6 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { startMockOpenAiServer } from "./lib/mock-openai-server.ts";
+import { startMockTelegramServer } from "./fixtures/mock-telegram-server.ts";
 import type { ClientSession, MessageResult } from "eve/client";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -33,6 +35,11 @@ const UPGRADE_MARKER = "CEDAR-8140";
 const EMPTY_HISTORY_REPLY = "MISSING_MARKER";
 // Версия, на которую подменяется eve в durable-логе канарейкой апгрейда.
 const FORGED_EVE_VERSION = "0.0.0-forged";
+// Проверка доставки напоминания: маркер уникален на прогон, бот и чат — выдуманные,
+// сообщение уходит в локальный mock Bot API.
+const NOTIFY_MARKER = `REPLICA-NOTIFY-${randomBytes(4).toString("hex")}`;
+const NOTIFY_BOT_TOKEN = "424242:replica-smoke-fake-token";
+const NOTIFY_CHAT_ID = "-1002222333444";
 const HEALTH_TIMEOUT_MS = 90_000;
 const TURN_TIMEOUT_MS = 120_000;
 
@@ -231,7 +238,8 @@ async function turn(
 async function prepareReplica(sandbox: string): Promise<string> {
   const app = join(sandbox, "app");
   await mkdir(app, { recursive: true });
-  for (const dir of ["agent", "scripts", "patches", "vault-template"]) {
+  // bin/ нужен проверке доставки: лаунчер ~/.local/bin/iva зовёт именно bin/iva.mjs.
+  for (const dir of ["agent", "bin", "scripts", "patches", "vault-template"]) {
     await cp(join(ROOT, dir), join(app, dir), { recursive: true });
   }
   for (const file of ["package.json", "package-lock.json", "tsconfig.json"]) {
@@ -249,6 +257,133 @@ async function prepareReplica(sandbox: string): Promise<string> {
     join(app, "agent/channels/reset-canary.ts"),
   );
   return app;
+}
+
+/**
+ * Пишет `$HOME/.local/bin/iva` ровно так, как это делает install.sh (секция 8.5):
+ * тот же резолв каталога версии (`current` → data/active.json → свежая запись в versions/)
+ * и абсолютный путь до node — здесь process.execPath, у установщика `command -v node`.
+ * ЗЕРКАЛО install.sh: правишь лаунчер там — правь и здесь, иначе проверка доставки
+ * начнёт подтверждать несуществующую установку.
+ */
+async function writeIvaLauncher(home: string, root: string): Promise<string> {
+  const path = join(home, ".local/bin/iva");
+  await mkdir(dirname(path), { recursive: true });
+  const script = [
+    "#!/bin/sh",
+    `IVA_ROOT="${root}"`,
+    'if [ -f "$IVA_ROOT/current/bin/iva.mjs" ]; then',
+    '  IVA_ROOT="$IVA_ROOT/current"',
+    'elif [ ! -f "$IVA_ROOT/bin/iva.mjs" ]; then',
+    '  settled=$(sed -n \'s/.*"version":"\\([^"]*\\)".*/\\1/p\' "$IVA_ROOT/data/active.json" 2>/dev/null)',
+    '  if [ -n "$settled" ] && [ -f "$IVA_ROOT/versions/$settled/bin/iva.mjs" ]; then',
+    '    IVA_ROOT="$IVA_ROOT/versions/$settled"',
+    "  else",
+    '    for candidate in $(ls -t "$IVA_ROOT/versions" 2>/dev/null); do',
+    '      [ -f "$IVA_ROOT/versions/$candidate/bin/iva.mjs" ] || continue',
+    '      IVA_ROOT="$IVA_ROOT/versions/$candidate"',
+    "      break",
+    "    done",
+    "  fi",
+    "fi",
+    `exec "${process.execPath}" "$IVA_ROOT/bin/iva.mjs" "$@"`,
+    "",
+  ].join("\n");
+  await writeFile(path, script, { mode: 0o755 });
+  return path;
+}
+
+/** Запуск команды под /bin/sh с заданным окружением; ничего не бросает по коду выхода. */
+function runShell(
+  command: string,
+  { cwd, env }: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/bin/sh", ["-c", command], {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (buf: Buffer) => {
+      stdout += String(buf);
+    });
+    child.stderr.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+/**
+ * Проверка доставки: напоминание, заведённое по канону (agent/instructions.md,
+ * `$HOME/.local/bin/iva notify "<текст>"`), обязано дойти до Telegram.
+ *
+ * Запуск повторяет среду планировщика: `/bin/sh -c` с вычищенным окружением — PATH
+ * без nvm, HOME песочницы, рабочий каталог вне репозитория, — ровно так стартуют
+ * `systemd-run --user` и cron. Именно здесь отправка ломалась дважды (issue #130 и #182):
+ * голый `node` в таком PATH — сборка дистрибутива, .ts она не грузит, напоминание молча
+ * не приходит. Абсолютный путь до node внутри лаунчера — единственное, что это держит;
+ * на macOS /usr/bin/node вообще нет, так что без лаунчера шаг упадёт сразу.
+ *
+ * Сеть не задействована: адрес Bot API подменяется на локальный mock через
+ * TELEGRAM_API_BASE (scripts/lib/telegram-send.ts).
+ */
+async function checkNotifyDelivery(
+  sandbox: string,
+  app: string,
+): Promise<void> {
+  const telegram = await startMockTelegramServer();
+  try {
+    const launcher = await writeIvaLauncher(sandbox, app);
+    const result = await runShell(
+      `"$HOME/.local/bin/iva" notify "${NOTIFY_MARKER}"`,
+      {
+        cwd: sandbox,
+        // Эквивалент `env -i`: process.env не спредится, nvm-каталогов в PATH нет.
+        env: {
+          PATH: "/usr/bin:/bin",
+          HOME: sandbox,
+          TELEGRAM_API_BASE: telegram.baseUrl,
+        },
+      },
+    );
+    for (const line of `${result.stdout}${result.stderr}`.split("\n"))
+      if (line) note(`[notify] ${line}`);
+    if (result.code !== 0)
+      throw new Error(
+        `${launcher} notify exited with ${result.code}; stderr: ${result.stderr.trim() || "(empty)"}`,
+      );
+    if (telegram.rejected.length)
+      throw new Error(
+        `mock Bot API refused a request: ${telegram.rejected.join(", ")}`,
+      );
+    if (telegram.sent.length !== 1)
+      throw new Error(
+        `expected exactly one sendMessage, got ${telegram.sent.length}`,
+      );
+    const [sent] = telegram.sent;
+    if (sent.token !== NOTIFY_BOT_TOKEN)
+      throw new Error(
+        `sendMessage used a foreign bot token: ${JSON.stringify(sent.token)}`,
+      );
+    if (sent.body.chat_id !== NOTIFY_CHAT_ID)
+      throw new Error(
+        `sendMessage went to the wrong chat: ${JSON.stringify(sent.body.chat_id)}`,
+      );
+    const text = typeof sent.body.text === "string" ? sent.body.text : "";
+    if (!text.includes(NOTIFY_MARKER))
+      throw new Error(
+        `sendMessage lost the marker ${NOTIFY_MARKER}: ${JSON.stringify(text)}`,
+      );
+    console.log(
+      `replica smoke: the scheduled reminder reached Telegram under a scrubbed environment OK (chat ${NOTIFY_CHAT_ID})`,
+    );
+  } finally {
+    await telegram.close();
+  }
 }
 
 function errorDetail(error: unknown): unknown {
@@ -369,9 +504,22 @@ async function main(): Promise<void> {
       mockBaseUrl: mock.baseUrl,
       bearer,
     });
-    await writeFile(join(app, ".env"), `ASSISTANT_BEARER=${bearer}\n`, {
-      mode: 0o600,
-    });
+    // Telegram-ключи нужны проверке доставки ниже: `iva notify` берёт бот и чат только
+    // из .env. Сервер eve их не видит — его окружение собирает закрытый allowlist.
+    await writeFile(
+      join(app, ".env"),
+      [
+        `ASSISTANT_BEARER=${bearer}`,
+        `TELEGRAM_BOT_TOKEN=${NOTIFY_BOT_TOKEN}`,
+        `TELEGRAM_DIGEST_CHAT_ID=${NOTIFY_CHAT_ID}`,
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+
+    // Первым делом: шаг дешёвый, а ломается именно он — и ждать ради этого сборку незачем.
+    setPhase("notify-delivery");
+    await checkNotifyDelivery(sandbox, app);
 
     setPhase("vault");
     await run(process.execPath, [join(app, "scripts/init-vault.mjs")], {
