@@ -742,16 +742,25 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           );
         return;
       }
-      const done = reconcilePluginUnits({
-        plan,
-        unitDir: UNIT_DIR,
-        systemd,
-        ensureDataDir: (plugin) =>
-          mkdirSync(pluginDataDir(data, plugin), { recursive: true }),
-        log: (message) => ok(message),
-      });
-      if (done.started.length)
-        ok(`running: ${done.started.map((unit) => unit).join(", ")}`);
+      // Отказ systemd не отменяет уже записанное состояние: он называется и остаётся
+      // задачей владельца (её же повторит `iva doctor`).
+      let done;
+      try {
+        done = reconcilePluginUnits({
+          plan,
+          unitDir: UNIT_DIR,
+          systemd,
+          ensureDataDir: (plugin) =>
+            mkdirSync(pluginDataDir(data, plugin), { recursive: true }),
+          log: (message) => ok(message),
+        });
+      } catch (error) {
+        bad(
+          `the plugin units were not brought up to date: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+      if (done.started.length) ok(`running: ${done.started.join(", ")}`);
       for (const failure of done.failures) bad(failure);
     }
 

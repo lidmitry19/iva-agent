@@ -384,12 +384,25 @@ export function reconcilePluginUnits({
       failures.push(error instanceof Error ? error.message : String(error));
     }
   } else if (written.length) {
-    systemd.daemonReload();
+    try {
+      systemd.daemonReload();
+    } catch (error) {
+      // A reload that fails is a systemd of its own to fix; it is not this command's
+      // to throw about, and every unit below will say so in its own words anyway.
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
   }
 
   const started: string[] = [];
   for (const unit of plan.units) {
-    ensureDataDir(unit.plugin);
+    try {
+      ensureDataDir(unit.plugin);
+    } catch (error) {
+      failures.push(
+        `${unit.plugin}: its data directory could not be created: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
     try {
       systemd.resetFailed([unit.unit]);
     } catch {
