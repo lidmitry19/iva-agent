@@ -19,11 +19,11 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { dataDir } from "./data-dir.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { listPluginSkills, SAFE_SKILL_NAME } from "./plugin-skills.ts";
 import {
-  EMPTY_PLUGINS_STATE,
   enabledPlugins,
   pluginRoot,
-  readPluginsState,
+  readPluginsStateSafe,
 } from "./plugin-store.ts";
 
 export type CustomSkill = {
@@ -37,12 +37,6 @@ export type CustomSkill = {
 export function customSkillsDir(): string {
   return join(dataDir(), "custom", "agent", "skills");
 }
-
-// Имя скилла становится ОДНИМ сегментом пути в песочнице eve, и eve его проверяет
-// (shared/skill-package.js → assertSafeSkillPackageName). Вернём имя вне правила —
-// eve бросит уже у себя, и ход останется вообще без динамических скиллов. Поэтому
-// правило продублировано здесь и лишние имена отсеиваются до возврата.
-const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 // Описание попадает в системный промпт на каждом ходу. Файл без frontmatter, у которого
 // первая строка длиной в абзац, иначе раздувал бы промпт — режем.
@@ -215,9 +209,9 @@ export async function readCustomSkills(
     const kind = await kindOf(dir, entry);
     if (kind === null) continue;
     const name = skillName(entry.name, kind);
-    if (!SAFE_NAME.test(name)) {
+    if (!SAFE_SKILL_NAME.test(name)) {
       log(
-        `[skills] custom skill ${name} skipped: name must match ${SAFE_NAME.source}`,
+        `[skills] custom skill ${name} skipped: name must match ${SAFE_SKILL_NAME.source}`,
       );
       continue;
     }
@@ -243,50 +237,19 @@ export async function readCustomSkills(
   return skills;
 }
 
-/**
- * Скиллы одного плагина: `plugins/<name>/skills/<skill>/SKILL.md`. Только
- * непосредственные дети-папки, без рекурсии и без плоских `.md` — так велит спека
- * Agent Plugins (§7.1). Симлинки пропускаются: их не должно быть в сторе, и
- * следовать за ними на каждом ходу мы не станем.
- */
-export async function readPluginSkills(
-  skillsDir: string,
-  log: (line: string) => void = console.error,
-): Promise<Record<string, CustomSkill>> {
-  let entries: Dirent[];
-  try {
-    entries = await readdir(skillsDir, { withFileTypes: true });
-  } catch (error) {
-    if (code(error) !== "ENOENT")
-      log(`[skills] plugin skills unreadable (${skillsDir}): ${reason(error)}`);
-    return {};
-  }
-  const skills: Record<string, CustomSkill> = {};
-  for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    if (!SAFE_NAME.test(entry.name)) {
-      log(
-        `[skills] plugin skill ${entry.name} skipped: name must match ${SAFE_NAME.source}`,
-      );
-      continue;
-    }
-    const skill = await readOne(
-      skillsDir,
-      entry.name,
-      "package",
-      entry.name,
-      log,
-      "plugin skill",
-    );
-    if (skill) skills[entry.name] = skill;
-  }
-  return skills;
-}
+// Один битый plugins.json не должен превращаться в строку лога на каждом ходу:
+// сказать о нём стоит один раз за жизнь процесса.
+let damagedStateReported = false;
 
 /**
  * Все скиллы, которые агент видит с диска на этом ходу: свой Custom layer плюс
- * `skills/` ВКЛЮЧЁННЫХ плагинов. Сборка и рестарт не нужны — поставил плагин,
- * со следующего хода его скиллы работают (ADR-0009).
+ * `skills/` ВКЛЮЧЁННЫХ плагинов (ADR-0009). Сборка и рестарт не нужны — поставил
+ * плагин, со следующего хода его скиллы работают.
+ *
+ * Какие скиллы предлагает плагин, решает listPluginSkills — тот же список, что
+ * видят `iva plugin add` и `iva doctor`. Содержимое читается ТОЛЬКО у победителей:
+ * скилл, проигравший имя, стоил бы чтения всех своих файлов впустую, а платит за
+ * это каждый ход.
  *
  * Порядок при совпадении имён: свой Custom layer ближе плагина и побеждает его,
  * плагин побеждает ядровой скилл (это делает сам eve: динамический скилл
@@ -294,49 +257,53 @@ export async function readPluginSkills(
  * если такое состояние всё же сложилось, выигрывает первый по алфавиту, а второй
  * уходит в лог — тихо терять скилл нельзя.
  *
- * Как и readCustomSkills, наружу НИКОГДА не кидает: исключение здесь стоило бы
- * ходу всех динамических скиллов сразу.
+ * Как и readCustomSkills, наружу НИКОГДА не кидает и НИЧЕГО не пишет: исключение
+ * здесь стоило бы ходу всех динамических скиллов сразу, а запись на горячем пути —
+ * молчаливой потери списка плагинов.
  */
 export async function readLiveSkills(
   log: (line: string) => void = console.error,
 ): Promise<Record<string, CustomSkill>> {
   const data = dataDir();
-  let state = EMPTY_PLUGINS_STATE;
-  try {
-    state = await readPluginsState(data);
-  } catch (error) {
-    log(`[skills] plugins.json unusable: ${reason(error)}`);
+  const own = await readCustomSkills(customSkillsDir(), log);
+  const { state, damaged } = await readPluginsStateSafe(data);
+  if (damaged && !damagedStateReported) {
+    damagedStateReported = true;
+    log(`[skills] plugins are not loaded: ${damaged.message}`);
   }
 
-  const skills: Record<string, CustomSkill> = {};
+  const skills: Record<string, CustomSkill> = { ...own };
   const owner = new Map<string, string>();
   for (const plugin of enabledPlugins(state)) {
-    const fromPlugin = await readPluginSkills(
-      join(pluginRoot(data, plugin.name), "skills"),
-      log,
-    );
-    for (const [name, skill] of Object.entries(fromPlugin)) {
-      const previous = owner.get(name);
-      if (previous !== undefined) {
+    const skillsDir = join(pluginRoot(data, plugin.name), "skills");
+    const listing = await listPluginSkills(pluginRoot(data, plugin.name));
+    for (const line of listing.diagnostics)
+      log(`[skills] plugin ${plugin.name}: ${line}`);
+    for (const ref of listing.skills) {
+      if (Object.hasOwn(own, ref.name)) {
         log(
-          `[skills] plugin skill ${name} from ${plugin.name} skipped: ${previous} already provides it`,
+          `[skills] plugin skill ${ref.name} from ${plugin.name} shadowed by data/custom/agent/skills`,
         );
         continue;
       }
-      owner.set(name, plugin.name);
-      skills[name] = skill;
-    }
-  }
-
-  for (const [name, skill] of Object.entries(
-    await readCustomSkills(customSkillsDir(), log),
-  )) {
-    const previous = owner.get(name);
-    if (previous !== undefined)
-      log(
-        `[skills] plugin skill ${name} from ${previous} shadowed by data/custom/agent/skills`,
+      const previous = owner.get(ref.name);
+      if (previous !== undefined) {
+        log(
+          `[skills] plugin skill ${ref.name} from ${plugin.name} skipped: ${previous} already provides it`,
+        );
+        continue;
+      }
+      owner.set(ref.name, plugin.name);
+      const skill = await readOne(
+        skillsDir,
+        ref.name,
+        "package",
+        ref.name,
+        log,
+        "plugin skill",
       );
-    skills[name] = skill;
+      if (skill) skills[ref.name] = skill;
+    }
   }
   return skills;
 }

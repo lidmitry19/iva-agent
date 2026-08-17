@@ -7,6 +7,8 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -18,7 +20,12 @@ import {
   readCustomSkills,
   readLiveSkills,
 } from "./custom-skills.ts";
-import { writePluginsState, type PluginEntry } from "./plugin-store.ts";
+import { readPlugin } from "./plugin-reader.ts";
+import {
+  pluginsStateFile,
+  writePluginsState,
+  type PluginEntry,
+} from "./plugin-store.ts";
 
 const worlds: string[] = [];
 
@@ -311,6 +318,7 @@ function pluginEntry(name: string, enabled = true): PluginEntry {
     source: `./${name}`,
     ref: "",
     sha: "",
+    digest: "",
     enabled,
     trusted: false,
     installedAt: "2026-08-17T10:00:00.000Z",
@@ -426,6 +434,50 @@ test("the owner's own skill wins over a plugin skill of the same name", async ()
   ]);
 });
 
+test("a plugin skill without frontmatter is not served, exactly as the reader says", async () => {
+  const data = await liveWorld([pluginEntry("trace")], (dir) => {
+    // Тот же скилл, что отверг бы `iva plugin add`: без frontmatter он не скилл
+    // по спеке Agent Skills, и агенту его видеть нельзя — иначе гейт коллизий на
+    // установке проверяет один набор, а ход грузит другой.
+    write(
+      dir,
+      "custom/plugins/trace/skills/loose/SKILL.md",
+      "Just a body, no frontmatter.\n",
+    );
+    write(
+      dir,
+      "custom/plugins/trace/skills/named/SKILL.md",
+      "---\nname: named\ndescription: Proper.\n---\n\nBody.\n",
+    );
+    write(
+      dir,
+      "custom/plugins/trace/skills/привет/SKILL.md",
+      "---\nname: hi\ndescription: Unicode name.\n---\n\nBody.\n",
+    );
+    write(
+      dir,
+      "custom/plugins/trace/plugin.json",
+      JSON.stringify({
+        $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        name: "trace",
+      }),
+    );
+  });
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), ["named"]);
+  const fromReader = await readPlugin(join(data, "custom/plugins/trace"));
+  assert.deepEqual(
+    fromReader.skills.map((skill) => skill.name),
+    Object.keys(skills),
+    "the reader and the live resolver must list the same skills",
+  );
+  assert.deepEqual(log, [
+    "[skills] plugin trace: skills/loose: skipped: SKILL.md has no frontmatter",
+    "[skills] plugin trace: skills/привет: skipped: name must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+  ]);
+});
+
 test("a plugin skills directory keeps the package form only", async () => {
   const data = await liveWorld([pluginEntry("trace")], (dir) => {
     write(
@@ -443,7 +495,9 @@ test("a plugin skills directory keeps the package form only", async () => {
 
   const { skills, log } = await live(data);
   assert.deepEqual(Object.keys(skills), ["good"]);
-  assert.deepEqual(log, ["[skills] plugin skill empty skipped: no SKILL.md"]);
+  assert.deepEqual(log, [
+    "[skills] plugin trace: skills/empty: skipped: no SKILL.md",
+  ]);
 });
 
 test("no plugins.json at all leaves the own custom layer untouched", async () => {
@@ -460,7 +514,7 @@ test("no plugins.json at all leaves the own custom layer untouched", async () =>
   assert.deepEqual(log, []);
 });
 
-test("a damaged plugins.json costs the turn no skills and says so once", async () => {
+test("a damaged plugins.json costs no skills, says so once, and is never touched", async () => {
   const data = world();
   write(data, "custom/plugins.json", "{ broken");
   write(
@@ -468,9 +522,25 @@ test("a damaged plugins.json costs the turn no skills and says so once", async (
     "custom/agent/skills/own.md",
     "---\ndescription: Mine.\n---\n\nBody.\n",
   );
+  write(
+    data,
+    "custom/plugins/trace/skills/viewer/SKILL.md",
+    "---\nname: viewer\ndescription: From the plugin.\n---\n\nBody.\n",
+  );
 
-  const { skills, log } = await live(data);
-  assert.deepEqual(Object.keys(skills), ["own"]);
-  assert.equal(log.length, 1);
-  assert.match(log[0], /plugins\.json unusable/u);
+  const first = await live(data);
+  assert.deepEqual(Object.keys(first.skills), ["own"]);
+  assert.equal(first.log.length, 1);
+  assert.match(first.log[0], /not valid JSON/u);
+
+  // Второй ход: файл на месте, байт в байт, и второй строки в логе нет.
+  const second = await live(data);
+  assert.deepEqual(Object.keys(second.skills), ["own"]);
+  assert.deepEqual(second.log, []);
+  assert.equal(readFileSync(pluginsStateFile(data), "utf8"), "{ broken");
+  assert.deepEqual(readdirSync(join(data, "custom")).sort(), [
+    "agent",
+    "plugins",
+    "plugins.json",
+  ]);
 });

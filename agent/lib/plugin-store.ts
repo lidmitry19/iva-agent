@@ -1,19 +1,21 @@
-// Стор плагинов и его состояние: где лежит плагин и что о нём известно (ADR-0009).
+// Где лежит плагин и что о нём известно (ADR-0009).
 //
-// Один стор — `data/custom/plugins/<name>/`. Плагин живёт в Custom layer, поэтому
-// переживает `iva update` и не трогает Authored tree. Один файл состояния —
+// Папка плагинов одна — `data/custom/plugins/<name>/`. Плагин живёт в Custom layer,
+// поэтому переживает `iva update` и не трогает Authored tree. Файл состояния один —
 // `data/custom/plugins.json`: намерение (что владелец поставил) и факт (какой sha
 // стоит) лежат рядом, отдельного lock-файла нет. Файл — источник истины: `iva plugin
-// sync` восстанавливает по нему стор, если папку снесли или инсталляцию переехали.
+// sync` восстанавливает по нему установку, если папку снесли или инсталляцию переехали.
 //
 // `PLUGIN_DATA` (`data/plugin-data/<name>/`) обязан переживать обновление плагина
-// (спека §9.1), поэтому лежит ВНЕ стора и при `remove` не удаляется.
+// (спека §9.1), поэтому лежит рядом, а не внутри, и при `remove` не удаляется.
 //
-// Чтение состояния терпит мусор: битая запись выбрасывается, остальные остаются.
-// Так резолвер скиллов не теряет ход из-за одной руками поправленной строки.
-import { mkdir } from "node:fs/promises";
+// Чтение НИЧЕГО не пишет. Это правило, а не деталь: состояние читает каждый ход
+// агента, и «починка» битого файла на горячем пути однажды уже означала бы, что
+// владелец теряет список плагинов молча, посреди разговора. Битую запись выбрасываем,
+// битый файл отдаём вызывающему как ошибку — решать, что с ним делать, ему.
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { loadJsonStrict, saveJsonAtomic } from "./json-store.ts";
+import { saveJsonAtomic } from "./json-store.ts";
 import { pluginNameProblem } from "./plugin-reader.ts";
 
 export type PluginEntry = {
@@ -24,6 +26,8 @@ export type PluginEntry = {
   readonly ref: string;
   /** Что стоит: sha коммита; для локальной папки — пусто. */
   readonly sha: string;
+  /** Отпечаток содержимого папки на момент установки; пусто — неизвестен. */
+  readonly digest: string;
   readonly enabled: boolean;
   /** Разрешение поднимать MCP-серверы плагина. Тумблер отдельный (ADR-0009). */
   readonly trusted: boolean;
@@ -37,12 +41,18 @@ export type PluginsState = {
   readonly riskNoticeShownAt?: string;
 };
 
+/** Что дало чтение файла: состояние всегда, ошибка — если файл не читается. */
+export type PluginsStateRead = {
+  readonly state: PluginsState;
+  readonly damaged: Error | null;
+};
+
 export const EMPTY_PLUGINS_STATE: PluginsState = {
   marketplaces: [],
   plugins: [],
 };
 
-/** Каталог стора: `data/custom/plugins/`. */
+/** Каталог с плагинами: `data/custom/plugins/`. */
 export function pluginsDir(dataDir: string): string {
   return join(dataDir, "custom", "plugins");
 }
@@ -78,6 +88,7 @@ function normalizeEntry(raw: unknown): PluginEntry | null {
     source: string(raw.source),
     ref: string(raw.ref),
     sha: string(raw.sha),
+    digest: string(raw.digest),
     // Отсутствующий тумблер читается как «включён»: запись есть — плагин поставлен.
     enabled: raw.enabled !== false,
     trusted: raw.trusted === true,
@@ -114,13 +125,52 @@ export function normalizePluginsState(raw: unknown): PluginsState {
 }
 
 /**
- * Состояние с диска. Файла нет — пустое состояние; файл битый — ошибка наружу с
- * бэкапом (loadJsonStrict), потому что молча начать с пустого значило бы стереть
- * следующей записью все плагины владельца.
+ * Состояние из конкретного файла, без единой записи на диск. Файла нет — пустое
+ * состояние без ошибки; файл битый — пустое состояние ПЛЮС ошибка, а сам файл
+ * остаётся лежать как есть: его ещё чинить.
+ */
+export async function readPluginsStateFile(
+  file: string,
+): Promise<PluginsStateRead> {
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { state: EMPTY_PLUGINS_STATE, damaged: null };
+    return {
+      state: EMPTY_PLUGINS_STATE,
+      damaged: new Error(`${file} unreadable: ${(error as Error).message}`),
+    };
+  }
+  try {
+    return { state: normalizePluginsState(JSON.parse(raw)), damaged: null };
+  } catch (error) {
+    return {
+      state: EMPTY_PLUGINS_STATE,
+      damaged: new Error(
+        `${file} is not valid JSON (${(error as Error).message}) — fix it or run: iva plugin sync`,
+      ),
+    };
+  }
+}
+
+/** То же для инсталляции: `data/custom/plugins.json`. */
+export function readPluginsStateSafe(
+  dataDir: string,
+): Promise<PluginsStateRead> {
+  return readPluginsStateFile(pluginsStateFile(dataDir));
+}
+
+/**
+ * Состояние для команды владельца: битый файл — ошибка наружу. Команда, которая
+ * молча пошла бы дальше на пустом состоянии, сказала бы «плагин не установлен» про
+ * стоящий плагин и предложила поставить его заново поверх.
  */
 export async function readPluginsState(dataDir: string): Promise<PluginsState> {
-  const raw = await loadJsonStrict<unknown>(pluginsStateFile(dataDir), null);
-  return normalizePluginsState(raw);
+  const { state, damaged } = await readPluginsStateSafe(dataDir);
+  if (damaged) throw damaged;
+  return state;
 }
 
 /** Атомарная запись состояния (tmp + rename): читатель не увидит полуфайл. */

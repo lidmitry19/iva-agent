@@ -27,12 +27,12 @@ export type PluginSource =
     };
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//iu;
-const SCP_LIKE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:/u;
-// A path segment of a shorthand source. `.` and `..` are excluded on purpose: a
-// subdirectory that climbs would name a directory outside the fetched checkout, and
-// the installer would then move THAT into the store.
-const SEGMENT = /^[A-Za-z0-9._-]+$/u;
-const DOTS = /^\.{1,2}$/u;
+const SCP_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*:/u;
+// A path segment of a shorthand source. It starts alphanumeric on purpose, which
+// rules out two things at once: `.`/`..`, which would name a directory outside the
+// fetched checkout (and the installer would then move THAT into the plugins folder),
+// and a leading `-`, which arrives at git as an option rather than a path.
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 // A ref is one or more path segments: `main`, `v1.2`, `feature/x`, `refs/tags/v1`,
 // a sha. Slashes are what makes the `@` split delicate - see splitRef. The first
 // character is alphanumeric so a ref can never arrive at git looking like an option.
@@ -96,10 +96,7 @@ export function parsePluginSource(raw: string): PluginSource {
 
   const { base, ref } = splitRef(value, 0);
   const parts = base.split("/");
-  if (
-    parts.length < 2 ||
-    !parts.every((part) => SEGMENT.test(part) && !DOTS.test(part))
-  )
+  if (parts.length < 2 || !parts.every((part) => SEGMENT.test(part)))
     throw new Error(
       `unknown plugin source ${JSON.stringify(raw)} - use ./path, owner/repo[/subdir], https://… or git@…`,
     );

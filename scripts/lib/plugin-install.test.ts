@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 // Как плагин попадает на диск: разрешение ref, shallow-fetch одного sha, sparse-checkout
-// подпапки, копия локальной папки и переезд в стор. Всё против настоящего git и
+// подпапки, копия локальной папки и переезд на место. Всё против настоящего git и
 // настоящего локального bare-репозитория — подделывать здесь нечего.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -18,10 +19,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
+import { walkPluginTree } from "#lib/plugin-reader.ts";
 import {
   copyPluginTree,
   fetchGitPlugin,
-  localChanges,
   resolveRemoteSha,
   swapIntoStore,
   type GitRunner,
@@ -190,23 +191,31 @@ test("an unusable sha is refused before git is touched", () => {
   assert.equal(existsSync(join(staging, ".git")), false);
 });
 
-test("copying a folder keeps the executable bit and never follows a symlink out", async () => {
+test("copying a folder preserves the mode of every file, and follows no symlink out", async () => {
   const source = world();
   write(source, "plugin.json", '{"name":"demo"}');
   write(source, "scripts/run.sh", "#!/bin/sh\necho hi\n");
   chmodSync(join(source, "scripts/run.sh"), 0o755);
+  write(source, "private.txt", "read only\n");
+  chmodSync(join(source, "private.txt"), 0o600);
   write(source, ".git/HEAD", "ref: refs/heads/main\n");
 
   const destination = join(world(), "copy");
   await copyPluginTree(source, destination);
 
+  // Режим сверяем с тем, что видел обход, а не с ожиданиями платформы: иначе тест
+  // проходил бы там, где копирование бит запуска теряет.
+  for (const file of await walkPluginTree(source)) {
+    const copied = statSync(join(destination, ...file.path.split("/")));
+    assert.equal(
+      copied.mode & 0o777,
+      file.mode & 0o777,
+      `${file.path} changed mode on the way`,
+    );
+  }
   assert.equal(
     readFileSync(join(destination, "plugin.json"), "utf8"),
     '{"name":"demo"}',
-  );
-  assert.equal(
-    statSync(join(destination, "scripts/run.sh")).mode & 0o111,
-    0o111,
   );
   // `.git` в корне — служебные объекты git, не содержимое плагина.
   assert.equal(existsSync(join(destination, ".git")), false);
@@ -220,21 +229,52 @@ test("copying a folder keeps the executable bit and never follows a symlink out"
   );
 });
 
-test("local changes are visible in a checkout and unknown in a plain copy", () => {
-  const remote = fixture();
-  const staging = world();
-  fetchGitPlugin(git, staging, remote.url, remote.sha, null);
+test("a value that looks like an option never reaches git", () => {
+  let calls = 0;
+  const counting: GitRunner = (args, cwd) => {
+    calls += 1;
+    return git(args, cwd);
+  };
 
-  assert.equal(localChanges(git, staging), "");
-  writeFileSync(join(staging, "notes.md"), "mine\n");
-  assert.match(localChanges(git, staging) ?? "", /notes\.md/u);
-
-  const plain = world();
-  writeFileSync(join(plain, "plugin.json"), "{}");
-  assert.equal(localChanges(git, plain), null);
+  assert.throws(
+    () => resolveRemoteSha(counting, "-u/tmp/evil", null),
+    /would read as an option/u,
+  );
+  assert.throws(
+    () => resolveRemoteSha(counting, "file:///tmp/x.git", "--upload-pack"),
+    /would read as an option/u,
+  );
+  assert.throws(
+    () =>
+      fetchGitPlugin(
+        counting,
+        world(),
+        "file:///tmp/x.git",
+        "0".repeat(40),
+        "--stdin",
+      ),
+    /would read as an option/u,
+  );
+  assert.equal(calls, 0, "git must not be reached at all");
 });
 
-test("the swap replaces the store copy and leaves nothing behind", () => {
+test("a swap that cannot finish puts the previous copy back", () => {
+  const base = world();
+  const store = join(base, "store", "demo");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "plugin.json"), '{"name":"old"}');
+
+  // Источника переезда нет — rename обязан упасть, а прежняя копия остаться там же.
+  assert.throws(() => swapIntoStore(join(base, "never-staged"), store));
+
+  assert.equal(
+    readFileSync(join(store, "plugin.json"), "utf8"),
+    '{"name":"old"}',
+  );
+  assert.deepEqual(readdirSync(join(base, "store")), ["demo"]);
+});
+
+test("the swap replaces the installed copy and leaves nothing behind", () => {
   const base = world();
   const store = join(base, "store", "demo");
   mkdirSync(store, { recursive: true });

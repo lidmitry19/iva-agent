@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { PluginsState } from "#lib/plugin-store.ts";
+import { leftoverPluginDirs } from "./plugin.ts";
+import { tryLoadPluginCore } from "../lib/plugin-core.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
 import { readMemoryMaintenanceReport } from "../lib/memory-maintenance.ts";
@@ -458,51 +459,50 @@ export function createDoctorCommand(
 
     async function checkPlugins(): Promise<void> {
       // Плагины читает authored tree, а доктор обязан работать и на установке, где
-      // его нет (ADR-0003) — отсюда импорт по требованию и честная строка вместо
-      // падения, когда импортировать нечего.
-      let reader: typeof import("#lib/plugin-reader.ts");
-      let plugins: typeof import("#lib/plugin-store.ts");
-      try {
-        reader = await import("#lib/plugin-reader.ts");
-        plugins = await import("#lib/plugin-store.ts");
-      } catch {
+      // его нет (ADR-0003) — отсюда загрузка по требованию и честная строка вместо
+      // падения, когда загружать нечего.
+      const core = await tryLoadPluginCore();
+      if (!core) {
         warn(
           "plugins not checked: the agent tree is missing — run: iva update",
         );
         warnN++;
         return;
       }
-      const { readPlugin } = reader;
-      const { pluginRoot, pluginsDir, pluginsStateFile, readPluginsState } =
-        plugins;
-      const store = pluginsDir(dataDirectory);
-      const stateFile = pluginsStateFile(dataDirectory);
-      let state: PluginsState | null = null;
-      if (existsSync(stateFile)) {
-        try {
-          state = await readPluginsState(dataDirectory);
-        } catch (error) {
-          bad(`plugins.json unusable: ${(error as Error).message}`);
-          badN++;
-          return;
-        }
+      const { readPlugin } = core.reader;
+      const { pluginRoot, pluginsDir, readPluginsStateSafe } = core.store;
+      const directory = pluginsDir(dataDirectory);
+      const { state, damaged } = await readPluginsStateSafe(dataDirectory);
+      if (damaged) {
+        bad(`plugins.json is unusable: ${damaged.message}`);
+        badN++;
+        return;
       }
-      const folders = existsSync(store)
-        ? readdirSync(store, { withFileTypes: true })
+      const leftovers = new Set(leftoverPluginDirs(directory));
+      const folders = existsSync(directory)
+        ? readdirSync(directory, { withFileTypes: true })
             .filter(
-              (entry) => entry.isDirectory() && !entry.name.startsWith("."),
+              (entry) =>
+                entry.isDirectory() &&
+                !entry.name.startsWith(".") &&
+                !leftovers.has(entry.name),
             )
             .map((entry) => entry.name)
         : [];
       // Плагинов нет вообще — доктору сказать нечего, и молчание здесь честнее
       // строки «0 плагинов» в отчёте установки, которая их никогда не видела.
-      if (!state && folders.length === 0) return;
+      if (
+        state.plugins.length === 0 &&
+        folders.length === 0 &&
+        leftovers.size === 0
+      )
+        return;
 
-      for (const entry of state?.plugins ?? []) {
+      for (const entry of state.plugins) {
         const root = pluginRoot(dataDirectory, entry.name);
         if (!existsSync(root)) {
           bad(
-            `plugin ${entry.name} is missing from the store — run: iva plugin sync`,
+            `plugin ${entry.name} is missing from data/custom/plugins/ — run: iva plugin sync`,
           );
           badN++;
           continue;
@@ -530,9 +530,15 @@ export function createDoctorCommand(
       }
 
       for (const name of folders) {
-        if (state?.plugins.some((entry) => entry.name === name)) continue;
+        if (state.plugins.some((entry) => entry.name === name)) continue;
         warn(
-          `plugin folder ${name} is not in plugins.json — reinstall it with iva plugin add, or delete the folder`,
+          `plugin folder ${name} is not in plugins.json — run: iva plugin sync`,
+        );
+        warnN++;
+      }
+      for (const name of leftovers) {
+        warn(
+          `plugin folder ${name} is a leftover of an interrupted install — run: iva plugin sync`,
         );
         warnN++;
       }

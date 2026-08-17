@@ -3,12 +3,13 @@
 //
 // Спека (agent-plugins.org/specification) исполняется буквально: закрытая схема
 // `plugin.json`, ровно два нефатальных нарушения (лишнее поле верхнего уровня и
-// `extensions` не объект), `skills/` только непосредственными детьми без рекурсии,
-// `mcp.json` закрытый и с версией `$schema` как у манифеста, containment всех путей.
-// Схема НИКОГДА не тянется из сети: валидация локальная, иначе установка плагина
-// зависела бы от чужого сайта (спека это запрещает прямым MUST NOT).
+// `extensions` не объект), `mcp.json` закрытый и с версией `$schema` как у манифеста,
+// containment всех путей. Схема НИКОГДА не тянется из сети: валидация локальная,
+// иначе установка плагина зависела бы от чужого сайта (спека это запрещает прямым
+// MUST NOT). Список скиллов живёт отдельно, в plugin-skills.ts: его читает и живой
+// резолвер, и ответ должен быть один.
 //
-// Строже спеки в трёх местах, как NanoClaw (спека это разрешает): симлинки внутри
+// Строже спеки в двух местах, как NanoClaw (спека это разрешает): симлинки внутри
 // плагина отвергаем целиком (lstat, без единого follow), и держим потолки
 // 2000 записей / 50 МБ / 16 уровней. Дешевле объяснить автору плагина отказ, чем
 // разбирать, куда ушёл симлинк на `~/.ssh`.
@@ -17,19 +18,20 @@
 // валит остальные — плагин с поломанным `mcp.json` обязан отдать свои скиллы.
 // Границы отказа от узкой к широкой (§4.1 спеки): манифест вне корня → плагин
 // отклонён; фиксированное место компоненты не того типа → выключена компонента;
-// `SKILL.md` вне корня → пропущен один скилл; путь записи MCP вне корня →
+// `SKILL.md` не на месте → пропущен один скилл; путь записи MCP вне корня →
 // пропущена одна запись.
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
-import { parseFrontmatter } from "./frontmatter.ts";
+import { listPluginSkills, type PluginSkillRef } from "./plugin-skills.ts";
 
 export const PLUGIN_SCHEMA_URL =
   "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 export const MCP_SCHEMA_URL =
   "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
-export const PLUGIN_MANIFEST_FILE = "plugin.json";
-export const PLUGIN_MCP_FILE = "mcp.json";
+const PLUGIN_MANIFEST_FILE = "plugin.json";
+const PLUGIN_MCP_FILE = "mcp.json";
 
 /** Наш reverse-domain namespace: ключ в `extensions` и папка в корне (ADR-0009). */
 export const IVA_NAMESPACE = "sh.iva";
@@ -39,10 +41,6 @@ export const IVA_NAMESPACE = "sh.iva";
 export const MAX_PLUGIN_ENTRIES = 2000;
 export const MAX_PLUGIN_BYTES = 50 * 1024 * 1024;
 export const MAX_PLUGIN_DEPTH = 16;
-
-// Имя скилла становится ОДНИМ сегментом пути в песочнице eve и проверяется там же
-// (см. custom-skills.ts) — правило продублировано, чтобы плагин не уронил ход.
-const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 const NAME_MAX = 64;
 // Регэксп спеки §5.5 без lookahead: запрет `--` и `..` проверяется отдельно —
@@ -76,12 +74,6 @@ export type PluginManifest = {
   readonly extensions: Readonly<Record<string, unknown>>;
 };
 
-export type PluginSkillRef = {
-  readonly name: string;
-  /** Путь относительно корня плагина, POSIX-разделители. */
-  readonly path: string;
-};
-
 export type PluginMcpServer =
   | {
       readonly type: "stdio";
@@ -109,11 +101,6 @@ export type PluginReport = {
   readonly diagnostics: readonly string[];
 };
 
-/** Отказ, который валит плагин целиком. Наружу из `readPlugin` не выходит. */
-export class PluginRejected extends Error {
-  override readonly name = "PluginRejected";
-}
-
 export type PluginFile = {
   /** Путь относительно корня плагина, POSIX-разделители. */
   readonly path: string;
@@ -129,7 +116,7 @@ function reason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function code(error: unknown): string | undefined {
+function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String(error.code)
     : undefined;
@@ -149,12 +136,12 @@ export function pluginNameProblem(name: unknown): string | null {
 
 /**
  * Обход дерева плагина с проверкой каждой записи. Возвращает обычные файлы.
- * Кидает `PluginRejected` на первом же симлинке, спецфайле, выходе за корень или
- * пробитом потолке — вызывающий обязан считать это отказом всему плагину.
+ * Кидает на первом же симлинке, спецфайле или пробитом потолке — вызывающий обязан
+ * считать это отказом всему плагину.
  *
- * Каталог `.git` в КОРНЕ пропускается: стор держит плагин git-источника как
- * checkout на запиненном sha (ADR-0009), и служебные объекты git — не содержимое
- * плагина. Внутри плагина `.git` уже считается обычной папкой.
+ * Каталог `.git` в КОРНЕ пропускается: папка плагина из git-источника — это
+ * checkout на запиненном sha (ADR-0009), и служебные объекты git плагину
+ * не принадлежат.
  */
 export async function walkPluginTree(
   root: string,
@@ -164,10 +151,12 @@ export async function walkPluginTree(
   try {
     rootStat = await lstat(resolvedRoot);
   } catch (error) {
-    throw new PluginRejected(`plugin root unreadable: ${reason(error)}`);
+    throw new Error(`plugin root unreadable: ${reason(error)}`, {
+      cause: error,
+    });
   }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory())
-    throw new PluginRejected("plugin root must be a regular directory");
+  if (!rootStat.isDirectory())
+    throw new Error("plugin root must be a regular directory");
 
   const files: PluginFile[] = [];
   // Каталоги считаются наравне с файлами: бомба из пустых папок обязана пробить
@@ -183,49 +172,31 @@ export async function walkPluginTree(
     try {
       listing = await readdir(absoluteDir, { withFileTypes: true });
     } catch (error) {
-      throw new PluginRejected(
-        `${relativeDir || "."} unreadable: ${reason(error)}`,
-      );
+      throw new Error(`${relativeDir || "."} unreadable: ${reason(error)}`, {
+        cause: error,
+      });
     }
     for (const entry of listing.sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const name = entry.name;
-      // readdir не возвращает разделителей и точечных записей, но весь смысл этого
-      // обхода — не доверять дереву, которое принесли снаружи.
-      if (
-        name.includes("/") ||
-        name.includes("\\") ||
-        name === "." ||
-        name === ".."
-      )
-        throw new PluginRejected(
-          `entry name ${JSON.stringify(name)} not allowed`,
-        );
-      const path = relativeDir ? `${relativeDir}/${name}` : name;
-      if (!relativeDir && name === ".git") continue;
+      const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (!relativeDir && entry.name === ".git") continue;
       if (entry.isSymbolicLink())
-        throw new PluginRejected(
-          `${path} is a symlink; symlinks are not allowed`,
-        );
+        throw new Error(`${path} is a symlink; symlinks are not allowed`);
       if (depth + 1 > MAX_PLUGIN_DEPTH)
-        throw new PluginRejected(
-          `${path} is deeper than ${MAX_PLUGIN_DEPTH} levels`,
-        );
+        throw new Error(`${path} is deeper than ${MAX_PLUGIN_DEPTH} levels`);
       entries += 1;
       if (entries > MAX_PLUGIN_ENTRIES)
-        throw new PluginRejected(`more than ${MAX_PLUGIN_ENTRIES} entries`);
+        throw new Error(`more than ${MAX_PLUGIN_ENTRIES} entries`);
       if (entry.isDirectory()) {
         await visit(path, depth + 1);
         continue;
       }
       if (!entry.isFile())
-        throw new PluginRejected(`${path} is not a regular file or directory`);
-      const stat = await lstat(join(absoluteDir, name));
+        throw new Error(`${path} is not a regular file or directory`);
+      const stat = await lstat(join(absoluteDir, entry.name));
       files.push({ path, size: stat.size, mode: stat.mode });
       bytes += stat.size;
       if (bytes > MAX_PLUGIN_BYTES)
-        throw new PluginRejected(
-          `total size exceeds ${MAX_PLUGIN_BYTES} bytes`,
-        );
+        throw new Error(`total size exceeds ${MAX_PLUGIN_BYTES} bytes`);
     }
   }
 
@@ -234,10 +205,29 @@ export async function walkPluginTree(
 }
 
 /**
+ * Отпечаток содержимого папки плагина: пути, бит запуска и байты каждого файла.
+ * По нему `iva plugin update` узнаёт, что папку правили руками, — одинаково для
+ * git-источника, подпапки и локальной копии.
+ */
+export async function pluginTreeDigest(root: string): Promise<string> {
+  const files = await walkPluginTree(root);
+  const digest = createHash("sha256");
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : 1))) {
+    const content = createHash("sha256")
+      .update(await readFile(join(root, ...file.path.split("/"))))
+      .digest("hex");
+    digest.update(
+      `${file.path}\0${file.mode & 0o111 ? "x" : "-"}\0${content}\n`,
+    );
+  }
+  return digest.digest("hex");
+}
+
+/**
  * Путь внутри корня — или null. Симлинков в дереве уже нет (их отверг обход),
  * поэтому containment проверяется лексически, без единого follow.
  */
-export function containedPath(root: string, candidate: string): string | null {
+function containedPath(root: string, candidate: string): string | null {
   const resolvedRoot = resolve(root);
   const target = isAbsolute(candidate)
     ? resolve(candidate)
@@ -260,50 +250,45 @@ function climbsOut(path: string): boolean {
   return normalized === ".." || normalized.startsWith("../");
 }
 
-/** Разбор `plugin.json`. Фатальное нарушение — `PluginRejected`. */
-export function parsePluginManifest(
+/** Разбор `plugin.json`. Фатальное нарушение — исключение. */
+function parsePluginManifest(
   raw: unknown,
   diagnostics: string[],
 ): PluginManifest {
   if (!isPlainObject(raw))
-    throw new PluginRejected(`${PLUGIN_MANIFEST_FILE} must be a JSON object`);
+    throw new Error(`${PLUGIN_MANIFEST_FILE} must be a JSON object`);
 
   if (raw.$schema !== PLUGIN_SCHEMA_URL)
-    throw new PluginRejected(
+    throw new Error(
       `${PLUGIN_MANIFEST_FILE} $schema must be ${JSON.stringify(PLUGIN_SCHEMA_URL)}`,
     );
 
   const nameProblem = pluginNameProblem(raw.name);
-  if (nameProblem)
-    throw new PluginRejected(`${PLUGIN_MANIFEST_FILE} ${nameProblem}`);
+  if (nameProblem) throw new Error(`${PLUGIN_MANIFEST_FILE} ${nameProblem}`);
 
   for (const field of MANIFEST_STRING_FIELDS) {
     if (raw[field] !== undefined && typeof raw[field] !== "string")
-      throw new PluginRejected(
-        `${PLUGIN_MANIFEST_FILE} ${field} must be a string`,
-      );
+      throw new Error(`${PLUGIN_MANIFEST_FILE} ${field} must be a string`);
   }
   if (raw.keywords !== undefined) {
     if (
       !Array.isArray(raw.keywords) ||
       !raw.keywords.every((keyword) => typeof keyword === "string")
     )
-      throw new PluginRejected(
+      throw new Error(
         `${PLUGIN_MANIFEST_FILE} keywords must be an array of strings`,
       );
   }
   if (raw.author !== undefined) {
     if (!isPlainObject(raw.author))
-      throw new PluginRejected(
-        `${PLUGIN_MANIFEST_FILE} author must be an object`,
-      );
+      throw new Error(`${PLUGIN_MANIFEST_FILE} author must be an object`);
     for (const [key, value] of Object.entries(raw.author)) {
       if (!AUTHOR_FIELDS.has(key))
-        throw new PluginRejected(
+        throw new Error(
           `${PLUGIN_MANIFEST_FILE} author has unknown field ${JSON.stringify(key)}`,
         );
       if (typeof value !== "string")
-        throw new PluginRejected(
+        throw new Error(
           `${PLUGIN_MANIFEST_FILE} author.${key} must be a string`,
         );
     }
@@ -317,6 +302,18 @@ export function parsePluginManifest(
       diagnostics.push(
         `${PLUGIN_MANIFEST_FILE}: extensions is not an object; ignored`,
       );
+  }
+  // Чужой namespace не валидируем вовсе (§8.1), свой — обязан быть объектом.
+  if (
+    IVA_NAMESPACE in extensions &&
+    !isPlainObject(extensions[IVA_NAMESPACE])
+  ) {
+    diagnostics.push(
+      `${PLUGIN_MANIFEST_FILE}: extensions["${IVA_NAMESPACE}"] is not an object; ignored`,
+    );
+    extensions = Object.fromEntries(
+      Object.entries(extensions).filter(([key]) => key !== IVA_NAMESPACE),
+    );
   }
   for (const key of Object.keys(raw)) {
     if (!MANIFEST_FIELDS.has(key))
@@ -333,97 +330,6 @@ export function parsePluginManifest(
       : {}),
     extensions,
   };
-}
-
-/** Причина, по которой скилл не годится, или null. */
-function skillProblem(markdown: string): string | null {
-  let fields;
-  try {
-    fields = parseFrontmatter(markdown).fields;
-  } catch (error) {
-    return `SKILL.md frontmatter is damaged: ${reason(error)}`;
-  }
-  if (!fields) return "SKILL.md has no frontmatter";
-  for (const field of ["name", "description"] as const) {
-    const value = fields[field];
-    if (typeof value !== "string" || !value.trim())
-      return `SKILL.md frontmatter is missing ${JSON.stringify(field)}`;
-  }
-  return null;
-}
-
-async function readSkills(
-  root: string,
-  diagnostics: string[],
-): Promise<readonly PluginSkillRef[]> {
-  const skillsDir = join(root, "skills");
-  let stat;
-  try {
-    stat = await lstat(skillsDir);
-  } catch (error) {
-    // Нет каталога — не ошибка (§6.2).
-    if (code(error) !== "ENOENT")
-      diagnostics.push(`skills: unreadable: ${reason(error)}`);
-    return [];
-  }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    diagnostics.push("skills: not a directory; skills component skipped");
-    return [];
-  }
-
-  const skills: PluginSkillRef[] = [];
-  const listing = await readdir(skillsDir, { withFileTypes: true });
-  for (const entry of listing.sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (entry.isSymbolicLink()) {
-      diagnostics.push(
-        `skills/${entry.name}: skipped: symlinks are not allowed`,
-      );
-      continue;
-    }
-    // Обычный файл в `skills/` просто не скилл: рекурсии нет, дети только папки (§7.1).
-    if (!entry.isDirectory()) continue;
-    if (!SAFE_SKILL_NAME.test(entry.name)) {
-      diagnostics.push(
-        `skills/${entry.name}: skipped: name must match ${SAFE_SKILL_NAME.source}`,
-      );
-      continue;
-    }
-    const markdownPath = containedPath(
-      root,
-      join(skillsDir, entry.name, "SKILL.md"),
-    );
-    if (!markdownPath) {
-      diagnostics.push(
-        `skills/${entry.name}: skipped: SKILL.md resolves outside the plugin root`,
-      );
-      continue;
-    }
-    let markdown: string;
-    try {
-      const markdownStat = await lstat(markdownPath);
-      if (markdownStat.isSymbolicLink() || !markdownStat.isFile()) {
-        diagnostics.push(
-          `skills/${entry.name}: skipped: SKILL.md is not a regular file`,
-        );
-        continue;
-      }
-      markdown = await readFile(markdownPath, "utf8");
-    } catch (error) {
-      diagnostics.push(
-        `skills/${entry.name}: skipped: ${
-          code(error) === "ENOENT" ? "no SKILL.md" : reason(error)
-        }`,
-      );
-      continue;
-    }
-    const problem = skillProblem(markdown);
-    if (problem) {
-      diagnostics.push(`skills/${entry.name}: skipped: ${problem}`);
-      continue;
-    }
-    skills.push({ name: entry.name, path: `skills/${entry.name}` });
-  }
-  return skills;
 }
 
 /** Разбор одной записи `mcpServers`: сервер или причина пропуска строкой. */
@@ -449,6 +355,9 @@ function parseMcpServer(
     } catch {
       return "url must be an absolute http(s) URL";
     }
+    // Дальше — дословные MUST спеки §7.2.1: абсолютный http(s), без user info и
+    // фрагмента, http только на loopback, имена заголовков не повторяются в другом
+    // регистре. Своей политики здесь нет.
     if (url.protocol !== "https:" && url.protocol !== "http:")
       return "url must be an absolute http(s) URL";
     if (url.username || url.password)
@@ -458,7 +367,7 @@ function parseMcpServer(
       url.hostname === "localhost" ||
       url.hostname === "127.0.0.1" ||
       url.hostname === "[::1]" ||
-      url.hostname === "::1";
+      /^127\.\d+\.\d+\.\d+$/u.test(url.hostname);
     if (url.protocol === "http:" && !loopback)
       return "http is allowed only for loopback URLs";
     const headers = entry.headers;
@@ -485,17 +394,25 @@ function parseMcpServer(
   }
 
   // command — ОДИН токен: голое имя или `./`-путь внутри корня. Ни шелл-строки,
-  // ни раскрытия плейсхолдеров здесь спека не допускает (§7.2.1).
+  // ни раскрытия плейсхолдеров здесь спека не допускает (§7.2.1). Ведущий дефис
+  // отвергаем сами: такой «исполняемый файл» приезжает опцией в чужой разбор
+  // аргументов, и запускать его никто не собирается.
   const command = entry.command;
   if (typeof command !== "string" || !command)
     return "command must be a string";
   if (/\s/u.test(command)) return "command must be a single token";
+  if (command.startsWith("-")) return "command must not start with a dash";
   if (command.includes("${"))
     return "command does not expand ${PLUGIN_ROOT}/${PLUGIN_DATA}";
   if (command.startsWith("./")) {
-    if (!containedPath(root, command)) return "command escapes the plugin root";
+    const target = containedPath(root, command);
+    if (!target) return "command escapes the plugin root";
+    if (target === resolve(root))
+      return "command must name a file, not the root";
   } else if (command.includes("/") || command.includes("\\")) {
     return "command must be a bare executable name or a ./-relative path";
+  } else if (command === "." || command === "..") {
+    return "command must name an executable";
   }
 
   const args = entry.args;
@@ -551,7 +468,7 @@ async function readMcp(
   try {
     stat = await lstat(file);
   } catch (error) {
-    if (code(error) !== "ENOENT")
+    if (errorCode(error) !== "ENOENT")
       diagnostics.push(`${PLUGIN_MCP_FILE}: unreadable: ${reason(error)}`);
     return {};
   }
@@ -559,8 +476,7 @@ async function readMcp(
     diagnostics.push(`${PLUGIN_MCP_FILE}: ${why}; MCP component skipped`);
     return {};
   };
-  if (stat.isSymbolicLink() || !stat.isFile())
-    return skip("not a regular file");
+  if (!stat.isFile()) return skip("not a regular file");
 
   let raw: unknown;
   try {
@@ -614,23 +530,21 @@ export async function readPlugin(root: string): Promise<PluginReport> {
     // (симлинк на `~/.ssh`, файл на 10 ГБ) отвергается, не открыв ни одной цели.
     await walkPluginTree(resolvedRoot);
 
-    const manifestPath = containedPath(resolvedRoot, PLUGIN_MANIFEST_FILE);
-    if (!manifestPath)
-      return rejected(
-        `${PLUGIN_MANIFEST_FILE} resolves outside the plugin root`,
-      );
     let rawManifest: unknown;
     try {
-      rawManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      rawManifest = JSON.parse(
+        await readFile(join(resolvedRoot, PLUGIN_MANIFEST_FILE), "utf8"),
+      );
     } catch (error) {
       return rejected(
-        code(error) === "ENOENT"
+        errorCode(error) === "ENOENT"
           ? `not an agent plugin: no ${PLUGIN_MANIFEST_FILE} in ${resolvedRoot}`
           : `${PLUGIN_MANIFEST_FILE} unreadable: ${reason(error)}`,
       );
     }
     const manifest = parsePluginManifest(rawManifest, diagnostics);
-    const skills = await readSkills(resolvedRoot, diagnostics);
+    const listing = await listPluginSkills(resolvedRoot);
+    diagnostics.push(...listing.diagnostics);
     const mcp = await readMcp(resolvedRoot, diagnostics);
 
     let hasNamespaceDir = false;
@@ -645,7 +559,7 @@ export async function readPlugin(root: string): Promise<PluginReport> {
     return {
       root: resolvedRoot,
       manifest,
-      skills,
+      skills: listing.skills,
       mcp,
       code: hasNamespaceDir || IVA_NAMESPACE in manifest.extensions,
       diagnostics,

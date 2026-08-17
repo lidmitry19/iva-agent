@@ -29,6 +29,21 @@ export type GitRunner = (args: readonly string[], cwd?: string) => GitResult;
 
 export const SHA = /^[a-f0-9]{40,64}$/u;
 
+/**
+ * Nothing that came from a source string may reach git looking like an option.
+ * The parser already refuses a leading dash, so this is the second lock on the
+ * same door - the one that stays shut if the first ever loosens.
+ */
+function positional(values: readonly string[]): readonly string[] {
+  for (const value of values) {
+    if (value.startsWith("-"))
+      throw new Error(
+        `refusing to pass ${JSON.stringify(value)} to git: it would read as an option`,
+      );
+  }
+  return values;
+}
+
 function must(result: GitResult, what: string): string {
   if (result.code !== 0)
     throw new Error(
@@ -53,7 +68,7 @@ export function resolveRemoteSha(
   // Оба шаблона: `ls-remote` сопоставляет их по имени ссылки, и строку `…^{}`
   // (коммит аннотированного тега) без второго шаблона он не покажет вовсе.
   const listing = must(
-    git(["ls-remote", url, wanted, `${wanted}^{}`]),
+    git(["ls-remote", "--", ...positional([url, wanted, `${wanted}^{}`])]),
     `git ls-remote ${url} ${wanted}`,
   );
   const lines = listing
@@ -88,21 +103,37 @@ export function fetchGitPlugin(
 ): string {
   if (!SHA.test(sha))
     throw new Error(`refusing to fetch an unusable sha: ${sha}`);
+  // Всё, что пришло из строки источника, проверяется ДО первой команды git: иначе
+  // отказ на третьем шаге оставил бы половину инициализированного checkout.
+  positional([url, sha, ...(subdir ? [subdir] : [])]);
+  // `--` everywhere git takes it: after it, a value that starts with a dash is a
+  // path or a ref, never an option. `positional` refuses such values outright.
   must(git(["init", "-q"], staging), "git init");
-  must(git(["remote", "add", "origin", url], staging), "git remote add");
+  must(
+    git(["remote", "add", "--", "origin", ...positional([url])], staging),
+    "git remote add",
+  );
   if (subdir) {
     must(
       git(["sparse-checkout", "init", "--cone"], staging),
       "git sparse-checkout init",
     );
     must(
-      git(["sparse-checkout", "set", subdir], staging),
+      git(["sparse-checkout", "set", "--", ...positional([subdir])], staging),
       "git sparse-checkout set",
     );
   }
   must(
     git(
-      ["fetch", "--depth", "1", "--filter=blob:none", "origin", sha],
+      [
+        "fetch",
+        "--depth",
+        "1",
+        "--filter=blob:none",
+        "--",
+        "origin",
+        ...positional([sha]),
+      ],
       staging,
     ),
     `git fetch ${url} ${sha}`,
@@ -119,7 +150,7 @@ export function fetchGitPlugin(
 
   const root = subdir ? join(staging, subdir) : staging;
   // Второй замок на подпапку: источник её уже проверил, но каталог отсюда уезжает
-  // в стор целиком, и промах здесь стоил бы чужой папки на диске владельца.
+  // в data/custom/plugins/ целиком, и промах здесь стоил бы чужой папки на диске.
   if (relative(resolve(staging), resolve(root)).startsWith(".."))
     throw new Error(`${subdir} climbs out of the fetched checkout`);
   if (!existsSync(root))
@@ -147,17 +178,10 @@ export async function copyPluginTree(
   }
 }
 
-/** Does the store copy carry edits of its own? `null` - it is not a git checkout. */
-export function localChanges(git: GitRunner, dir: string): string | null {
-  if (!existsSync(join(dir, ".git"))) return null;
-  const status = git(["status", "--porcelain"], dir);
-  return status.code === 0 ? status.out : null;
-}
-
 /**
- * Put the staged plugin in the store, atomically enough that a failure leaves the
- * previous copy in place: the old directory is moved aside first and only removed
- * once the new one is in.
+ * Put the staged plugin in place, atomically enough that a failure leaves the
+ * previous copy where it was: the old directory is moved aside first and only
+ * removed once the new one is in.
  */
 export function swapIntoStore(staged: string, store: string): void {
   mkdirSync(dirname(store), { recursive: true });

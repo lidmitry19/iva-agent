@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -24,8 +25,9 @@ import {
   pluginRoot,
   pluginsStateFile,
   readPluginsState,
+  writePluginsState,
 } from "#lib/plugin-store.ts";
-import { createPluginCommands } from "./plugin.ts";
+import { createPluginCommands, leftoverPluginDirs } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
 
 type Runtime = ReturnType<typeof createCliRuntime>;
@@ -129,7 +131,17 @@ function home(): string {
   return root;
 }
 
-function commands(root: string) {
+type CapHook = (
+  command: string,
+  args: readonly string[],
+  result: { code: number; out: string; err: string },
+) => { code: number; out: string; err: string };
+
+function commands(
+  root: string,
+  hook?: CapHook,
+  onLog?: (line: string) => void,
+) {
   const events: Events = [];
   const printed: string[] = [];
   const base = createCliRuntime(root);
@@ -147,16 +159,21 @@ function commands(root: string) {
         encoding: "utf8",
         env: GIT_ENV,
       });
-      return {
+      const captured = {
         code: result.status ?? 1,
         out: (result.stdout || "").trim(),
         err: (result.stderr || "").trim(),
       };
+      return hook ? hook(command, args, captured) : captured;
     },
   };
   const { cmdPlugin } = createPluginCommands(runtime, {
     now: () => new Date("2026-08-17T12:00:00.000Z"),
-    log: (...args: unknown[]) => printed.push(args.map(String).join(" ")),
+    log: (...args: unknown[]) => {
+      const line = args.map(String).join(" ");
+      printed.push(line);
+      onLog?.(line);
+    },
     translate: (en) => en,
     cwd: () => root,
   });
@@ -173,7 +190,7 @@ function messages(events: Events, kind?: string): string {
 test("add installs a git source, pins the sha and creates the plugin data directory", async () => {
   const source = remote("demo");
   const root = home();
-  const { cmdPlugin, events, data } = commands(root);
+  const { cmdPlugin, events, printed, data } = commands(root);
 
   await cmdPlugin(["add", source.url]);
 
@@ -182,27 +199,33 @@ test("add installs a git source, pins the sha and creates the plugin data direct
     existsSync(join(pluginRoot(data, "demo"), "skills/alpha/SKILL.md")),
   );
   assert.ok(existsSync(pluginDataDir(data, "demo")), "PLUGIN_DATA is created");
-  // Стор git-источника — это checkout: `update` спрашивает у него git status.
+  // Папка git-источника — это checkout на запиненном sha.
   assert.ok(existsSync(join(pluginRoot(data, "demo"), ".git")));
 
   const state = await readPluginsState(data);
-  assert.deepEqual(state.plugins, [
+  assert.equal(state.plugins.length, 1);
+  const [entry] = state.plugins;
+  assert.deepEqual(
+    { ...entry, digest: "" },
     {
       name: "demo",
       source: source.url,
       ref: "HEAD",
       sha: source.sha,
+      digest: "",
       enabled: true,
       trusted: false,
       installedAt: "2026-08-17T12:00:00.000Z",
     },
-  ]);
-  assert.equal(state.riskNoticeShownAt, "2026-08-17T12:00:00.000Z");
-  assert.match(
-    messages(events, "ok"),
-    /demo 1\.0\.0 installed — skills: alpha/u,
   );
+  // Отпечаток папки — то, чем `update` узнаёт правку руками (любой вид источника).
+  assert.match(entry.digest, /^[a-f0-9]{64}$/u);
+  assert.equal(state.riskNoticeShownAt, "2026-08-17T12:00:00.000Z");
+  assert.match(messages(events, "ok"), /demo installed/u);
   assert.match(messages(events, "ok"), /skills work from the next turn/u);
+  // Состав виден ДО того, как что-то встало на место (user story 6): строка
+  // компонент печатается из install, а «installed» — только после переезда.
+  assert.match(printed.join("\n"), /demo 1\.0\.0 — skills: alpha/u);
 });
 
 test("the accepted risk is printed once, before the first install", async () => {
@@ -310,6 +333,7 @@ test("list shows components and calls out a plugin missing from the store", asyn
   const { cmdPlugin, events, printed, data } = commands(root);
 
   await cmdPlugin(["add", source.url]);
+  printed.length = 0;
   await cmdPlugin(["list"]);
   assert.match(
     printed.join("\n"),
@@ -323,10 +347,7 @@ test("list shows components and calls out a plugin missing from the store", asyn
   events.length = 0;
   printed.length = 0;
   await cmdPlugin(["list"]);
-  assert.match(
-    messages(events, "bad"),
-    /missing from the store — run: iva plugin sync/u,
-  );
+  assert.match(messages(events, "bad"), /missing — run: iva plugin sync/u);
 });
 
 test("disable and enable flip one toggle and nothing else", async () => {
@@ -392,7 +413,7 @@ test("update moves the pinned sha and prints old → new", async () => {
   );
 });
 
-test("update refuses to touch a store copy with local changes", async () => {
+test("update refuses an edited folder for every kind of source, until --force", async () => {
   const source = remote("demo");
   const root = home();
   const { cmdPlugin, events, data } = commands(root);
@@ -400,13 +421,42 @@ test("update refuses to touch a store copy with local changes", async () => {
   await cmdPlugin(["add", source.url]);
   const pinned = source.sha;
   writeFileSync(join(pluginRoot(data, "demo"), "notes.md"), "mine\n");
-  commit(source, "1.1.0");
+  const moved = commit(source, "1.1.0");
 
   events.length = 0;
   await cmdPlugin(["update", "demo"]);
-  assert.match(messages(events, "warn"), /has local changes/u);
+  assert.match(messages(events, "warn"), /the folder was edited in place/u);
   assert.equal((await readPluginsState(data)).plugins[0].sha, pinned);
   assert.ok(existsSync(join(pluginRoot(data, "demo"), "notes.md")));
+
+  events.length = 0;
+  await cmdPlugin(["update", "demo", "--force"]);
+  assert.match(messages(events, "ok"), new RegExp(moved.slice(0, 12), "u"));
+  assert.equal((await readPluginsState(data)).plugins[0].sha, moved);
+  assert.equal(existsSync(join(pluginRoot(data, "demo"), "notes.md")), false);
+});
+
+test("a local plugin is protected by the same digest, with no git anywhere", async () => {
+  const root = home();
+  const folder = join(world("local"), "my-plugin");
+  plantPlugin(folder, "local-demo");
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", folder]);
+  writeFileSync(join(pluginRoot(data, "local-demo"), "notes.md"), "mine\n");
+
+  events.length = 0;
+  await cmdPlugin(["update", "local-demo"]);
+  assert.match(messages(events, "warn"), /the folder was edited in place/u);
+  assert.ok(existsSync(join(pluginRoot(data, "local-demo"), "notes.md")));
+
+  events.length = 0;
+  await cmdPlugin(["update", "local-demo", "--force"]);
+  assert.match(messages(events, "ok"), /local-demo reinstalled/u);
+  assert.equal(
+    existsSync(join(pluginRoot(data, "local-demo"), "notes.md")),
+    false,
+  );
 });
 
 test("sync restores a plugin whose folder is gone, at the sha that was pinned", async () => {
@@ -422,7 +472,7 @@ test("sync restores a plugin whose folder is gone, at the sha that was pinned", 
 
   events.length = 0;
   await cmdPlugin(["sync"]);
-  assert.match(messages(events, "ok"), /demo restored — skills: alpha/u);
+  assert.match(messages(events, "ok"), /demo restored/u);
   assert.ok(existsSync(join(pluginRoot(data, "demo"), "plugin.json")));
   const state = await readPluginsState(data);
   assert.equal(
@@ -437,7 +487,7 @@ test("sync restores a plugin whose folder is gone, at the sha that was pinned", 
   await cmdPlugin(["sync"]);
   assert.match(
     messages(events, "ok"),
-    /every plugin in plugins.json is in the store/u,
+    /plugins\.json and data\/custom\/plugins\/ agree/u,
   );
 });
 
@@ -482,4 +532,205 @@ test("what add installs is what the next turn sees, with no build and no restart
 
   await cmdPlugin(["remove", "demo"]);
   assert.deepEqual(await nextTurnSkills(data), []);
+});
+
+test("a plugin with code and MCP is installed, reported, and started by nobody yet", async () => {
+  const root = home();
+  const folder = join(world("code"), "with-code");
+  plantPlugin(folder, "carrier");
+  mkdirSync(join(folder, "sh.iva"), { recursive: true });
+  writeFileSync(join(folder, "sh.iva", "index.ts"), "export {};\n");
+  writeFileSync(
+    join(folder, "mcp.json"),
+    JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: { db: { type: "stdio", command: "node" } },
+    }),
+  );
+  const { cmdPlugin, events, printed, data } = commands(root);
+
+  await cmdPlugin(["add", folder]);
+
+  assert.match(
+    printed.join("\n"),
+    /carrier 1\.0\.0 — skills: alpha; code: sh\.iva; mcp: db/u,
+  );
+  assert.match(
+    messages(events, "warn"),
+    /code and MCP servers are read and reported, but not built or started yet/u,
+  );
+  assert.ok(existsSync(join(pluginRoot(data, "carrier"), "sh.iva/index.ts")));
+
+  events.length = 0;
+  printed.length = 0;
+  await cmdPlugin(["list"]);
+  assert.match(printed.join("\n"), /code: sh\.iva; mcp: db/u);
+});
+
+test("a checkout that lands on another commit is refused, and installs nothing", async () => {
+  const source = remote("demo");
+  const root = home();
+  const { cmdPlugin, data } = commands(root, (command, args, result) =>
+    command === "git" && args[0] === "rev-parse"
+      ? { ...result, out: "f".repeat(40) }
+      : result,
+  );
+
+  await assert.rejects(
+    cmdPlugin(["add", source.url]),
+    /checked out f{40}, expected/u,
+  );
+  assert.equal(existsSync(pluginRoot(data, "demo")), false);
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
+});
+
+test("a plugin that renames itself is refused, and the installed one stays", async () => {
+  const source = remote("demo");
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", source.url]);
+  write(source.work, "plugin.json", manifest("renamed", "2.0.0"));
+  git(["add", "-A"], source.work);
+  git(["commit", "-qm", "rename"], source.work);
+  git(["push", "-q", source.url, "HEAD:refs/heads/main"], source.work);
+
+  events.length = 0;
+  await assert.rejects(
+    cmdPlugin(["update", "demo"]),
+    /could not update: demo/u,
+  );
+  assert.match(messages(events, "bad"), /now calls itself "renamed"/u);
+  const state = await readPluginsState(data);
+  assert.deepEqual(
+    state.plugins.map((entry) => entry.name),
+    ["demo"],
+  );
+  assert.match(
+    readFileSync(join(pluginRoot(data, "demo"), "plugin.json"), "utf8"),
+    /"name": "demo"/u,
+  );
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
+});
+
+test("leftovers of an interrupted install are reported, then swept under the lock", async () => {
+  const root = home();
+  const folder = join(world("sweep"), "my-plugin");
+  plantPlugin(folder, "local-demo");
+  const { cmdPlugin, events, data } = commands(root);
+  const plugins = join(data, "custom/plugins");
+  mkdirSync(join(plugins, ".staging-abc"), { recursive: true });
+  mkdirSync(join(plugins, "half.replaced-9f"), { recursive: true });
+
+  await cmdPlugin(["list"]);
+  assert.match(messages(events, "warn"), /\.staging-abc is a leftover/u);
+  assert.match(messages(events, "warn"), /half\.replaced-9f is a leftover/u);
+
+  events.length = 0;
+  await cmdPlugin(["add", folder]);
+  assert.match(messages(events, "warn"), /cleaned 2 leftover folder\(s\)/u);
+  assert.deepEqual(leftoverPluginDirs(plugins), []);
+});
+
+test("a folder without an entry is adopted by add instead of dead-ending", async () => {
+  const root = home();
+  const folder = join(world("orphan"), "my-plugin");
+  plantPlugin(folder, "local-demo");
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", folder]);
+  // Запись пропала (руками, миграцией, чем угодно), папка осталась.
+  await writePluginsState(data, { marketplaces: [], plugins: [] });
+
+  events.length = 0;
+  await cmdPlugin(["add", folder]);
+  assert.match(
+    messages(events, "warn"),
+    /a folder named local-demo was there without an entry in plugins\.json/u,
+  );
+  assert.deepEqual(
+    (await readPluginsState(data)).plugins.map((entry) => entry.name),
+    ["local-demo"],
+  );
+});
+
+test("a damaged plugins.json wedges nothing: commands refuse, sync repairs", async () => {
+  const source = remote("demo");
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", source.url]);
+  const installed = await readPluginsState(data);
+  writeFileSync(pluginsStateFile(data), "{ broken");
+
+  // Пока файл битый, ни одна команда не делает вид, что плагинов нет.
+  for (const argv of [
+    ["add", source.url],
+    ["list"],
+    ["update"],
+    ["remove", "demo"],
+    ["disable", "demo"],
+  ])
+    await assert.rejects(cmdPlugin(argv), /not valid JSON/u, argv.join(" "));
+  assert.ok(existsSync(pluginRoot(data, "demo")), "nothing was removed");
+
+  events.length = 0;
+  await cmdPlugin(["sync"]);
+  assert.match(messages(events, "warn"), /not valid JSON/u);
+  assert.match(messages(events, "ok"), /demo taken back into plugins\.json/u);
+
+  const repaired = await readPluginsState(data);
+  assert.deepEqual(
+    repaired.plugins.map((entry) => entry.name),
+    ["demo"],
+  );
+  assert.equal(repaired.plugins[0].digest, installed.plugins[0].digest);
+  // Источник восстановить неоткуда, и команда говорит это прямо, а не молчит.
+  assert.equal(repaired.plugins[0].source, "");
+  events.length = 0;
+  await cmdPlugin(["update", "demo"]);
+  assert.match(messages(events, "warn"), /has no source recorded/u);
+  events.length = 0;
+  await cmdPlugin(["list"]);
+  assert.equal(messages(events, "bad"), "");
+});
+
+test("sync recovers entries from a backup an older version left behind", async () => {
+  const source = remote("demo");
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", source.url]);
+  const saved = readFileSync(pluginsStateFile(data), "utf8");
+  writeFileSync(`${pluginsStateFile(data)}.corrupt-2026-08-17`, saved);
+  writeFileSync(pluginsStateFile(data), "{ broken");
+
+  await cmdPlugin(["sync"]);
+  assert.match(messages(events, "ok"), /recovered 1 entries/u);
+  const repaired = await readPluginsState(data);
+  assert.equal(repaired.plugins[0].source, source.url);
+  assert.equal(repaired.plugins[0].sha, source.sha);
+});
+
+test("the components are on screen before anything moves into place", async () => {
+  const root = home();
+  const folder = join(world("preview"), "my-plugin");
+  plantPlugin(folder, "local-demo");
+  const data = join(root, "data");
+  const plugins = join(data, "custom/plugins");
+  // Как только состав напечатан, каталог становится незаписываемым: если бы строка
+  // печаталась ПОСЛЕ переезда, установка успела бы пройти целиком.
+  const { cmdPlugin, printed } = commands(root, undefined, (line) => {
+    if (line.includes("local-demo 1.0.0")) chmodSync(plugins, 0o500);
+  });
+
+  try {
+    await assert.rejects(cmdPlugin(["add", folder]), /EACCES|permission/iu);
+    assert.match(printed.join("\n"), /local-demo 1\.0\.0 — skills: alpha/u);
+    assert.equal(existsSync(pluginRoot(data, "local-demo")), false);
+  } finally {
+    chmodSync(plugins, 0o700);
+  }
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
 });

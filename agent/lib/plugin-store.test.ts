@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
-// Якоря состояния стора: что попадает в plugins.json, что из него выпадает и что
+// Якоря состояния плагинов: что попадает в plugins.json, что из него выпадает и что
 // делает битый файл. Свойства на случайном JSON — ниже, в том же файле: генератор
 // здесь нужен ровно один и держит инвариант «любой вход → состояние, не исключение».
 import test, { after } from "node:test";
@@ -26,6 +26,7 @@ import {
   pluginsDir,
   pluginsStateFile,
   readPluginsState,
+  readPluginsStateSafe,
   removePlugin,
   upsertPlugin,
   writePluginsState,
@@ -50,6 +51,7 @@ function entry(overrides: Partial<PluginEntry> = {}): PluginEntry {
     source: "smixs/iva-plugins/trace",
     ref: "main",
     sha: "a".repeat(40),
+    digest: "d".repeat(64),
     enabled: true,
     trusted: false,
     installedAt: "2026-08-17T10:00:00.000Z",
@@ -57,7 +59,7 @@ function entry(overrides: Partial<PluginEntry> = {}): PluginEntry {
   };
 }
 
-test("the store layout keeps plugin data outside the store", () => {
+test("the layout keeps plugin data outside the plugins folder", () => {
   const data = "/srv/iva/data";
   assert.equal(pluginsDir(data), "/srv/iva/data/custom/plugins");
   assert.equal(pluginRoot(data, "trace"), "/srv/iva/data/custom/plugins/trace");
@@ -136,17 +138,36 @@ test("upsert replaces one plugin and remove takes only its entry", () => {
   );
 });
 
-test("a damaged plugins.json is backed up and reported, never silently emptied", async () => {
+test("a damaged plugins.json is reported and left exactly where it is", async () => {
   const data = world();
   mkdirSync(join(data, "custom"), { recursive: true });
-  writeFileSync(pluginsStateFile(data), "{ not json");
+  const file = pluginsStateFile(data);
+  writeFileSync(file, "{ not json");
 
-  await assert.rejects(readPluginsState(data), /damaged \(invalid JSON\)/u);
-  const saved = readdirSync(join(data, "custom")).find((name) =>
-    name.includes(".corrupt-"),
-  );
-  assert.ok(saved, "the damaged file must be kept");
-  assert.equal(readFileSync(join(data, "custom", saved), "utf8"), "{ not json");
+  // Читает КАЖДЫЙ ход агента: чтение, которое чинит файл, однажды унесло бы список
+  // плагинов молча, посреди разговора.
+  const first = await readPluginsStateSafe(data);
+  assert.deepEqual(first.state, EMPTY_PLUGINS_STATE);
+  assert.match(first.damaged?.message ?? "", /not valid JSON/u);
+  assert.match(first.damaged?.message ?? "", /iva plugin sync/u);
+  const second = await readPluginsStateSafe(data);
+  assert.equal(second.damaged !== null, true);
+
+  assert.deepEqual(readdirSync(join(data, "custom")), ["plugins.json"]);
+  assert.equal(readFileSync(file, "utf8"), "{ not json");
+
+  // Команда владельца обязана упереться, а не работать на пустом состоянии.
+  await assert.rejects(readPluginsState(data), /not valid JSON/u);
+});
+
+test("an unreadable state file is damaged, not empty", async () => {
+  const data = world();
+  mkdirSync(join(data, "custom"), { recursive: true });
+  mkdirSync(pluginsStateFile(data)); // каталог вместо файла — читается с EISDIR
+
+  const { state, damaged } = await readPluginsStateSafe(data);
+  assert.deepEqual(state, EMPTY_PLUGINS_STATE);
+  assert.match(damaged?.message ?? "", /unreadable/u);
 });
 
 const RUNS = { numRuns: 100 };
@@ -170,6 +191,7 @@ const rawState = fc.oneof(
               source: fc.oneof(fc.string(), fc.integer()),
               ref: fc.string(),
               sha: fc.string(),
+              digest: fc.oneof(fc.string(), fc.integer()),
               enabled: fc.oneof(fc.boolean(), fc.string()),
               trusted: fc.oneof(fc.boolean(), fc.string()),
               installedAt: fc.string(),
@@ -197,6 +219,7 @@ test("property: any JSON becomes a state, and normalizing twice changes nothing"
         assert.equal(typeof item.enabled, "boolean");
         assert.equal(typeof item.trusted, "boolean");
         assert.equal(typeof item.sha, "string");
+        assert.equal(typeof item.digest, "string");
       }
       assert.deepEqual(normalizePluginsState(state), state);
     }),

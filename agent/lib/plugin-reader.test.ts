@@ -197,6 +197,19 @@ test("a foreign extension namespace is kept and never validated", async () => {
   assert.deepEqual(report.diagnostics, []);
 });
 
+test("our own namespace must be an object; a foreign one is never inspected", async () => {
+  const dir = plugin({
+    extensions: { [IVA_NAMESPACE]: "yes", "com.example.client": 7 },
+  });
+
+  const report = await readPlugin(dir);
+  assert.deepEqual(report.diagnostics, [
+    'plugin.json: extensions["sh.iva"] is not an object; ignored',
+  ]);
+  assert.equal(report.code, false, "an unusable payload is not code");
+  assert.deepEqual(report.manifest?.extensions, { "com.example.client": 7 });
+});
+
 test("code is reported from the sh.iva directory and from the manifest key", async () => {
   const fromDir = plugin();
   write(fromDir, `${IVA_NAMESPACE}/index.ts`, "export {};\n");
@@ -358,7 +371,7 @@ test("the depth, entry and size caps each reject the plugin", async () => {
   );
 });
 
-test("a .git checkout in the store is not plugin content", async () => {
+test("a .git checkout in the plugin folder is not plugin content", async () => {
   const dir = plugin();
   // Симлинк внутри .git отверг бы плагин, если бы обход туда заходил.
   mkdirSync(join(dir, ".git/objects"), { recursive: true });
@@ -480,6 +493,9 @@ test("an invalid mcp entry is skipped and its siblings still load", async () => 
     placeholderCommand: { type: "stdio", command: "${PLUGIN_ROOT}/bin/x" },
     absoluteCommand: { type: "stdio", command: "/usr/bin/node" },
     escapingCommand: { type: "stdio", command: "./../../bin/x" },
+    dashCommand: { type: "stdio", command: "--upload-pack=touch" },
+    rootCommand: { type: "stdio", command: "./bin/.." },
+    dotCommand: { type: "stdio", command: ".." },
     reservedEnv: {
       type: "stdio",
       command: "node",

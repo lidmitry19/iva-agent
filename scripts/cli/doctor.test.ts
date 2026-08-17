@@ -498,6 +498,7 @@ test("doctor reports each installed plugin and what it carries", async (t) => {
         source: "./demo",
         ref: "",
         sha: "",
+        digest: "",
         enabled: true,
         trusted: false,
         installedAt: "2026-08-17T12:00:00.000Z",
@@ -507,6 +508,7 @@ test("doctor reports each installed plugin and what it carries", async (t) => {
         source: "./quiet",
         ref: "",
         sha: "",
+        digest: "",
         enabled: false,
         trusted: false,
         installedAt: "2026-08-17T12:00:00.000Z",
@@ -520,7 +522,7 @@ test("doctor reports each installed plugin and what it carries", async (t) => {
   ]);
 });
 
-test("doctor names a plugin missing from the store and points at sync", async (t) => {
+test("doctor names a plugin missing from disk and points at sync", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "present=true\n");
   const data = join(root, "data");
@@ -532,6 +534,7 @@ test("doctor names a plugin missing from the store and points at sync", async (t
         source: "./gone",
         ref: "",
         sha: "",
+        digest: "",
         enabled: true,
         trusted: false,
         installedAt: "2026-08-17T12:00:00.000Z",
@@ -540,7 +543,10 @@ test("doctor names a plugin missing from the store and points at sync", async (t
   });
 
   assert.deepEqual(await pluginEvents(root), [
-    ["bad", "plugin gone is missing from the store — run: iva plugin sync"],
+    [
+      "bad",
+      "plugin gone is missing from data/custom/plugins/ — run: iva plugin sync",
+    ],
   ]);
 });
 
@@ -558,6 +564,7 @@ test("doctor reports an unreadable manifest and a folder nobody recorded", async
         source: "./broken",
         ref: "",
         sha: "",
+        digest: "",
         enabled: true,
         trusted: false,
         installedAt: "2026-08-17T12:00:00.000Z",
@@ -574,6 +581,39 @@ test("doctor reports an unreadable manifest and a folder nobody recorded", async
   );
   assert.deepEqual(events[1], [
     "warn",
-    "plugin folder stray is not in plugins.json — reinstall it with iva plugin add, or delete the folder",
+    "plugin folder stray is not in plugins.json — run: iva plugin sync",
+  ]);
+});
+
+test("doctor reports a damaged plugins.json instead of reading past it", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  plantStorePlugin(data, "demo");
+  mkdirSync(join(data, "custom"), { recursive: true });
+  writeFileSync(join(data, "custom", "plugins.json"), "{ broken");
+
+  const events = await pluginEvents(root);
+  assert.equal(events.length, 1);
+  assert.equal(events[0][0], "bad");
+  assert.match(events[0][1], /plugins\.json is unusable: .*not valid JSON/u);
+});
+
+test("doctor sees the leftovers of an interrupted install that its dot filter hides", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  mkdirSync(join(pluginRoot(data, ".staging-xyz")), { recursive: true });
+  mkdirSync(join(pluginRoot(data, "demo.replaced-ab12")), { recursive: true });
+
+  assert.deepEqual(await pluginEvents(root), [
+    [
+      "warn",
+      "plugin folder .staging-xyz is a leftover of an interrupted install — run: iva plugin sync",
+    ],
+    [
+      "warn",
+      "plugin folder demo.replaced-ab12 is a leftover of an interrupted install — run: iva plugin sync",
+    ],
   ]);
 });
