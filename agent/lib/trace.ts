@@ -268,6 +268,11 @@ export function traceLine(
 
   const trimmed = stringify(head, { ...base, traceTrimmed: true });
   if (Buffer.byteLength(trimmed, "utf8") <= TRACE_LINE_LIMIT) return trimmed;
+  // Само `data` не влезло: имена ушли, но размеры содержимого остаются — контракт
+  // (docs/trace.md) обещает их при любой обрезке.
+  const sizesOnly = stringify(head, { ...sizes, traceTrimmed: true });
+  if (Buffer.byteLength(sizesOnly, "utf8") <= TRACE_LINE_LIMIT)
+    return sizesOnly;
   return JSON.stringify({ ...head, data: { traceTrimmed: true } });
 }
 

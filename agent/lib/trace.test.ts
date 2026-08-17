@@ -552,6 +552,28 @@ void test("строка режется по БАЙТАМ, а содержимо�
   for (let i = 0; i < 6; i++) assert.equal(`out${i}` in event.data, false);
 });
 
+void test("если не влезает само data, размеры содержимого остаются", () => {
+  // 30 ключей по 2000 тибетских знаков (3 байта каждый) — data одно больше потолка.
+  const data: Record<string, string> = {};
+  for (let i = 0; i < 30; i++) data[`k${i}`] = "\u0f00".repeat(2000);
+  const line = trace.traceLine(
+    {
+      kind: "eve",
+      name: "action.result",
+      turn: "turn_1",
+      data,
+      content: { text: "x" },
+    },
+    { captureContent: false },
+  );
+  assert.ok(Buffer.byteLength(line, "utf8") <= trace.TRACE_LINE_LIMIT);
+  const event = JSON.parse(line) as { data: Record<string, unknown> };
+  // Контракт docs/trace.md: имена могут уйти, размеры содержимого — никогда.
+  assert.equal(event.data.textChars, 1);
+  assert.equal(event.data.traceTrimmed, true);
+  assert.equal("k0" in event.data, false);
+});
+
 void test("чужие типы в data не разворачиваются поэлементно", () => {
   const line = trace.traceLine(
     {
