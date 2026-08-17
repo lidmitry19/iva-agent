@@ -251,7 +251,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           throw new Error(
             `${formatPluginSource(source)} now calls itself ${JSON.stringify(name)}, not ${JSON.stringify(previous.name)} — remove the old one first`,
           );
-        if (!previous && findPlugin(state, name))
+        // Запись БЕЗ источника — не заявка на имя, а след починки (`sync` подобрал
+        // папку, из которой она пришла, узнать неоткуда). Такую перекрываем, иначе
+        // владельцу некуда идти: `add` упирался бы в неё, а `update` — в пустой
+        // источник.
+        const recorded = previous ? null : findPlugin(state, name);
+        if (recorded?.source)
           throw new Error(
             `${name} is already installed — use: iva plugin update ${name}`,
           );
@@ -271,7 +276,9 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         );
         if (!previous && existsSync(pluginRoot(data, name)))
           warn(
-            `a folder named ${name} was there without an entry in plugins.json — replacing it`,
+            recorded
+              ? `${name} was recorded without a source — replacing it and writing the source down`
+              : `a folder named ${name} was there without an entry in plugins.json — replacing it`,
           );
 
         swapIntoStore(staged.root, pluginRoot(data, name));
@@ -284,8 +291,8 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             ref: staged.ref,
             sha: staged.sha,
             digest: await pluginTreeDigest(pluginRoot(data, name)),
-            enabled: previous?.enabled ?? true,
-            trusted: previous?.trusted ?? false,
+            enabled: (previous ?? recorded)?.enabled ?? true,
+            trusted: (previous ?? recorded)?.trusted ?? false,
             installedAt: now().toISOString(),
           },
           report,
@@ -650,6 +657,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           }
         }
 
+        // Плагин уже стоит — значит предупреждение о риске владелец видел; после
+        // починки показывать его снова незачем.
+        if (!next.riskNoticeShownAt && next.plugins.length)
+          next = { ...next, riskNoticeShownAt: now().toISOString() };
         await writePluginsState(data, next);
         if (!read.damaged && failed.length === 0)
           ok(

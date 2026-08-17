@@ -694,6 +694,21 @@ test("a damaged plugins.json wedges nothing: commands refuse, sync repairs", asy
   events.length = 0;
   await cmdPlugin(["list"]);
   assert.equal(messages(events, "bad"), "");
+
+  // И это не тупик: `add` перекрывает запись без источника и записывает источник.
+  events.length = 0;
+  await cmdPlugin(["add", source.url]);
+  assert.match(
+    messages(events, "warn"),
+    /demo was recorded without a source — replacing it/u,
+  );
+  assert.doesNotMatch(messages(events, "warn"), /bash inside its skill/u);
+  const settled = await readPluginsState(data);
+  assert.equal(settled.plugins[0].source, source.url);
+  assert.equal(settled.plugins[0].sha, source.sha);
+  events.length = 0;
+  await cmdPlugin(["update", "demo"]);
+  assert.match(messages(events, "ok"), /demo is already at/u);
 });
 
 test("sync recovers entries from a backup an older version left behind", async () => {
