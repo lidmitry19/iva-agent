@@ -30,6 +30,7 @@
 // и голым node (cron → scripts/lib/telegram-send.ts), где «./x.js» → «./x.ts» никто
 // не переписывает.
 import { scanOutbound } from "./security-gate.ts";
+import { traceOutboundGate, traceOutboxResult } from "./trace.ts";
 import {
   htmlToPlain,
   needsRichMessage,
@@ -71,6 +72,10 @@ export function redactNotice(text: string): string {
       "[security] outbound leak redacted:",
       guard.findings.map((f) => `${f.type}:${f.name}`).join(", "),
     );
+  // Trace: вердикт outbound-Gate. Стоит на самом вызове гейта, поэтому в журнал попадает
+  // и ответ модели через шов, и служебная реплика канала через noticeSender. Превью
+  // находки НЕ пишем: там кусок утёкшего секрета (ADR-0010).
+  traceOutboundGate(guard.clean, guard.findings, text.length);
   return guard.text;
 }
 
@@ -94,8 +99,15 @@ export function noticeSender(
 export async function sendThroughOutbox(
   message: string,
   transport: OutboxTransport,
-  { limit = 4096 }: { limit?: number } = {},
+  // turn/session нужны только журналу: шов — последнее звено цепочки хода, и без ключа
+  // хода доставка повисла бы в журнале рядом, а не внутри своего хода (ADR-0010).
+  {
+    limit = 4096,
+    turn = "",
+    session = "",
+  }: { limit?: number; turn?: string; session?: string } = {},
 ): Promise<OutboxResult> {
+  const startedAt = Date.now();
   const text = redactNotice(message);
 
   const result: OutboxResult = {
@@ -104,6 +116,11 @@ export async function sendThroughOutbox(
     fellBack: false,
     error: "",
   };
+  // Trace: один исход на одну отправку, каким бы путём она ни ушла.
+  const done = (outcome: OutboxResult): OutboxResult => {
+    traceOutboxResult(turn, session, text, outcome, Date.now() - startedAt);
+    return outcome;
+  };
 
   // Rich-путь рендерит нативно то, чего parse_mode=HTML не умеет. Любой отказ —
   // просто HTML-путь ниже, то есть худший случай равен обычному поведению.
@@ -111,7 +128,7 @@ export async function sendThroughOutbox(
     const rich = await transport.sendRich(text);
     if (rich.ok) {
       result.delivered = 1;
-      return result;
+      return done(result);
     }
   }
 
@@ -147,5 +164,5 @@ export async function sendThroughOutbox(
     fail(`plain retry ${plain.error}`);
     if (plain.stop) break;
   }
-  return result;
+  return done(result);
 }

@@ -21,6 +21,7 @@ import {
   messageParts,
   type TelegramRawMessage,
 } from "./telegram-parts.ts";
+import { traceInboundReceived } from "./trace.ts";
 import { appendDaily } from "./vault-daily.ts";
 import { buildTelegramReplyContext } from "./telegram-reply-context.ts";
 
@@ -297,6 +298,9 @@ export async function runTelegramInbound(
   effects: TelegramInboundEffects,
 ): Promise<TelegramInboundTurn | null> {
   const userId = message.from?.id;
+  // Trace: единственная точка журнала в этом файле (ADR-0010). Остальные события хода
+  // пишут швы снаружи — acceptance-обёртка, Gate, Outbox, старт хода.
+  traceInboundReceived(message);
 
   // 1. Allowlist — главный барьер доступа.
   const allowed = allowedTelegramUsers();

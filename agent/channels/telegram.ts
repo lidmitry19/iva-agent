@@ -281,6 +281,8 @@ const telegram = telegramChannel({
       const result = await sendThroughOutbox(
         data.message,
         outboxTransport(channel.telegram),
+        // Ключ хода — только для журнала: шов сам про ход ничего не знает (ADR-0010).
+        { turn: data.turnId, session: ctx.session.id },
       );
       if (result.delivered > 0 && result.ok) recordDelivery(true);
     },

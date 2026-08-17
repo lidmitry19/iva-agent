@@ -119,6 +119,21 @@ const [
 
 const adapter = (channel as unknown as { adapter: FailureAdapter }).adapter;
 
+// Журнал хода (ADR-0010): «Стоп» пишет свой исход из ЕДИНОЙ политики остановки, поэтому
+// одинаково виден и в webhook-режиме, и через мост.
+const trace = await import("#lib/trace.ts");
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(trace.traceFilePath(trace.traceDay(), dataDir), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
+
 after(() => rmSync(dataDir, { recursive: true, force: true }));
 
 function eventContext({
@@ -670,6 +685,28 @@ test("the Stop button reaches the channel's own cancel route when no bridge is r
   const acks = callsSince(before, "answerCallbackQuery");
   assert.equal(acks.length, 1);
   assert.equal(acks[0].body!.text, "Stopping…");
+});
+
+test("Trace: исход «Стопа» ложится в журнал хода", async () => {
+  const chatId = "739";
+  const key = chatKeyOf(chatId);
+  setChatStatus(key, {
+    status: "running",
+    continuationToken: `${chatId}::`,
+    sessionId: "trace-stop-session",
+    turnId: "turn_11",
+  });
+  const before = traceEvents().length;
+
+  await postWebhookUpdate(stopTap(chatId, 9));
+
+  const stops = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "stop");
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].name, "requested");
+  assert.equal(stops[0].turn, "turn_11");
+  assert.deepEqual(stops[0].data, { chatKey: key, outcome: "requested" });
 });
 
 test("an idle chat and an untrusted tap never reach the cancel route", async () => {

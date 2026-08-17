@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -580,4 +580,81 @@ await test("склейка частей: чистый текст-носител�
   assert.equal(result.context[2], "third part");
   assert.equal(result.context.length, 3);
   assert.equal(calls.transcribed, 1);
+});
+
+// --- Trace ---
+//
+// Пайплайн пишет в журнал хода ровно одно событие — «апдейт вошёл внутрь» с вердиктом
+// allowlist (ADR-0010). Остальные звенья цепочки пишут швы снаружи: acceptance-обёртка,
+// Gate, Outbox, старт хода. Каталог данных на живой установке есть всегда; здесь создаём
+// его руками, потому что журнал сам его не материализует.
+const trace = await import("./trace.ts");
+mkdirSync(process.env.ASSISTANT_DATA_DIR ?? "", { recursive: true });
+
+function traceEvents(): Record<string, unknown>[] {
+  const path = trace.traceFilePath(
+    trace.traceDay(),
+    process.env.ASSISTANT_DATA_DIR ?? "",
+  );
+  try {
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
+
+void test("Trace: принятый апдейт и вердикт allowlist попадают в журнал", async () => {
+  const { effects } = harness();
+  const before = traceEvents().length;
+
+  await inbound.runTelegramInbound(privateText("привет"), effects);
+
+  // Ровно одно событие пайплайна на апдейт: журнал в этом файле пишется в одной точке.
+  const added = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "inbound");
+  assert.equal(added.length, 1);
+  assert.equal(added[0].name, "received");
+  assert.equal(added[0].turn, "tg:77:5");
+  assert.deepEqual(added[0].data, {
+    chatId: "77",
+    chatType: "private",
+    messageId: "5",
+    userId: "42",
+    allowlisted: true,
+    textChars: 6,
+    text: "привет",
+  });
+});
+
+void test("Trace: чужой апдейт остаётся в журнале с отказом allowlist", async () => {
+  const { effects } = harness();
+  const before = traceEvents().length;
+
+  const result = await inbound.runTelegramInbound(
+    message(
+      {
+        message_id: 11,
+        chat: { id: 99, type: "private" },
+        from: { id: 4242, is_bot: false },
+        text: "пусти",
+      },
+      {
+        chat: { id: "99", type: "private" },
+        from: { id: "4242", isBot: false },
+      },
+    ),
+    effects,
+  );
+
+  assert.equal(result, null);
+  const added = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "inbound");
+  assert.equal(added.length, 1);
+  assert.equal(added[0].name, "received");
+  assert.equal((added[0].data as Record<string, unknown>).allowlisted, false);
 });
