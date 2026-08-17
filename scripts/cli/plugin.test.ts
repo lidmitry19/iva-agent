@@ -1337,3 +1337,40 @@ test("a marketplace entry that is not a source at all is named, not obeyed", asy
   );
   assert.match(messages(events, "bad"), /unknown plugin source/u);
 });
+
+test("a marketplace on the disk is a git repository too, and its plugins stay replayable", async () => {
+  const market = marketplaceRemote(
+    {
+      name: "mine",
+      plugins: [{ name: "alpha", source: "plugins/alpha" }],
+    },
+    (work) => plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
+  );
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root, offlineDefault);
+
+  // Локальный источник — рабочая копия репозитория, не bare: так владелец и держит
+  // свой список, пока пишет его.
+  await cmdPlugin(["marketplace", "add", market.work]);
+  assert.match(messages(events, "ok"), /mine added — 1 plugin\(s\)/u);
+  assert.deepEqual((await readPluginsState(data)).marketplaces, [
+    DEFAULT_MARKETPLACE,
+    market.work,
+  ]);
+
+  await cmdPlugin(["add", "alpha"]);
+  const entry = (await readPluginsState(data)).plugins[0];
+  // Путь с диска записан как `file://`: строку источника проигрывает `sync`, а он
+  // умеет один язык — git.
+  assert.equal(
+    entry.source,
+    `file://${market.work}//plugins/alpha@${market.sha}`,
+  );
+  assert.equal(entry.marketplace, "mine");
+  assert.deepEqual(await nextTurnSkills(data), ["alpha-skill"]);
+
+  rmSync(pluginRoot(data, "alpha"), { recursive: true, force: true });
+  events.length = 0;
+  await cmdPlugin(["sync"]);
+  assert.match(messages(events, "ok"), /alpha restored/u);
+});
