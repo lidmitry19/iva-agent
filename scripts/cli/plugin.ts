@@ -768,18 +768,27 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
      * Вопрос доверия при `add`. Печатаются команды, а ответ по умолчанию — «нет»:
      * не-TTY (скрипт, ansible) без `--trust` доверия не получает, потому что никто
      * не ответил.
+     *
+     * Вопрос задаётся ровно про процессы (`stdio`-серверы и сервисы). У плагина, чей
+     * `mcp.json` весь удалённый, процессов нет — там доверие даёт только `--trust`
+     * или отдельная команда потом: спрашивать про «запускать процессы» было бы
+     * неправдой, а решать за владельца, чей токен уйдёт на чужой сервер, — тем более.
      */
     async function askTrust(report: PluginReport): Promise<boolean> {
       const lines = processCommands(report);
-      if (lines.length === 0) return false;
-      log(
-        translate(
-          "  This plugin wants to run processes on this machine:",
-          "  Этот плагин хочет запускать процессы на этой машине:",
-        ),
-      );
-      for (const line of lines) log(`    ${line}`);
+      const anything = lines.length > 0 || Object.keys(report.mcp).length > 0;
+      if (!anything) return false;
+      if (lines.length > 0) {
+        log(
+          translate(
+            "  This plugin wants to run processes on this machine:",
+            "  Этот плагин хочет запускать процессы на этой машине:",
+          ),
+        );
+        for (const line of lines) log(`    ${line}`);
+      }
       if (trustAsked) return true;
+      if (lines.length === 0) return false;
       return confirm(
         translate(
           "Start these processes on this machine?",
@@ -944,8 +953,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             `код собран в работающую версию; тулы идут с префиксом ${pluginNamespace(entry.name)}__`,
           ),
         );
-      const running = processCommands(report).length;
-      if (running && !entry.trusted)
+      const wants =
+        processCommands(report).length > 0 ||
+        Object.keys(report.mcp).length > 0;
+      if (wants && !entry.trusted)
         warn(
           translate(
             `${entry.name} is not trusted: its MCP servers and services stay off — allow them with: iva plugin trust ${entry.name}`,

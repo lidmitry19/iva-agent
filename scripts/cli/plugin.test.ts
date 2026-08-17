@@ -2297,3 +2297,54 @@ test("a trust whose version build fails leaves the plugin untrusted", async () =
   assert.equal((await readPluginsState(data)).plugins[0].trusted, false);
   assert.deepEqual(units.units(), [], "nothing runs for an untrusted plugin");
 });
+
+test("a plugin whose MCP is all remote is not trusted by a question nobody asked", async () => {
+  const root = home();
+  const folder = join(world("remote"), "weather");
+  plantPlugin(folder, "weather");
+  write(
+    folder,
+    "mcp.json",
+    JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: {
+        api: { type: "streamable-http", url: "https://a.test/mcp" },
+      },
+    }),
+  );
+  const units = unitWorld();
+  const build = buildStub();
+  const { cmdPlugin, events, printed, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+    // Ответ «да» здесь бы солгал: вопрос про процессы, а процессов нет.
+    { units, confirm: () => Promise.resolve(true) },
+  );
+
+  await cmdPlugin(["add", folder]);
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, false);
+  assert.doesNotMatch(printed.join("\n"), /wants to run processes/u);
+  assert.match(
+    messages(events, "warn"),
+    /weather is not trusted: its MCP servers and services stay off/u,
+  );
+  assert.deepEqual(
+    build.calls,
+    [],
+    "an untrusted remote server builds nothing",
+  );
+
+  // `--trust` — прямое разрешение владельца, и его достаточно.
+  const second = home();
+  const explicit = commands(second, undefined, undefined, {}, buildStub(), {
+    units: unitWorld(),
+  });
+  await explicit.cmdPlugin(["add", folder, "--trust"]);
+  assert.equal(
+    (await readPluginsState(explicit.data)).plugins[0].trusted,
+    true,
+  );
+});
