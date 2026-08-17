@@ -18,6 +18,19 @@ import { dirname, join } from "node:path";
 import { saveJsonAtomic } from "./json-store.ts";
 import { pluginNameProblem } from "./plugin-reader.ts";
 
+/**
+ * Loopback-порты, выданные плагину: по одному на MCP proxy и на сервис (ADR-0009).
+ * Ключ — имя сервера в `mcp.json` или имя папки сервиса. Выдаются один раз, при
+ * `iva plugin trust`, и живут до `remove`: порт в юните и порт в connection-файле
+ * обязаны совпадать, а «переназначить порт» — это два переписанных файла и рестарт.
+ */
+export type PluginPorts = Readonly<Record<string, { readonly port: number }>>;
+
+/** Первый порт для плагинов; ниже — порты самой Ивы (8723) и userbot (8724). */
+export const FIRST_PLUGIN_PORT = 8730;
+export const RESERVED_PLUGIN_PORTS: readonly number[] = [8723, 8724];
+const MAX_PORT = 65535;
+
 export type PluginEntry = {
   readonly name: string;
   /** Строка источника ровно в том виде, в каком её ввёл владелец. */
@@ -37,6 +50,10 @@ export type PluginEntry = {
    * git-источника или папки поля не имеет: провенанс — это факт, а не заготовка.
    */
   readonly marketplace?: string;
+  /** Порт MCP proxy на каждый `stdio`-сервер `mcp.json`. Нет поля — не выдано. */
+  readonly mcp?: PluginPorts;
+  /** Порт каждого сервиса `sh.iva/services/<svc>/`. Нет поля — не выдано. */
+  readonly services?: PluginPorts;
 };
 
 export type PluginsState = {
@@ -82,6 +99,33 @@ export function pluginConfigFile(dataDir: string, name: string): string {
   return join(pluginsDir(dataDir), `${name}.config.json`);
 }
 
+/**
+ * Env MCP-серверов и сервисов плагина: `data/custom/plugins/<name>.env`. Лежит
+ * рядом с папкой, как и конфиг: секреты владельца переписывать `update`-ом нельзя.
+ */
+export function pluginEnvFile(dataDir: string, name: string): string {
+  return join(pluginsDir(dataDir), `${name}.env`);
+}
+
+/**
+ * Что годится в имя сервера `mcp.json` или папки сервиса, когда из него делается
+ * имя файла и имя systemd-юнита. Ключи `mcp.json` спека не ограничивает, а `../` в
+ * имени сервера — это путь наружу; юниты проверяют то же правило своей копией
+ * (scripts/lib/plugin-units.ts), и равенство копий пинует его тест.
+ */
+export const SAFE_PLUGIN_PART = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/** Файл токена MCP proxy: `data/plugin-data/<name>/mcp-<server>.token`. */
+export function pluginTokenFile(
+  dataDir: string,
+  name: string,
+  server: string,
+): string {
+  if (!SAFE_PLUGIN_PART.test(server))
+    throw new Error(`unusable MCP server name: ${JSON.stringify(server)}`);
+  return join(pluginDataDir(dataDir, name), `mcp-${server}.token`);
+}
+
 /** Файл состояния: `data/custom/plugins.json`. */
 export function pluginsStateFile(dataDir: string): string {
   return join(dataDir, "custom", "plugins.json");
@@ -95,9 +139,34 @@ function string(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+/**
+ * Выданные порты как они лежат в файле. Мусор выпадает молча, как и битая запись:
+ * порт, которого мы не понимаем, — это порт, которого нет, и следующий `trust`
+ * выдаст его заново. Пустая карта не хранится вовсе — поля просто нет.
+ */
+function normalizePorts(raw: unknown): PluginPorts | undefined {
+  if (!isRecord(raw)) return undefined;
+  const ports: Record<string, { port: number }> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!key || !isRecord(value)) continue;
+    const port = value.port;
+    if (
+      typeof port !== "number" ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > MAX_PORT
+    )
+      continue;
+    ports[key] = { port };
+  }
+  return Object.keys(ports).length > 0 ? ports : undefined;
+}
+
 function normalizeEntry(raw: unknown): PluginEntry | null {
   if (!isRecord(raw)) return null;
   if (pluginNameProblem(raw.name) !== null) return null;
+  const mcp = normalizePorts(raw.mcp);
+  const services = normalizePorts(raw.services);
   return {
     name: raw.name as string,
     source: string(raw.source),
@@ -111,7 +180,38 @@ function normalizeEntry(raw: unknown): PluginEntry | null {
     ...(string(raw.marketplace)
       ? { marketplace: raw.marketplace as string }
       : {}),
+    ...(mcp ? { mcp } : {}),
+    ...(services ? { services } : {}),
   };
+}
+
+/**
+ * Каждый порт, уже занятый записями состояния. Выдача нового порта смотрит сюда, а
+ * не на сокеты: занятость решает файл состояния, иначе выключенный плагин отдал бы
+ * свой порт соседу и вернулся с чужим (ADR-0009: порты стабильны до `remove`).
+ */
+export function takenPluginPorts(state: PluginsState): Set<number> {
+  const taken = new Set<number>(RESERVED_PLUGIN_PORTS);
+  for (const entry of state.plugins)
+    for (const ports of [entry.mcp, entry.services])
+      for (const value of Object.values(ports ?? {})) taken.add(value.port);
+  return taken;
+}
+
+/**
+ * Первый свободный порт от `from` вверх, не занятый ничем из `taken`. Сокеты не
+ * проверяются: порт, который сейчас занят чужим процессом, всё равно наш, и юнит
+ * поднимется, когда тот уйдёт — а «подвинуть плагин» стоило бы пересборки версии.
+ */
+export function freePluginPort(
+  taken: ReadonlySet<number>,
+  from: number = FIRST_PLUGIN_PORT,
+): number {
+  let port = Math.max(from, FIRST_PLUGIN_PORT);
+  while (taken.has(port)) port += 1;
+  if (port > MAX_PORT)
+    throw new Error("no free loopback port left for a plugin");
+  return port;
 }
 
 /** Любой JSON → состояние. Никогда не кидает: битая запись просто выпадает. */
