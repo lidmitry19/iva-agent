@@ -14,11 +14,10 @@ block quotes, collapsible blocks and formulas. This is `sendRichMessage`
 A report or an answer for the chat you are talking in is the plain reply of the
 turn. The Outbox (`agent/lib/outbox.ts`) already routes a reply that needs
 tables, task lists, `<details>` or block formulas into `sendRichMessage`, and
-falls back to HTML if Bot API refuses it. Sending the same text with this script
-instead delivers it twice and bypasses the outbound gate that runs inside the
-Outbox — a secret in the text would leave unredacted. Reach for this skill only
-when the destination is a different allowlisted chat, or when the post needs
-inline images and the owner asked for it there.
+falls back to HTML if Bot API refuses it. Sending the same text with `iva post`
+on top of that reply simply delivers it twice. Reach for this skill only when
+the destination is a different allowlisted chat, or when the post needs inline
+images and the owner asked for it there.
 
 Album (sendMediaGroup) = up to 10 media, ONE caption, no text between images.
 Rich message = up to 50 media, text/tables/blocks interleaved in a single
@@ -27,10 +26,10 @@ this skill.
 
 ## Quick start
 
-All paths are relative to the repo root (the agent's working directory).
+`iva post` is the installed CLI command; run it from anywhere.
 
 ```bash
-python3 agent/skills/rich-post/scripts/send_rich.py --md-file /tmp/post.md
+iva post --md-file /tmp/post.md
 ```
 
 - Recipient: by default the message goes to `TELEGRAM_DIGEST_CHAT_ID` from
@@ -43,7 +42,7 @@ python3 agent/skills/rich-post/scripts/send_rich.py --md-file /tmp/post.md
   the result; nothing is uploaded or sent. Always run this first.
 - `--allow-upload` — see «Local images» below. Off by default.
 - `--silent`, `--thread-id` — optional.
-- Token: `$TELEGRAM_BOT_TOKEN` or the repo `.env`. There is NO `--token` flag
+- Token: taken from the installation's `.env`. There is NO `--token` flag
   (argv is visible in the process list) — don't put the token on the command line.
 
 ## Local images — read before using
@@ -51,7 +50,7 @@ python3 agent/skills/rich-post/scripts/send_rich.py --md-file /tmp/post.md
 Telegram accepts ONLY public URLs for rich-message media (`attach://` and
 multipart upload fail with `RICH_MESSAGE_PHOTO_URL_INVALID`). So a local image
 referenced as `![](file:/abs/path "caption")` must first be uploaded to a
-public host. The script uses **tmpfiles.org — an anonymous PUBLIC host**:
+public host. The command uses **tmpfiles.org — an anonymous PUBLIC host**:
 anyone with the link can open the file while it lives there.
 
 Because of that:
@@ -140,9 +139,11 @@ HTML-only extras: <u>underline</u> <sub>x</sub> <sup>x</sup>
   the target still has to be allowlisted).
 - The host DOES call sendRichMessage on normal replies (`agent/lib/outbox.ts`,
   `needsRichMessage`), so tables and task lists in an ordinary answer already
-  render. This script exists for the other chat, not for a nicer reply.
-- The script talks to Bot API directly and runs no outbound gate. Everything it
-  sends must be text you wrote in this turn, not a file dump or command output.
+  render. This command exists for the other chat, not for a nicer reply.
+- `iva post` goes out through the same Outbox and the same outbound gate as every
+  other message, so a leaked secret is redacted on the way. That is a safety net,
+  not a licence: everything you post must be text you wrote in this turn, not a
+  file dump or command output.
 
 ## Example
 
@@ -160,6 +161,6 @@ cat > /tmp/post.md <<'EOF'
 
 > цитата в конце
 EOF
-python3 agent/skills/rich-post/scripts/send_rich.py --md-file /tmp/post.md --dry-run
-python3 agent/skills/rich-post/scripts/send_rich.py --md-file /tmp/post.md
+iva post --md-file /tmp/post.md --dry-run
+iva post --md-file /tmp/post.md
 ```

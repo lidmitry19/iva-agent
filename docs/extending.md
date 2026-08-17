@@ -21,11 +21,11 @@ with a `SKILL.md` plus supporting files. Iva loads both your custom skills and t
 - 📋 **morning-digest.md** — one tool call (`tasks`), grouping rules, output format. Copy this for any "call a tool, format the result" job.
 - 🔎 **web-research.md** — a 4-step chain: `web_search` → pick 2–4 sources → `web_fetch` each → synthesize with links.
 - 🌐 **agent-browser/** — directory skill wrapping a CLI the model drives through `bash`.
-- 🛡 **security-defense/** — the full shape: `SKILL.md`, bundled scripts, a patterns file.
+- 🛡 **security-defense/** — a procedure plus data: `SKILL.md`, a patterns file for reviewing a command by eye, and the secret-key inventory the runtime gate reads.
 - 📮 **google-workspace.md** — one CLI surface covering Gmail, Calendar, Drive, Sheets, Docs and Tasks.
 - 📄 **documents.md** — local PDF, DOCX and XLSX extraction, one-file answers and optional library import.
 - 📡 **telegram-userbot/** — a guarded personal-account workflow with a separate safety reference.
-- 🎨 **rich-post/** — a directory skill for rich Telegram posts with supporting references.
+- 🎨 **rich-post/** — rich Telegram posts to another allowlisted chat; the sending is the `iva post` command, not a bundled script.
 - 🩹 **update-recovery/** — merges customizations an update left in `data/update-conflicts/`; triggered by "restore my update changes".
 
 A new skill needs no build: Iva reads `data/custom/agent/skills/` at the start of every turn, so a file

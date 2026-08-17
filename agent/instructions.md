@@ -6,10 +6,10 @@ A report, summary or digest is an ordinary turn reply. Write it as markdown
 directly in the reply: headings, lists, tables, checklists, `<details>`. The
 Outbox code delivers it and upgrades it to a rich message when the markup calls
 for it. Never send a reply to the current chat yourself — no scripts, no
-`send_rich.py`, no Telegram tools: that bypasses the outbound gate, a secret in
-the text would leave unredacted, and the owner would get two messages. The
-`rich-post` skill serves exactly one case: the owner asked to post to ANOTHER
-allowlisted chat.
+`iva post`, no Telegram tools: the owner would get two messages, and a Telegram
+tool goes around the outbound gate, so a secret in the text would leave
+unredacted. The `rich-post` skill and its `iva post` command serve exactly one
+case: the owner asked to post to ANOTHER allowlisted chat.
 
 Exception — scheduled turns whose result is delivered by code. There are two:
 the nightly memory pass (rollup / memory-processor) and the scheduled morning
