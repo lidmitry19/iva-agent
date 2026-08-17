@@ -549,6 +549,13 @@ export function createDoctorCommand(
       )
         return;
 
+      /**
+       * Юниты, которые ДОЛЖНЫ быть: пересечение выданных портов с тем, что плагин
+       * объявляет СЕЙЧАС. Порт из `plugins.json` не отбирается никогда (он в юните и в
+       * connection-файле), поэтому список только по нему обещал бы юнит серверу,
+       * которого в `mcp.json` больше нет, — и `sync` не смог бы этого починить.
+       */
+      const expected = new Map<string, { plugin: string; port?: number }>();
       for (const entry of state.plugins) {
         const root = pluginRoot(dataDirectory, entry.name);
         if (!existsSync(root)) {
@@ -578,6 +585,21 @@ export function createDoctorCommand(
           `plugin ${entry.name}${entry.enabled ? "" : " (disabled)"}: ${parts.join(", ")}`,
         );
         okN++;
+        if (entry.enabled && entry.trusted) {
+          for (const [server, ports] of Object.entries(entry.mcp ?? {})) {
+            if (report.mcp[server]?.type !== "stdio") continue;
+            expected.set(mcpUnitName(entry.name, server), {
+              plugin: entry.name,
+              port: ports.port,
+            });
+          }
+          for (const service of Object.keys(entry.services ?? {})) {
+            if (!report.services[service]) continue;
+            expected.set(serviceUnitName(entry.name, service), {
+              plugin: entry.name,
+            });
+          }
+        }
         // Код плагина живёт в версии, а не в папке (ADR-0009): запись «включён» без
         // сборки в работающей версии значит, что тулов плагина у агента нет.
         if (report.code && entry.enabled) {
@@ -594,21 +616,8 @@ export function createDoctorCommand(
         }
       }
 
-      // Юниты плагинов: те, что должны быть, и те, что лежат лишними. Список
-      // ожидаемых берётся из `plugins.json` — что получило порт, то имеет юнит.
-      const expected = new Map<string, { plugin: string; port?: number }>();
-      for (const entry of state.plugins) {
-        if (!entry.enabled || !entry.trusted) continue;
-        for (const [server, ports] of Object.entries(entry.mcp ?? {}))
-          expected.set(mcpUnitName(entry.name, server), {
-            plugin: entry.name,
-            port: ports.port,
-          });
-        for (const service of Object.keys(entry.services ?? {}))
-          expected.set(serviceUnitName(entry.name, service), {
-            plugin: entry.name,
-          });
-      }
+      // Юниты плагинов: те, что должны быть (собраны выше, по отчёту плюс выданным
+      // портам), и те, что лежат лишними.
       if (hasSystemd()) {
         for (const [unit, about] of [...expected].sort(([a], [b]) =>
           a < b ? -1 : 1,

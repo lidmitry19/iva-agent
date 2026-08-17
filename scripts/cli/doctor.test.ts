@@ -4,7 +4,7 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   MODEL_PROVIDER_NAMES,
@@ -448,6 +448,8 @@ function plantStorePlugin(
   data: string,
   name: string,
   manifest: string = JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name }),
+  /** Что ещё лежит в папке плагина: `mcp.json`, `sh.iva/...` и прочее. */
+  files: Record<string, string> = {},
 ): void {
   const root = pluginRoot(data, name);
   mkdirSync(join(root, "skills/alpha"), { recursive: true });
@@ -456,6 +458,19 @@ function plantStorePlugin(
     join(root, "skills/alpha/SKILL.md"),
     "---\nname: alpha\ndescription: Do the alpha work.\n---\n\nBody.\n",
   );
+  for (const [path, contents] of Object.entries(files)) {
+    const target = join(root, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, contents);
+  }
+}
+
+/** `mcp.json` плагина: сервера ровно те, что передали. */
+function mcpJson(servers: Record<string, unknown>): string {
+  return JSON.stringify({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+    mcpServers: servers,
+  });
 }
 
 /** Прогоняет доктора без systemd и отдаёт только строки про плагины. */
@@ -725,7 +740,6 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "present=true\n");
   const data = join(root, "data");
-  plantStorePlugin(data, "trace");
   const unitDir = join(root, "systemd");
   mkdirSync(unitDir, { recursive: true });
   // Живой прокси: настоящий сервер на loopback, отвечающий как `/health` прокси.
@@ -745,6 +759,30 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
   const dead = (silent.address() as { port: number }).port;
   await new Promise<void>((settle) => silent.close(() => settle()));
 
+  // Плагин объявляет ровно два stdio-сервера и один сервис. `dropped` — сервер, который
+  // автор убрал из `mcp.json`, а порт за ним в `plugins.json` остался: юнита ему не
+  // положено, и требовать его было бы вечной строкой, которую нечем починить.
+  plantStorePlugin(
+    data,
+    "trace",
+    JSON.stringify({
+      $schema: PLUGIN_SCHEMA_URL,
+      name: "trace",
+      extensions: { "sh.iva": {} },
+    }),
+    {
+      "mcp.json": mcpJson({
+        alive: { type: "stdio", command: "node" },
+        quiet: { type: "stdio", command: "node" },
+        // Удалённый сервер прокси не требует и юнита не получает.
+        remote: { type: "streamable-http", url: "https://a.test/mcp" },
+      }),
+      "sh.iva/services/web/service.json": JSON.stringify({
+        command: "node",
+        port: 8726,
+      }),
+    },
+  );
   await writePluginsState(data, {
     marketplaces: [],
     plugins: [
@@ -757,7 +795,12 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
         enabled: true,
         trusted: true,
         installedAt: "2026-08-17T12:00:00.000Z",
-        mcp: { alive: { port: answering }, quiet: { port: dead } },
+        mcp: {
+          alive: { port: answering },
+          quiet: { port: dead },
+          dropped: { port: 8799 },
+          remote: { port: 8798 },
+        },
         services: { web: { port: 8726 }, gone: { port: 8727 } },
       },
     ],
@@ -797,7 +840,7 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
     /plugin|iva-mcp|iva-plugin/u.test(message),
   );
   assert.deepEqual(said, [
-    ["ok", "plugin trace: 1 skills"],
+    ["ok", "plugin trace: 1 skills, 3 mcp"],
     [
       "ok",
       `plugin trace: iva-mcp-trace-alive.service answers on 127.0.0.1:${answering}`,
@@ -805,10 +848,6 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
     [
       "warn",
       `plugin trace: iva-mcp-trace-quiet.service runs but does not answer on 127.0.0.1:${dead} — check: journalctl --user -u iva-mcp-trace-quiet.service -n 100 --no-pager`,
-    ],
-    [
-      "warn",
-      "plugin trace: iva-plugin-trace-gone.service is missing — run: iva plugin sync",
     ],
     [
       "bad",
@@ -819,4 +858,11 @@ test("doctor checks the plugin units and the health of every MCP proxy", async (
       "iva-mcp-orphan-srv.service belongs to no enabled and trusted plugin — run: iva plugin sync",
     ],
   ]);
+  // Порт в `plugins.json` без объявления в плагине юнита не требует: ни у сервера,
+  // которого автор убрал из `mcp.json` (`dropped`), ни у удалённого (`remote`, ему
+  // прокси не нужен), ни у сервиса, чьей папки больше нет (`gone`).
+  const everything = events.map(([, message]) => message).join("\n");
+  assert.doesNotMatch(everything, /dropped/u);
+  assert.doesNotMatch(everything, /iva-mcp-trace-remote/u);
+  assert.doesNotMatch(everything, /iva-plugin-trace-gone/u);
 });
