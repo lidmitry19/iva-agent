@@ -57,6 +57,7 @@ export const TRACE_PLUGIN = "trace";
 const DAY_FILE = /^\d{4}-\d{2}-\d{2}\.jsonl$/u;
 const TAIL_INTERVAL_MS = 500;
 const TAIL_PREVIEW_CHARS = 80;
+const FACT_LIMIT = 40;
 const SHOW_PREVIEW_CHARS = 160;
 const TURN_LIST_LIMIT = 20;
 
@@ -247,13 +248,22 @@ export function stitchTurns(lines: readonly TraceLine[]): StitchedTurn[] {
   const turnIdByUpdateKey = new Map<string, string>();
   const updateKeyByTurnId = new Map<string, string>();
   const chatTurns = new Set<string>();
-  for (const line of lines) {
-    if (line.kind !== "turn" || line.name !== "bound") continue;
+  // By `ts`, and the earliest claim wins. Two `turn.bound` lines can name the same update
+  // key — a proactive turn in a chat whose last binding is still on the books — and which
+  // one wins must not depend on which process wrote its line first.
+  const bound = lines
+    .filter(
+      (line) => line.kind === "turn" && line.name === "bound" && line.turn,
+    )
+    .sort((left, right) => left.at - right.at || left.index - right.index);
+  for (const line of bound) {
     chatTurns.add(line.turn);
     const updateKey = str(line.data.updateKey);
-    if (!updateKey) continue;
-    turnIdByUpdateKey.set(updateKey, line.turn);
-    updateKeyByTurnId.set(line.turn, updateKey);
+    if (!updateKey) continue; // a proactive turn has no update behind it
+    if (!turnIdByUpdateKey.has(updateKey))
+      turnIdByUpdateKey.set(updateKey, line.turn);
+    if (!updateKeyByTurnId.has(line.turn))
+      updateKeyByTurnId.set(line.turn, updateKey);
   }
 
   const groups = new Map<string, TraceLine[]>();
@@ -436,16 +446,32 @@ function stepLabel(steps: number): string {
   return `${String(steps)} step${steps === 1 ? "" : "s"}`;
 }
 
-/** The turn key in one narrow column: the tail is the half that tells turns apart. */
+/**
+ * The turn key in one narrow column: the tail is the half that tells turns apart.
+ *
+ * Sanitized, not trusted. The writer caps the length of `turn`, `session`, `kind` and
+ * `name` but does not strip line breaks from them, and a chat title or an id that arrived
+ * with a newline would otherwise print as two events.
+ */
 export function shortTurn(key: string, width = 14): string {
-  if (!key) return "-";
-  return key.length <= width ? key : `…${key.slice(key.length - width + 1)}`;
+  const text = sanitize(key);
+  if (!text) return "-";
+  return text.length <= width
+    ? text
+    : `…${text.slice(text.length - width + 1)}`;
+}
+
+/** One identity field of a header, on one line and inside its column. */
+function label(value: string, width: number): string {
+  return oneLine(value, width) || "-";
 }
 
 function eventName(event: TraceLine): string {
-  if (!event.kind) return event.name;
-  if (!event.name) return event.kind;
-  return `${event.kind}.${event.name}`;
+  const kind = oneLine(event.kind, 40);
+  const name = oneLine(event.name, 40);
+  if (!kind) return name;
+  if (!name) return kind;
+  return `${kind}.${name}`;
 }
 
 function flat(value: unknown): string {
@@ -457,14 +483,20 @@ function flat(value: unknown): string {
   }
 }
 
-/** Any value → one capped line: a journal preview must not reflow the terminal. */
-export function oneLine(value: unknown, limit: number): string {
-  // Whitespace, control and format characters all collapse to one space: a newline or a
-  // stray bell inside a tool result must not redraw the terminal it is printed on.
-  const text = flat(value)
+/**
+ * Any value → one line. Whitespace, control and format characters all collapse to one
+ * space: a newline inside a tool result must not turn one event into two, and a stray
+ * escape sequence must not repaint the terminal it is printed on.
+ */
+function sanitize(value: unknown): string {
+  return flat(value)
     .replace(/[\s\p{Cc}\p{Cf}]+/gu, " ")
     .trim();
-  return cut(text, limit);
+}
+
+/** Any value → one capped line: a journal preview must not reflow the terminal. */
+export function oneLine(value: unknown, limit: number): string {
+  return cut(sanitize(value), limit);
 }
 
 /** The one or two `data` fields worth a column, plus the duration when there is one. */
@@ -479,7 +511,9 @@ export function eventFacts(event: TraceLine): string {
           : "",
       )
       .filter(Boolean);
-    facts.push(`actions=${names.join(",") || String(data.actions.length)}`);
+    facts.push(
+      `actions=${oneLine(names.join(",") || String(data.actions.length), FACT_LIMIT)}`,
+    );
   }
   if (isRecord(data.usage))
     facts.push(
@@ -493,7 +527,9 @@ export function eventFacts(event: TraceLine): string {
     if (facts.length >= 2) break;
     const value = data[key];
     if (!isScalar(value) || value === "") continue;
-    facts.push(`${key}=${String(value)}`);
+    // A field is a column, not a paragraph: a long `reason` must not push the content
+    // preview off the screen.
+    facts.push(`${key}=${oneLine(String(value), FACT_LIMIT)}`);
   }
   const head = facts.slice(0, 2).join(" ");
   const ms = data.ms;
@@ -568,16 +604,16 @@ export function formatTurn(
   const tools = turnTools(turn);
   const out = [
     [
-      turn.turnId || turn.key,
-      turn.updateKey || "-",
-      turnSource(turn),
-      `session ${turn.session || "-"}`,
+      label(turn.turnId || turn.key, 80),
+      label(turn.updateKey, 80),
+      label(turnSource(turn), 20),
+      `session ${label(turn.session, 80)}`,
     ].join(" · "),
     [
       `${clock(first?.at ?? 0, timeZone)} → ${clock(last?.at ?? 0, timeZone)}`,
       duration((last?.at ?? 0) - (first?.at ?? 0)),
       stepLabel(countSteps(turn)),
-      tools.length ? `tools ${tools.join(", ")}` : "no tools",
+      tools.length ? `tools ${oneLine(tools.join(", "), 120)}` : "no tools",
       turnOutcome(turn),
     ].join(" · "),
     "",
@@ -619,10 +655,10 @@ export function formatTurnList(
     const last = turn.events.at(-1);
     return [
       clock(first?.at ?? 0, options.timeZone),
-      column(turnSource(turn), 9),
+      column(oneLine(turnSource(turn), 9), 9),
       column(shortTurn(turn.turnId || turn.key, 20), 20),
       column(stepLabel(countSteps(turn)), 8),
-      column(cut(turnTools(turn).join(", "), 24), 24),
+      column(oneLine(turnTools(turn).join(", "), 24), 24),
       column(duration((last?.at ?? 0) - (first?.at ?? 0)), 7),
       turnOutcome(turn),
     ]

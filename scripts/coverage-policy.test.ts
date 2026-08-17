@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 224;
+const EXPECTED_PRODUCTION_COUNT = 225;
 const EXPECTED_INVENTORY_SHA256 =
-  "fae91c6395e9dc94a7795ed52cc6874547722c0f90e6ec96f32a5f3278936ad0";
+  "fae22bfdda8e2a5c5b110902629fd0c717b432676f8f014e491425f41668c50a";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -87,6 +87,10 @@ const EXPECTED_INVENTORY_SHA256 =
 // Python sender: `scripts/cli/post.test.ts` reports it at 93.14% lines, 82.64% branches
 // and 86.96% functions - the uncovered remainder is the tmpfiles.org upload and the
 // stdin reader, both injected in tests - so the blind spot stays 26.
+// stays 26.
+// The journal's second reader came next, one path: `scripts/cli/trace.ts`. Scoped coverage
+// over `scripts/cli/trace.test.ts` reports it at 98.94% lines, 90.05% branches and 96.05%
+// functions, so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",
