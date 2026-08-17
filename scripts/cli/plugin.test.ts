@@ -170,7 +170,7 @@ function messages(events: Events, kind?: string): string {
     .join("\n");
 }
 
-test("add installs a git source, pins the sha and creates the plugin data directory", async (t) => {
+test("add installs a git source, pins the sha and creates the plugin data directory", async () => {
   const source = remote("demo");
   const root = home();
   const { cmdPlugin, events, data } = commands(root);
@@ -203,7 +203,6 @@ test("add installs a git source, pins the sha and creates the plugin data direct
     /demo 1\.0\.0 installed — skills: alpha/u,
   );
   assert.match(messages(events, "ok"), /skills work from the next turn/u);
-  t.diagnostic(messages(events));
 });
 
 test("the accepted risk is printed once, before the first install", async () => {
