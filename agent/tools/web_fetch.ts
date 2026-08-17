@@ -6,8 +6,7 @@ import {
   probeWebText,
   reportWebGate,
 } from "../lib/web-gate.ts";
-import { traceEnterScope } from "../lib/trace.ts";
-import { parentTurnId } from "../lib/usage.ts";
+import { traceEnterToolScope } from "../lib/trace.ts";
 
 // Обёртка над штатным web_fetch eve. Сам запрос не переписан НАМЕРЕННО: у
 // фреймворка уже есть SSRF-защита (https-only, DNS-резолв с отсевом приватных,
@@ -43,11 +42,7 @@ export default defineTool({
     // Trace: web-поверхность работает В СЕРЕДИНЕ хода, и вердикт её гейта без ключа хода
     // читателю некуда прицепить. Контекст берём из тула — ctx у eve несёт сессию и ход
     // (ADR-0010); сам гейт по-прежнему ничего про ходы не знает.
-    traceEnterScope({
-      turn: parentTurnId(ctx.session.turn),
-      session: ctx.session.id,
-      source: "web",
-    });
+    traceEnterToolScope(ctx, "web");
     // Схема входа взята у фреймворка, а он отдаёт её значение как unknown —
     // адрес читаем явно, только ради подписи в логе.
     const requested = (input as { url?: string }).url ?? "";

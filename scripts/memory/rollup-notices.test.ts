@@ -41,13 +41,15 @@ test("what leaves the chat is decided by the policy, not by the script", () => {
   assert.match(block, /ranBefore: RAN_BEFORE,/u);
   // Оба шва отправки — только аргументы этого решения; своей отправки у свёртки нет.
   assert.equal(source.split("sendTelegramHtml(").length - 1, 2);
+  // Четвёртый аргумент — только имя хода для журнала (ADR-0010): что уходит в чат, он
+  // не решает. Сама отправка остаётся тем же одним швом.
   assert.match(
     block,
-    /report: \(text: string\) => sendTelegramHtml\(BOT, CHAT, text\)/u,
+    /report: \(text: string\) =>\s+sendTelegramHtml\(BOT, CHAT, text, \{\s+trace: \{ session: session\.state\.sessionId, source: "rollup" \},/u,
   );
   assert.match(
     block,
-    /notice: \(text: string\) => sendTelegramHtml\(BOT, CHAT, text\)/u,
+    /notice: \(text: string\) =>\s+sendTelegramHtml\(BOT, CHAT, text, \{\s+trace: \{ session: session\.state\.sessionId, source: "rollup" \},/u,
   );
   // Чат не настроен — решение о Notice всё равно принимается: send просто null.
   assert.match(block, /: null;/u);

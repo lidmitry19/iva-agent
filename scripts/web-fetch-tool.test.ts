@@ -1,12 +1,37 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 // Тул зовёт штатный web_fetch eve, а тот — глобальный fetch (с собственным
 // dispatcher-ом undici). Поэтому сеть подменяется globalThis.fetch на время
 // одного вызова: так проверяется ВЕСЬ путь фреймворка — redirect, потолок
 // размера, HTML→markdown — вместе с нашим гейтом поверх него.
+// Журнал хода (ADR-0010): web-поверхность работает в середине хода, поэтому её вердикт
+// гейта обязан нести ключ хода из ctx тула. Каталог данных — временный, до импорта тула.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-web-fetch-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
 const { default: webFetchTool } = await import("../agent/tools/web_fetch.ts");
+const trace = await import("#lib/trace.ts");
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 type FetchResult = {
   url?: string;
@@ -320,4 +345,40 @@ test("схема входа взята у фреймворка целиком", 
     "timeout",
     "url",
   ]);
+});
+
+test("Trace: вердикт web-гейта уезжает с ходом из контекста тула", async () => {
+  const before = traceEvents().length;
+  const turnContext = {
+    abortSignal: AbortSignal.timeout(10_000),
+    session: { id: "wrun_5", turn: { id: "turn_2", sequence: 2 } },
+  } as unknown as ToolContext;
+
+  await withCapturedErrors(async () =>
+    withFetch(
+      () => Promise.resolve(html("<p>Обычная страница про курс валют.</p>")),
+      async () =>
+        await webFetchTool.execute(
+          { url: "https://example.com/page" },
+          turnContext,
+        ),
+    ),
+  );
+
+  const gate = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "gate");
+  assert.ok(gate.length >= 1, "вердикт web-гейта в журнал не попал");
+  assert.equal(gate[0].name, "web");
+  assert.equal(gate[0].turn, "turn_2");
+  assert.equal(gate[0].session, "wrun_5");
+  assert.equal((gate[0].data as Record<string, unknown>).surface, "web");
+});
+
+test("Trace: тот же тул без сессии в контексте журнал не трогает", async () => {
+  const before = traceEvents().length;
+
+  await fetchPage(html("<p>Страница без хода.</p>"));
+
+  assert.equal(traceEvents().length, before);
 });

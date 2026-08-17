@@ -29,8 +29,13 @@ import {
 import { join } from "node:path";
 import { dataDir } from "./data-dir.ts";
 import { readSettings } from "./settings.ts";
+import { parentTurnId } from "./usage.ts";
 import { allowedTelegramUsers } from "./telegram-allowlist.ts";
 import { resolveTimeZone } from "./timezone.ts";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 export type TraceEvent = {
   ts: string;
@@ -484,6 +489,24 @@ function activeScope(): TraceScope | undefined {
  */
 export function traceEnterScope(scope: TraceScope): void {
   scopeStore.enterWith({ ...scope, enteredAt: Date.now() });
+}
+
+/**
+ * Метка хода из контекста тула eve. Отдельная функция, потому что ctx приходит из чужих
+ * рук: у теста тула его может не быть вовсе, а журнал не имеет права ронять инструмент.
+ */
+export function traceEnterToolScope(ctx: unknown, source: string): void {
+  try {
+    const session = isRecord(ctx) ? ctx.session : undefined;
+    const turnValue = isRecord(session) ? session.turn : undefined;
+    const turn = parentTurnId(isRecord(turnValue) ? turnValue : undefined);
+    const sessionId = scalarText(isRecord(session) ? session.id : undefined);
+    // Ни хода, ни сессии — приписывать событие нечему, и метку ставить незачем.
+    if (!turn && !sessionId) return;
+    traceEnterScope({ turn, session: sessionId, source });
+  } catch (error) {
+    console.error("[trace] контекст тула не прочитан:", error);
+  }
 }
 
 /** То же, но с честной областью: блок кода, который мы держим в руках. */
