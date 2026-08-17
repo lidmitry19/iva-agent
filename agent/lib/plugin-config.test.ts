@@ -88,6 +88,18 @@ test("the env of a plugin is its own file, and nothing else", (t) => {
   );
   // Файла нет — пустой набор, а не исключение посреди хода.
   assert.deepEqual(readPluginEnv("absent"), {});
+  // Каталог можно задать явно: так его читает MCP proxy, у которого свой процесс и
+  // свой аргумент, а не `ASSISTANT_DATA_DIR` агента.
+  const before = process.env.ASSISTANT_DATA_DIR;
+  delete process.env.ASSISTANT_DATA_DIR;
+  t.after(() => {
+    if (before !== undefined) process.env.ASSISTANT_DATA_DIR = before;
+  });
+  assert.deepEqual(readPluginEnv("trace", data), {
+    API_KEY: "secret",
+    QUOTED: "with spaces",
+    EMPTY: "",
+  });
   mkdirSync(pluginEnvFile(data, "folder"), { recursive: true });
   assert.deepEqual(readPluginEnv("folder"), {});
 });

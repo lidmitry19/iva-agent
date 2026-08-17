@@ -23,9 +23,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { parseEnv } from "node:util";
 import {
   DEFAULT_INHERITED_ENV_VARS,
   StdioClientTransport,
@@ -35,8 +33,9 @@ import {
   isInitializeRequest,
   type JSONRPCMessage,
 } from "@modelcontextprotocol/sdk/types.js";
+import { readPluginEnv } from "#lib/plugin-config.ts";
 import { expandPluginPlaceholders, readPlugin } from "#lib/plugin-reader.ts";
-import { pluginDataDir, pluginEnvFile, pluginRoot } from "#lib/plugin-store.ts";
+import { pluginDataDir, pluginRoot } from "#lib/plugin-store.ts";
 
 /** Единственный путь MCP; всё остальное, кроме `/health`, — 404. */
 const MCP_PATH = "/mcp";
@@ -97,21 +96,6 @@ export function childEnvironment({
   env.PLUGIN_ROOT = paths.root;
   env.PLUGIN_DATA = paths.data;
   return env;
-}
-
-/** Ключ из `<name>.env`, как его читает и рантайм connection-файла. */
-function envFileValues(file: string): Record<string, string> {
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return {};
-  }
-  const values: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parseEnv(raw))) {
-    if (typeof value === "string") values[key] = value;
-  }
-  return values;
 }
 
 /** Сравнение токенов без утечки по времени; разная длина — просто «нет». */
@@ -212,7 +196,8 @@ export async function startMcpProxy(spec: ProxySpec): Promise<RunningProxy> {
   const cwd = declaredServer.cwd ? expand(declaredServer.cwd) : root;
   const environment = childEnvironment({
     declared,
-    fromEnvFile: envFileValues(pluginEnvFile(spec.dataDir, spec.plugin)),
+    // Тот же ридер, что у connection-файлов: один разбор `<name>.env` на всю Иву.
+    fromEnvFile: readPluginEnv(spec.plugin, spec.dataDir),
     paths,
     inherited: { PATH: process.env.PATH, HOME: process.env.HOME },
   });

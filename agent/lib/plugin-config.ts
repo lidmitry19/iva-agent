@@ -44,10 +44,14 @@ export function readPluginConfig<T = Record<string, unknown>>(name: string): T {
  * Разбор — `parseEnv` из `node:util`: тот же формат, что у `--env-file` самого Node,
  * и своего парсера dotenv у нас не будет.
  */
-export function readPluginEnv(name: string): Record<string, string> {
+export function readPluginEnv(
+  name: string,
+  /** Каталог данных. Задаёт его только прокси: у него свой процесс и свой аргумент. */
+  dir: string = dataDir(),
+): Record<string, string> {
   let raw: string;
   try {
-    raw = readFileSync(pluginEnvFile(dataDir(), name), "utf8");
+    raw = readFileSync(pluginEnvFile(dir, name), "utf8");
   } catch {
     return {};
   }
