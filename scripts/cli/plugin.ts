@@ -858,21 +858,30 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         }
         step(`Reading ${recorded}`);
         const one = await loadMarketplace(git, data, recorded, true);
-        if (one.problem && !one.repo)
-          throw new Error(`${recorded} could not be read: ${one.problem}`);
-        reportMarketplace(one);
-        if (!one.market.name)
-          throw new Error(
-            `${recorded} has no usable ${MARKETPLACE_FILE} — that file is what makes a repository a Marketplace`,
-          );
-        // Одно имя на два списка сделало бы `add <имя>@<marketplace>` невыразимым.
-        const taken = (
-          await loadMarketplaces(git, data, state.marketplaces, false)
-        ).find((other) => other.market.name === one.market.name);
-        if (taken)
-          throw new Error(
-            `a marketplace named ${JSON.stringify(one.market.name)} is already on the list (${taken.recorded})`,
-          );
+        try {
+          if (one.problem && !one.repo)
+            throw new Error(`${recorded} could not be read: ${one.problem}`);
+          reportMarketplace(one);
+          if (!one.market.name)
+            throw new Error(
+              `${recorded} has no usable ${MARKETPLACE_FILE} — that file is what makes a repository a Marketplace`,
+            );
+          // Одно имя на два списка сделало бы `add <имя>@<marketplace>` невыразимым.
+          const taken = (
+            await loadMarketplaces(git, data, state.marketplaces, false)
+          ).find((other) => other.market.name === one.market.name);
+          if (taken)
+            throw new Error(
+              `a marketplace named ${JSON.stringify(one.market.name)} is already on the list (${taken.recorded})`,
+            );
+        } catch (error) {
+          // Список не принят — его выкачанная копия в data/ тоже не нужна.
+          rmSync(marketplaceCachePath(data, recorded), {
+            recursive: true,
+            force: true,
+          });
+          throw error;
+        }
         // Первый свой список материализует и дефолт, первым: иначе «добавил свой»
         // молча отключало бы встроенный, и снять дефолт было бы нечем.
         await writePluginsState(data, {

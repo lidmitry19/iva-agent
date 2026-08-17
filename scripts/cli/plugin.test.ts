@@ -1223,6 +1223,8 @@ test("a repository without a usable list is not a marketplace, and nothing is re
     );
     assert.match(messages(events, "warn"), why, source);
     assert.deepEqual((await readPluginsState(data)).marketplaces, [], source);
+    // Отказ не оставляет за собой выкачанную копию непринятого репозитория.
+    assert.equal(existsSync(marketplaceCachePath(data, source)), false, source);
   }
 
   // Битый файл у УЖЕ добавленного списка не роняет команду и виден в диагностике.
