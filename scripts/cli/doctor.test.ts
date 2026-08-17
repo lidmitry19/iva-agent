@@ -686,6 +686,41 @@ test("doctor says whether an enabled plugin's code is in the version that runs",
   ]);
 });
 
+test("a plugin unit left behind is named even when no plugin is installed", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const unitDir = join(root, "systemd");
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(join(unitDir, "iva-mcp-gone-srv.service"), "[Service]\n");
+
+  const events: Array<[string, string]> = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    UNIT_DIR: unitDir,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    hasSystemd: () => true,
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+
+  assert.deepEqual(
+    events.filter(([, message]) => message.startsWith("iva-mcp-")),
+    [
+      [
+        "warn",
+        "iva-mcp-gone-srv.service belongs to no enabled and trusted plugin — run: iva plugin sync",
+      ],
+    ],
+  );
+});
+
 test("doctor checks the plugin units and the health of every MCP proxy", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "present=true\n");

@@ -536,12 +536,16 @@ export function createDoctorCommand(
             )
             .map((entry) => entry.name)
         : [];
+      // Юниты плагинов, которые сейчас на диске: их читаем до раннего выхода, иначе
+      // юнит, оставшийся от снятого плагина, на пустой установке никто бы не назвал.
+      const onDisk = hasSystemd() ? installedPluginUnits(UNIT_DIR) : [];
       // Плагинов нет вообще — доктору сказать нечего, и молчание здесь честнее
       // строки «0 плагинов» в отчёте установки, которая их никогда не видела.
       if (
         state.plugins.length === 0 &&
         folders.length === 0 &&
-        leftovers.size === 0
+        leftovers.size === 0 &&
+        onDisk.length === 0
       )
         return;
 
@@ -641,7 +645,7 @@ export function createDoctorCommand(
           ok(`plugin ${about.plugin}: ${unit} running`);
           okN++;
         }
-        for (const unit of installedPluginUnits(UNIT_DIR)) {
+        for (const unit of onDisk) {
           if (expected.has(unit)) continue;
           warn(
             `${unit} belongs to no enabled and trusted plugin — run: iva plugin sync`,
