@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import fc from "fast-check";
 import {
+  MCP_SCHEMA_URL,
   PLUGIN_SCHEMA_URL,
   pluginNameProblem,
   readPlugin,
@@ -249,6 +250,185 @@ test("property: every accepted skill path stays inside the plugin root", async (
         );
       }
     }),
+    RUNS,
+  );
+});
+
+const command = fc.oneof(
+  fc.constantFrom(
+    "node",
+    "./bin/server",
+    "./../outside/bin",
+    "./a/../../b",
+    "./sub/./ok",
+    "node server.js",
+    "${PLUGIN_ROOT}/bin",
+    "/usr/bin/node",
+  ),
+  fc.string({ maxLength: 8 }),
+);
+
+const cwd = fc.constantFrom(
+  "./tools",
+  "./../outside",
+  "${PLUGIN_ROOT}",
+  "${PLUGIN_ROOT}/x",
+  "${PLUGIN_DATA}/x",
+  "tools",
+);
+
+const url = fc.constantFrom(
+  "https://a.test/mcp",
+  "http://a.test/mcp",
+  "http://localhost:1/mcp",
+  "https://u:p@a.test/mcp",
+  "not a url",
+);
+
+// Записи генерятся по форме транспорта, а не одним общим объектом: закрытая схема
+// отвергает чужое поле раньше всех прочих проверок, и «универсальная» запись почти
+// никогда не доходила бы до принятия — свойство стало бы пустым.
+const stdioEntry = fc.record(
+  {
+    type: fc.constantFrom("stdio", "stdio", "grpc"),
+    command,
+    args: fc.oneof(
+      fc.array(fc.string({ maxLength: 6 }), { maxLength: 2 }),
+      fc.string(),
+    ),
+    env: fc.oneof(
+      fc.dictionary(fc.string({ maxLength: 6 }), fc.string({ maxLength: 6 }), {
+        maxKeys: 2,
+      }),
+      fc.constant({ PLUGIN_ROOT: "/tmp" }),
+    ),
+    cwd,
+  },
+  { requiredKeys: ["type", "command"] },
+);
+
+const remoteEntry = fc.record(
+  {
+    type: fc.constantFrom("streamable-http", "sse", "http"),
+    url,
+    headers: fc.oneof(
+      fc.dictionary(fc.string({ maxLength: 6 }), fc.string({ maxLength: 6 }), {
+        maxKeys: 2,
+      }),
+      fc.constant({ "X-A": "1", "x-a": "2" }),
+    ),
+  },
+  { requiredKeys: ["type", "url"] },
+);
+
+const mcpEntry = fc.oneof(
+  stdioEntry,
+  remoteEntry,
+  fc.string(),
+  fc.constant(null),
+  fc.record({ type: fc.constant("stdio"), command: fc.string(), url }),
+);
+
+test("property: any mcp.json yields servers or reasons, and every accepted path is contained", async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.oneof(
+        fc.json().map((raw) => JSON.parse(raw) as unknown),
+        fc
+          .record(
+            {
+              $schema: fc.constantFrom(MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL, 2),
+              mcpServers: fc.oneof(
+                fc.dictionary(fc.string({ maxLength: 6 }), mcpEntry, {
+                  maxKeys: 4,
+                }),
+                fc.array(mcpEntry, { maxLength: 2 }),
+              ),
+              extra: fc.integer(),
+            },
+            { requiredKeys: ["$schema"] },
+          )
+          .map((value) => value as unknown),
+      ),
+      async (document) => {
+        const dir = mkdtempSync(join(world(), "mcp-"));
+        write(
+          dir,
+          "plugin.json",
+          JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: "demo" }),
+        );
+        writeFileSync(join(dir, "mcp.json"), JSON.stringify(document));
+
+        const report = await readPlugin(dir);
+        // Битый mcp.json не валит плагин: манифест остаётся принятым.
+        assert.notEqual(report.manifest, null);
+        for (const [name, server] of Object.entries(report.mcp)) {
+          assert.equal(typeof name, "string");
+          if (server.type !== "stdio") {
+            assert.match(server.url, /^https?:\/\//u);
+            continue;
+          }
+          if (!server.command.startsWith("./")) continue;
+          const target = resolve(report.root, server.command);
+          const inside = relative(report.root, target);
+          assert.ok(
+            inside && !inside.startsWith(".."),
+            `${server.command} escapes the root`,
+          );
+        }
+      },
+    ),
+    RUNS,
+  );
+});
+
+// Путь из случайных сегментов, где `..` встречается ровно так же часто, как обычное
+// имя: половина команд вылезает из корня, и правило containment проверяется на деле,
+// а не на удачно выпавшей константе.
+const relativePath = fc
+  .array(fc.constantFrom("bin", "..", ".", "sub", "server"), {
+    minLength: 1,
+    maxLength: 4,
+  })
+  .map((parts) => `./${parts.join("/")}`);
+
+test("property: an accepted ./command or ./cwd never leaves the plugin root", async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      relativePath,
+      relativePath,
+      async (commandPath, cwdPath) => {
+        const dir = mkdtempSync(join(world(), "contain-"));
+        write(
+          dir,
+          "plugin.json",
+          JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: "demo" }),
+        );
+        write(
+          dir,
+          "mcp.json",
+          JSON.stringify({
+            $schema: MCP_SCHEMA_URL,
+            mcpServers: {
+              one: { type: "stdio", command: commandPath },
+              two: { type: "stdio", command: "node", cwd: cwdPath },
+            },
+          }),
+        );
+
+        const report = await readPlugin(dir);
+        // Сам корень тоже внутри корня: `./bin/..` — это корень, и спека такой
+        // `cwd` разрешает.
+        const contained = (path: string): boolean =>
+          !relative(report.root, resolve(report.root, path)).startsWith("..");
+        const one = report.mcp.one;
+        if (one && one.type === "stdio")
+          assert.ok(contained(one.command), `${one.command} escapes the root`);
+        const two = report.mcp.two;
+        if (two && two.type === "stdio" && two.cwd)
+          assert.ok(contained(two.cwd), `${two.cwd} escapes the root`);
+      },
+    ),
     RUNS,
   );
 });
