@@ -1,6 +1,11 @@
-// Хук журнала на фейковых событиях eve: что попадает в строку, что отбрасывается и как
-// выглядит ход субагента. Хук — единственный писатель eve-части журнала, поэтому проверка
-// идёт по РЕАЛЬНЫМ формам событий из node_modules/eve/dist/src/protocol/message.d.ts.
+// Хук журнала (agent/hooks/trace.ts) на фейковых событиях eve: что попадает в строку, что
+// отбрасывается и как выглядит ход субагента. Проверка идёт по РЕАЛЬНЫМ формам событий из
+// node_modules/eve/dist/src/protocol/message.d.ts.
+//
+// Тест лежит в agent/lib, а не рядом с хуком: eve считает хуком КАЖДЫЙ файл в agent/hooks,
+// и «trace.test» — нелегальное имя хука, из-за которого падает вся discovery (`eve build`:
+// «Hook path segment "trace.test" is not a legal hook name»). Поэтому во всех слотах
+// authored-дерева (hooks, channels, instructions, schedules, tools) тестов нет вовсе.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -21,8 +26,8 @@ const DATA = process.env.ASSISTANT_DATA_DIR;
 // Хук импортирует "../lib/trace.js" (в проде специфкатор переписывает eve build) —
 // голому node это переписывает тот же резолвер, что и другим тестам authored-дерева.
 await import("../../scripts/lib/ts-esm-hooks.ts");
-const { traceDay, traceFilePath } = await import("../lib/trace.ts");
-const hook = (await import("./trace.ts")).default;
+const { traceDay, traceFilePath } = await import("./trace.ts");
+const hook = (await import("../hooks/trace.ts")).default;
 
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));
 
