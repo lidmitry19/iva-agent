@@ -143,33 +143,36 @@ export function capTraceString(value: string, limit: number): string {
 // Значения, которые в чужом payload встречаются, а в JSON не ложатся: их разбираем
 // ЯВНО и по-своему. Иначе Object.entries обходит 5-мегабайтный Buffer поэлементно
 // (замер: 2.9 с в горячем пути хода), Date превращается в {}, а Error — в пустой объект.
-function capForeign(value: object, limit: number): unknown {
+function capForeign(value: object): unknown {
   if (ArrayBuffer.isView(value)) return { bytes: value.byteLength };
   if (value instanceof ArrayBuffer) return { bytes: value.byteLength };
   if (value instanceof Date)
     return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
   if (value instanceof Error)
-    return capTraceString(`${value.name}: ${value.message}`, limit);
-  if (value instanceof Map || value instanceof Set) return undefined;
-  return undefined;
+    return capTraceString(
+      `${value.name}: ${value.message}`,
+      TRACE_CONTENT_LIMIT,
+    );
+  return undefined; // Map и Set разбирает capValue: у них есть своё содержимое.
 }
 
 // Любое значение → JSON-безопасное и ограниченное: строки по потолку, массивы и объекты
 // по числу элементов, вложенность по глубине. Циклы обрываются той же глубиной, поэтому
 // JSON.stringify ниже не может уйти в бесконечность.
-function capValue(value: unknown, limit: number, depth: number): unknown {
-  if (typeof value === "string") return capTraceString(value, limit);
+function capValue(value: unknown, depth: number): unknown {
+  if (typeof value === "string")
+    return capTraceString(value, TRACE_CONTENT_LIMIT);
   if (typeof value === "number" || typeof value === "boolean" || value === null)
     return value;
-  if (typeof value === "bigint") return capTraceString(value.toString(), limit);
-  if (Array.isArray(value)) return capList(value, limit, depth);
+  if (typeof value === "bigint")
+    return capTraceString(value.toString(), TRACE_CONTENT_LIMIT);
+  if (Array.isArray(value)) return capList(value, depth);
   if (typeof value === "object") {
     if (depth >= MAX_DEPTH) return TRACE_DEPTH_MARKER;
-    const foreign = capForeign(value, limit);
+    const foreign = capForeign(value);
     if (foreign !== undefined) return foreign;
-    if (value instanceof Map)
-      return capList([...value.entries()], limit, depth);
-    if (value instanceof Set) return capList([...value], limit, depth);
+    if (value instanceof Map) return capList([...value.entries()], depth);
+    if (value instanceof Set) return capList([...value], depth);
     // Чужой объект умеет кусаться: геттер с исключением, прокси, отравленный toJSON.
     // Читателю журнала это не интересно — поле помечается и едет дальше.
     let entries: [string, unknown][];
@@ -183,7 +186,7 @@ function capValue(value: unknown, limit: number, depth: number): unknown {
     // а на его месте оказывается прототип. У объекта без прототипа такой ловушки нет.
     const out = Object.create(null) as Record<string, unknown>;
     for (const [key, item] of entries.slice(0, MAX_KEYS)) {
-      const capped = capValue(item, limit, depth + 1);
+      const capped = capValue(item, depth + 1);
       if (capped !== undefined)
         out[capTraceString(key, TRACE_ID_LIMIT)] = capped;
     }
@@ -195,24 +198,13 @@ function capValue(value: unknown, limit: number, depth: number): unknown {
   return undefined; // undefined, функция, symbol — в JSON им места нет
 }
 
-function capList(
-  value: readonly unknown[],
-  limit: number,
-  depth: number,
-): unknown {
+function capList(value: readonly unknown[], depth: number): unknown {
   if (depth >= MAX_DEPTH) return TRACE_DEPTH_MARKER;
   const items: unknown[] = value
     .slice(0, MAX_ITEMS)
-    .map((item) => capValue(item, limit, depth + 1) ?? null);
+    .map((item) => capValue(item, depth + 1) ?? null);
   if (value.length > MAX_ITEMS) items.push(TRACE_TRUNCATION_MARKER);
   return items;
-}
-
-function capRecord(
-  record: Record<string, unknown>,
-  limit: number,
-): Record<string, unknown> {
-  return capValue(record, limit, 1) as Record<string, unknown>;
 }
 
 function header(input: TraceInput, now: Date) {
@@ -226,6 +218,11 @@ function header(input: TraceInput, now: Date) {
   };
 }
 
+/** Влезает ли строка в потолок. Считается в БАЙТАХ: именно они уходят в write(2). */
+function fits(line: string): boolean {
+  return Buffer.byteLength(line, "utf8") <= TRACE_LINE_LIMIT;
+}
+
 // Сериализация одного варианта строки. Всё, что могло сломаться на чужих данных, уже
 // сломалось в capValue и помечено; здесь остаётся последний предохранитель, чтобы
 // событие всегда становилось строкой, а не исключением посреди хода.
@@ -236,7 +233,7 @@ function stringify(
   try {
     return JSON.stringify({
       ...head,
-      data: capRecord(data, TRACE_CONTENT_LIMIT),
+      data: capValue(data, 1) as Record<string, unknown>,
     });
   } catch {
     return JSON.stringify({ ...head, data: { traceUnreadable: true } });
@@ -272,15 +269,14 @@ export function traceLine(
 
   const head = header(input, now);
   const line = stringify(head, full);
-  if (Buffer.byteLength(line, "utf8") <= TRACE_LINE_LIMIT) return line;
+  if (fits(line)) return line;
 
   const trimmed = stringify(head, { ...base, traceTrimmed: true });
-  if (Buffer.byteLength(trimmed, "utf8") <= TRACE_LINE_LIMIT) return trimmed;
+  if (fits(trimmed)) return trimmed;
   // Само `data` не влезло: имена ушли, но размеры содержимого остаются — контракт
   // (docs/trace.md) обещает их при любой обрезке.
   const sizesOnly = stringify(head, { ...sizes, traceTrimmed: true });
-  if (Buffer.byteLength(sizesOnly, "utf8") <= TRACE_LINE_LIMIT)
-    return sizesOnly;
+  if (fits(sizesOnly)) return sizesOnly;
   return JSON.stringify({ ...head, data: { traceTrimmed: true } });
 }
 
@@ -395,6 +391,17 @@ function emit(build: () => TraceInput): void {
   }
 }
 
+/**
+ * Событие, которое без ключа хода бессмысленно: ключ берётся из контекста, а вне хода
+ * запись НЕ ИДЁТ вовсе — вердикт не к чему прицепить, а диск чистый примитив трогать не
+ * должен (docs/trace.md, «Gate verdicts outside a turn»).
+ */
+function emitInScope(build: (scope: TraceScope) => TraceInput): void {
+  const scope = activeScope();
+  if (!scope) return;
+  emit(() => build(scope));
+}
+
 // --- Корреляция: ключ апдейта ↔ ход ---
 
 // В журнал попадает только то, что имеет текстовый вид: чужой объект в поле id даёт
@@ -409,7 +416,7 @@ function scalarText(value: unknown): string {
 }
 
 /** Ключ апдейта: минимальное, что знают обе стороны — мост и ядро. */
-export function traceUpdateKey(chatId: unknown, messageId: unknown): string {
+function traceUpdateKey(chatId: unknown, messageId: unknown): string {
   return `tg:${scalarText(chatId)}:${scalarText(messageId)}`;
 }
 
@@ -527,10 +534,6 @@ export function traceWithScope<T>(scope: TraceScope, run: () => T): T {
   return scopeStore.run(scope, run);
 }
 
-export function traceScope(): TraceScope | undefined {
-  return activeScope();
-}
-
 // --- Швы Ивы ---
 
 type InboundMessageLike = {
@@ -604,10 +607,8 @@ export function traceInboundOutcome(
 }
 
 /**
- * Шов inbound-Gate: вердикт санитайзера входа. Пишется ТОЛЬКО внутри хода — ключ берётся
- * из контекста (traceEnterScope), потому что сам гейт про ходы ничего не знает. Нет
- * контекста (юнит-тест, скрипт, чужой вызов) — нет и события: вердикт без хода в ленте
- * не к чему прицепить, а запись на диск из чистого примитива — чистый вред.
+ * Шов inbound-Gate: вердикт санитайзера входа. Пишется ТОЛЬКО внутри хода (emitInScope),
+ * потому что сам гейт про ходы ничего не знает.
  *
  * Имя события следует поверхности: телеграм — `gate.inbound`, веб — `gate.web`.
  */
@@ -621,9 +622,7 @@ export function traceInboundGate(
   },
   chars: number,
 ): void {
-  const scope = activeScope();
-  if (!scope) return;
-  emit(() => ({
+  emitInScope((scope) => ({
     kind: "gate",
     name: surface === "web" ? "web" : "inbound",
     turn: scope.turn,
@@ -703,8 +702,8 @@ export function traceTurnBound(
 
 /**
  * Шов outbound-Gate: что нашёл сканер в тексте, уходящем в чат. Ключ хода — из контекста
- * (его ставит traceOutbox вокруг отправки), поэтому сигнатура redactNotice не меняется, а
- * вне хода событие не пишется вовсе. Превью находки НЕ пишем: там кусок самого секрета.
+ * (его ставит traceOutbox вокруг отправки), поэтому сигнатура redactNotice не меняется.
+ * Превью находки НЕ пишем: там кусок самого секрета.
  */
 export function traceOutboundGate(
   clean: boolean,
@@ -712,9 +711,7 @@ export function traceOutboundGate(
   chars: number,
   redacted: string,
 ): void {
-  const scope = activeScope();
-  if (!scope) return;
-  emit(() => ({
+  emitInScope((scope) => ({
     kind: "gate",
     name: "outbound",
     turn: scope.turn,
@@ -798,20 +795,31 @@ export function traceStop(
 export type TraceBridgeDecision =
   "owned" | "terminal-drop" | "unownable" | "write-failed";
 
-/** Шов Bridge: апдейт принят мостом или отброшен. Имя события следует исходу. */
-export function traceBridgeAdmission(
+// Оба события моста — один апдейт, разобранный одинаково: имя следует исходу.
+function emitBridge(
   update: TelegramUpdateLike,
-  decision: TraceBridgeDecision,
+  name: string,
+  extra: Record<string, unknown>,
 ): void {
   emit(() => {
     const facts = updateFacts(update);
     return {
       kind: "bridge",
-      name: decision === "owned" ? "admitted" : "dropped",
+      name,
       turn: traceUpdateKey(facts.chatId, facts.messageId),
       source: "bridge",
-      data: { ...facts, decision },
+      data: { ...facts, ...extra },
     };
+  });
+}
+
+/** Шов Bridge: апдейт принят мостом или отброшен. Имя события следует исходу. */
+export function traceBridgeAdmission(
+  update: TelegramUpdateLike,
+  decision: TraceBridgeDecision,
+): void {
+  emitBridge(update, decision === "owned" ? "admitted" : "dropped", {
+    decision,
   });
 }
 
@@ -821,18 +829,8 @@ export function traceBridgeDelivery(
   accepted: unknown,
   ms: number,
 ): void {
-  emit(() => {
-    const facts = updateFacts(update);
-    return {
-      kind: "bridge",
-      name: accepted ? "delivered" : "rejected",
-      turn: traceUpdateKey(facts.chatId, facts.messageId),
-      source: "bridge",
-      data: {
-        ...facts,
-        accepted: accepted === "handled" ? "handled" : Boolean(accepted),
-        ms,
-      },
-    };
+  emitBridge(update, accepted ? "delivered" : "rejected", {
+    accepted: accepted === "handled" ? "handled" : Boolean(accepted),
+    ms,
   });
 }
