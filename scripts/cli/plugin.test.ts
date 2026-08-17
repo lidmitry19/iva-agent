@@ -1763,7 +1763,7 @@ test("a version that runs without the plugin's code is not a successful install"
   // The pipeline says it built something; the version that runs has no mount for the
   // plugin. "installed" is a promise about the code that runs, so this is a failure.
   const build = buildStub({ status: "built", version: "0.3.24-abcdefabcdef" });
-  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
 
   await cmdPlugin(["add", folder]);
 
@@ -1787,7 +1787,7 @@ test("a code plugin without a tsconfig in sh.iva is refused with what to do", as
   const folder = codePlugin("carrier");
   rmSync(join(folder, "sh.iva/tsconfig.json"));
   const build = buildStub();
-  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
 
   await assert.rejects(
     cmdPlugin(["add", folder]),
@@ -1803,7 +1803,7 @@ test("the copy an install displaced survives another command's sweep while it bu
   const root = home();
   const folder = codePlugin("carrier");
   const build = buildStub();
-  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
   await cmdPlugin(["add", folder]);
   // What an install in progress leaves in the store while its version builds: the copy
   // it displaced, waiting to be put back if the build fails. The build holds the update
@@ -1825,7 +1825,7 @@ test("an update of several plugins names the one that broke the build", async ()
   const first = codePlugin("alpha-code", { skill: "one" });
   const second = codePlugin("beta-code", { skill: "two" });
   const build = buildStub();
-  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
   await cmdPlugin(["add", first]);
   await cmdPlugin(["add", second]);
   const installed = await readPluginsState(data);
@@ -1856,6 +1856,7 @@ test("sync says the code of a restored plugin is not in the version that runs", 
     root,
     undefined,
     undefined,
+    {},
     build,
   );
   await cmdPlugin(["add", folder]);
@@ -1879,6 +1880,7 @@ test("sync refuses to restore a plugin whose code wants a taken mount file", asy
     root,
     undefined,
     undefined,
+    {},
     build,
   );
   await cmdPlugin(["add", first]);
