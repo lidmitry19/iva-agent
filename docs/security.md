@@ -65,6 +65,10 @@ The setup and upgrade paths generate `ASSISTANT_BEARER` automatically and keep `
 
 Iva's tools (`bash`, `read_file`, `write_file`, `glob`, `grep`) run host-native on your VPS — Node `fs` and `child_process`, no Docker, no sandbox. That's deliberate: it can read your files, fix its own config, run your scripts. It also means a hijacked turn has whatever access the service user has. Run the installer as a dedicated non-root user; everything is systemd _user_ units, so Iva inherits exactly that user's permissions and nothing more.
 
+## Plugins
+
+A plugin extends Iva by running inside her, so installing one is a trust decision. Plugin code runs in the agent's process, and `bash` inside a plugin's skill runs with the agent's environment — both see every key of this installation. That is the accepted risk of [ADR-0008](https://github.com/smixs/iva/blob/main/docs/adr/0008-plugin-is-the-unit-of-extension.md), and checking the manifest does not cover it: `plugin.json` describes what is inside, not what it does. An MCP server from a plugin gets less — its own environment, `PLUGIN_ROOT` and `PLUGIN_DATA`, and nothing from the agent's. Two boundaries hold the decision in your hands: only the owner installs, and only through `iva plugin` in the terminal (no Telegram command, no model tool, so an injected message cannot install a plugin), and `trusted` is a second, separate yes before any plugin process — an MCP server or a service — runs on the host. Full picture: [plugins.md](plugins.md).
+
 ## Privacy
 
 - 🗄️ **Your vault, your repo** — memory lives in a separate private git repository you own; the nightly Brain pass commits and pushes it ([memory.md](memory.md)).

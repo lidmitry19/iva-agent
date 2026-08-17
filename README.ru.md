@@ -162,7 +162,7 @@ cd ~/iva && bash install.sh
 
 ## Документация
 
-[Юзкейсы](docs/ru/use-cases.md) · [Установка](docs/ru/install.md) · [Настройка](docs/ru/configuration.md) · [Память](docs/ru/memory.md) · [Провайдеры](docs/providers.md) <sub>EN</sub> · [Безопасность](docs/ru/security.md) · [Деплой](docs/deploy.md) <sub>EN</sub> · [Команды и CLI](docs/cli.md) <sub>EN</sub> · [Меню](docs/menu.md) <sub>EN</sub> · [Расширение](docs/extending.md) <sub>EN</sub> · [FAQ](docs/ru/faq.md) · [Решение проблем](docs/troubleshooting.md) <sub>EN</sub>
+[Юзкейсы](docs/ru/use-cases.md) · [Установка](docs/ru/install.md) · [Настройка](docs/ru/configuration.md) · [Память](docs/ru/memory.md) · [Провайдеры](docs/providers.md) <sub>EN</sub> · [Безопасность](docs/ru/security.md) · [Деплой](docs/deploy.md) <sub>EN</sub> · [Команды и CLI](docs/cli.md) <sub>EN</sub> · [Меню](docs/menu.md) <sub>EN</sub> · [Расширение](docs/extending.md) <sub>EN</sub> · [Плагины](docs/ru/plugins.md) · [FAQ](docs/ru/faq.md) · [Решение проблем](docs/troubleshooting.md) <sub>EN</sub>
 
 Документация на английском → [docs/](docs/)
 

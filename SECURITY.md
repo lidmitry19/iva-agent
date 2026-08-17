@@ -60,6 +60,19 @@ Update button in Telegram) — running an old tag is not a supported configurati
   you when you opt in.
 - Self-hosting mistakes — an exposed `.env`, a world-readable vault, a shared VPS.
 
+## Plugins
+
+Installing a plugin is a trust decision, and Iva says so out loud before the first one.
+Plugin code runs inside the agent's process and `bash` inside a plugin's skill runs with the
+agent's environment, so both see every key of the installation. That is an accepted risk
+([ADR-0008](docs/adr/0008-plugin-is-the-unit-of-extension.md)), not a gap to report: what a
+plugin you installed does with your keys is the plugin's behaviour, not a vulnerability in
+Iva. An MCP server from a plugin gets less — its own environment, `PLUGIN_ROOT` and
+`PLUGIN_DATA`, nothing else. Only the owner can install a plugin, and only through
+`iva plugin` in the terminal: there is no Telegram command and no model tool, so an injected
+message cannot install one. A bypass of _that_ boundary is in scope. Details:
+[docs/plugins.md](docs/plugins.md).
+
 ## The honest boundary
 
 Your vault is a private git repo on your own server — and once `gh` is authenticated on

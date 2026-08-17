@@ -20,6 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
 - [Command reference](https://smixs.github.io/iva/cli.md): Telegram slash commands and the `iva` CLI
 - [Settings menu](https://smixs.github.io/iva/menu.md): The `/menu` hub — screen map, what applies instantly vs on restart, key intake, character test, memory interview
 - [Extending](https://smixs.github.io/iva/extending.md): Add skills, MCP connections, and custom tools
+- [Plugins](https://smixs.github.io/iva/plugins.md): Agent Plugins folders - install from a Marketplace, git or a folder, enabled vs trusted, writing skills, an eve Extension, MCP servers and services, and the accepted risk
 - [Trace](https://smixs.github.io/iva/trace.md): The turn journal - the event schema, the catalogue, how to stitch one turn, retention and the content toggle
 - [FAQ](https://smixs.github.io/iva/faq.md): Short answers on cost, models, privacy, and Obsidian
 - [Troubleshooting](https://smixs.github.io/iva/troubleshooting.md): Diagnosing a silent bot, failed timers, and provider errors

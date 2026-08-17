@@ -10,6 +10,10 @@ off disk at run time and never go through a build (see below). Edits anywhere el
 the tree stay a plain local patch: the updater stashes them and replays them onto the new revision, and
 archives them under `data/update-conflicts/` when they no longer apply.
 
+A capability can also arrive packaged: a plugin is a folder with skills, code and MCP servers
+that installs with one command and leaves with another, into the same custom layer. This page is
+what you write yourself; plugins are [plugins.md](plugins.md).
+
 ## Adding a skill
 
 Skills are markdown procedures in `data/custom/agent/skills/` that the model loads on demand. The
@@ -30,7 +34,8 @@ with a `SKILL.md` plus supporting files. Iva loads both your custom skills and t
 
 A new skill needs no build: Iva reads `data/custom/agent/skills/` at the start of every turn, so a file
 written during a conversation is loadable on the next one. A skill that shares its name with a bundled
-one replaces it. Tools, connections, subagents and instructions are code that goes into the bundle -
+one replaces it. The skills of an installed plugin are read the same way, and yours here win over
+theirs ([plugins.md](plugins.md)). Tools, connections, subagents and instructions are code that goes into the bundle -
 those still need `iva update`.
 
 ⚠️ Your skills go in `data/custom/agent/skills/` and nowhere else - never in a `.claude/` directory

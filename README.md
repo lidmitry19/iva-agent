@@ -154,7 +154,7 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 
 ## Documentation
 
-[Use cases](docs/use-cases.md) · [Install](docs/install.md) · [Configuration](docs/configuration.md) · [Memory](docs/memory.md) · [Providers](docs/providers.md) · [Security](docs/security.md) · [Deploy](docs/deploy.md) · [Commands & CLI](docs/cli.md) · [Menu](docs/menu.md) · [Extending](docs/extending.md) · [FAQ](docs/faq.md) · [Troubleshooting](docs/troubleshooting.md)
+[Use cases](docs/use-cases.md) · [Install](docs/install.md) · [Configuration](docs/configuration.md) · [Memory](docs/memory.md) · [Providers](docs/providers.md) · [Security](docs/security.md) · [Deploy](docs/deploy.md) · [Commands & CLI](docs/cli.md) · [Menu](docs/menu.md) · [Extending](docs/extending.md) · [Plugins](docs/plugins.md) · [FAQ](docs/faq.md) · [Troubleshooting](docs/troubleshooting.md)
 
 Документация на русском → [docs/ru/](docs/ru/)
 
