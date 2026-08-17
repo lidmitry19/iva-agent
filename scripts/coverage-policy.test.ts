@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 219;
+const EXPECTED_PRODUCTION_COUNT = 220;
 const EXPECTED_INVENTORY_SHA256 =
-  "976fbd5d428d6f1fe57a6326f645064e6acadff1294329fcb6f297ea81e82c92";
+  "7e1ebaadd402cb64d09d7722b7c1c4cf5423ee718909f7938e60d805d4bbb7fa";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -69,6 +69,9 @@ const EXPECTED_INVENTORY_SHA256 =
 // stays 26 - unlike `agent/hooks/transcript.ts`, this hook is loaded by its own test. That
 // test lives in `agent/lib/`, not beside the hook: eve treats every file under
 // `agent/hooks/` as a hook, and `trace.test` is not a legal hook name.
+// The rich-message reader `agent/lib/telegram-rich-message.ts` came last. Its own test
+// reports it at 99.53% lines, 92.69% branches and 100% functions, so the blind spot
+// stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

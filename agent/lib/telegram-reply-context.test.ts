@@ -275,3 +275,30 @@ await test("malformed and empty raw replies fail closed while valid text survive
     "kept",
   );
 });
+
+await test("reply reads rich_message through the ordinary sanitized text field", () => {
+  const rich = {
+    blocks: [{ type: "paragraph", text: "quoted rich article" }],
+  };
+  const parsed = parseTelegramReplyContext({
+    reply_to_message: reply({ text: undefined, rich_message: rich }),
+  });
+  assert.equal(parsed.text, "quoted rich article");
+  assert.equal(parsed.truncated, false);
+
+  const plain = parseTelegramReplyContext({
+    reply_to_message: reply({ text: "plain wins", rich_message: rich }),
+  });
+  assert.equal(plain.text, "plain wins");
+});
+
+await test("reply exposes rich_message truncation even without readable text", () => {
+  const parsed = parseTelegramReplyContext({
+    reply_to_message: reply({
+      text: undefined,
+      rich_message: { blocks: new Array(25_001).fill(null) },
+    }),
+  });
+  assert.equal(parsed.text, "");
+  assert.equal(parsed.truncated, true);
+});

@@ -582,6 +582,152 @@ await test("склейка частей: чистый текст-носител�
   assert.equal(calls.transcribed, 1);
 });
 
+await test("rich_message заменяет только пустую текстовую проекцию", async () => {
+  const before = dailyText();
+  const rich = {
+    blocks: [{ type: "paragraph", text: "article body" }],
+  };
+  const first = harness();
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 11,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      rich_message: rich,
+    }),
+    first.effects,
+  );
+
+  assert.deepEqual(result?.context, ["article body"]);
+  assert.match(dailyText().slice(before.length), /\[text\]\narticle body/u);
+
+  const second = harness();
+  const plain = await inbound.runTelegramInbound(
+    privateText("plain wins", { rich_message: rich }),
+    second.effects,
+  );
+  assert.equal(plain?.context, undefined);
+});
+
+await test("rich_message обрабатывает медиа по порядку, с потолком и без потери текста", async (t) => {
+  muteErrors(t);
+  let requests = 0;
+  const { calls, effects } = harness({
+    request: (_method, body) => {
+      requests += 1;
+      return body?.file_id === "R3"
+        ? Promise.reject(new Error("one file failed"))
+        : Promise.resolve({
+            body: { result: { file_path: `photos/${body?.file_id}.jpg` } },
+          });
+    },
+  });
+  stubDownload(t, calls);
+  const photos = Array.from({ length: 12 }, (_, index) => ({
+    type: "photo",
+    photo: [
+      {
+        file_id: `R${index}`,
+        file_unique_id: `RU${index}`,
+        width: 100,
+        height: 100,
+      },
+    ],
+  }));
+
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 12,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      rich_message: {
+        blocks: [{ type: "paragraph", text: "one article" }, ...photos],
+      },
+    }),
+    effects,
+  );
+
+  assert.ok(result?.context);
+  assert.equal(
+    result.context.filter((entry) => entry === "one article").length,
+    1,
+  );
+  assert.equal(requests, 10);
+  assert.equal(calls.downloads, 9);
+  assert.equal(calls.vision, 9);
+  assert.ok(
+    result.context.some((entry) => /could not be processed/u.test(entry)),
+  );
+  assert.ok(result.context.includes("2 more items were not processed"));
+});
+
+await test("усечение rich_message видно модели", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 13,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      rich_message: { blocks: new Array(25_001).fill(null) },
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "[rich] The message was truncated while being read.",
+  ]);
+});
+
+await test("rich_message читается в каждой части пачки, включая пересылку", async () => {
+  const before = dailyText();
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 14,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      text: "carrier",
+      iva_parts: [
+        {
+          message_id: 14,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          text: "carrier",
+        },
+        {
+          message_id: 15,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          forward_origin: {
+            type: "channel",
+            chat: { id: -100, type: "channel", title: "Source" },
+            message_id: 8,
+            date: 1,
+          },
+          rich_message: {
+            blocks: [{ type: "paragraph", text: "forwarded article" }],
+          },
+        },
+        {
+          message_id: 16,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          rich_message: {
+            blocks: [{ type: "paragraph", text: "third article" }],
+          },
+        },
+      ],
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, ["forwarded article", "third article"]);
+  const written = dailyText().slice(before.length);
+  assert.match(written, /\[text\]\ncarrier/u);
+  assert.match(written, /\[text\]\nforwarded article/u);
+  assert.match(written, /\[text\]\nthird article/u);
+});
+
 // --- Trace ---
 //
 // Пайплайн пишет в журнал хода ровно одно событие — «апдейт вошёл внутрь» с вердиктом

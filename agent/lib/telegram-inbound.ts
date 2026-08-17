@@ -24,6 +24,15 @@ import {
 import { traceInboundReceived } from "./trace.ts";
 import { appendDaily } from "./vault-daily.ts";
 import { buildTelegramReplyContext } from "./telegram-reply-context.ts";
+import {
+  readTelegramMessageText,
+  type RichMessageReading,
+  type TelegramMessageTextReading,
+} from "./telegram-rich-message.ts";
+
+// Один rich_message обрабатывает не больше обычного Telegram-альбома.
+// Это ограничивает последовательные скачивания и вызовы зрения одним ходом.
+const RICH_MEDIA_LIMIT = 10;
 
 // Структурная проекция входящего сообщения eve: пайплайну хватает этих полей.
 export type TelegramInboundMessage = {
@@ -171,6 +180,7 @@ function shouldDispatchMedia(
 function messageViewForRaw(
   message: TelegramInboundMessage,
   raw: TelegramRawMessage,
+  reading: TelegramMessageTextReading,
 ): TelegramInboundMessage {
   const rawChat = asRecord(raw.chat);
   const rawFrom = asRecord(raw.from);
@@ -179,9 +189,16 @@ function messageViewForRaw(
   return {
     ...message,
     raw,
-    text: asText(raw.text),
-    caption: asText(raw.caption),
-    attachments: telegramLocation(raw) || raw.contact || raw.poll ? [{}] : [],
+    text: reading.text,
+    caption: reading.caption,
+    attachments:
+      telegramLocation(raw) ||
+      raw.contact ||
+      raw.poll ||
+      reading.rich?.media.length ||
+      reading.rich?.truncated
+        ? [{}]
+        : [],
     chat: rawChat
       ? {
           ...message.chat,
@@ -293,6 +310,62 @@ function gatedTextEntries(
   return entries;
 }
 
+type CarrierTextEntries = {
+  readonly entries: string[];
+  readonly flagged: boolean;
+};
+
+// Обычный текст и rich-fallback проходят один архивный и security-путь.
+function carrierTextEntries(text: string): CarrierTextEntries {
+  const userText = text.trim();
+  if (!userText) return { entries: [], flagged: false };
+  const dailyPath = appendDaily("[text]", userText);
+  const sanitized = sanitizeInbound(userText);
+  const flagged = sanitized.blocked || sanitized.flags.length > 0;
+  if (flagged) {
+    console.error(
+      "[security] inbound flagged:",
+      sanitized.reason,
+      sanitized.flags.join(","),
+    );
+  }
+  return {
+    entries: gatedTextEntries(sanitized, dailyPath),
+    flagged,
+  };
+}
+
+async function richMediaEntries(
+  effects: TelegramInboundEffects,
+  reading: RichMessageReading,
+): Promise<string[]> {
+  const entries: string[] = [];
+  // Пустой raw не размножает статью как подпись каждого вложенного файла.
+  const mediaRaw: TelegramRawMessage = {};
+  for (const media of reading.media.slice(0, RICH_MEDIA_LIMIT)) {
+    const result = await processMediaPart(effects, mediaRaw, media);
+    entries.push(...result.context);
+  }
+  const skipped = reading.media.length - RICH_MEDIA_LIMIT;
+  if (skipped > 0) {
+    entries.push(
+      tr(
+        `${skipped} more items were not processed`,
+        `Ещё ${skipped} элементов не обработаны`,
+      ),
+    );
+  }
+  if (reading.truncated) {
+    entries.push(
+      tr(
+        "[rich] The message was truncated while being read.",
+        "[rich] Сообщение было усечено при чтении.",
+      ),
+    );
+  }
+  return entries;
+}
+
 export async function runTelegramInbound(
   message: TelegramInboundMessage,
   effects: TelegramInboundEffects,
@@ -312,6 +385,15 @@ export async function runTelegramInbound(
   const raw: TelegramRawMessage = message.raw;
   const partsRaw = messageParts(raw);
   const media = mediaFromRaw(raw);
+  const readings = partsRaw.map((partRaw) =>
+    partsRaw.length === 1
+      ? readTelegramMessageText(partRaw, message.text, message.caption)
+      : readTelegramMessageText(partRaw),
+  );
+  const singleReading = partsRaw.length === 1 ? readings[0] : null;
+  const carrierReading =
+    singleReading ??
+    readTelegramMessageText(raw, message.text, message.caption);
   const singleLocationContext =
     partsRaw.length === 1 ? telegramLocationContext(raw) : null;
   appendNonFileParts(partsRaw);
@@ -320,16 +402,32 @@ export async function runTelegramInbound(
   // status before reply sanitization, media I/O, security scans or providers.
   const shouldDispatchAny =
     partsRaw.length === 1
-      ? media
-        ? shouldDispatchMedia(message, effects.botUsername)
-        : shouldDispatch(
-            singleLocationContext === null
-              ? message
-              : messageViewForRaw(message, raw),
+      ? singleReading?.rich
+        ? shouldDispatch(
+            {
+              ...message,
+              text: singleReading.text,
+              attachments:
+                singleReading.rich.media.length || singleReading.rich.truncated
+                  ? [{}]
+                  : [],
+            },
             effects.botUsername,
           )
-      : partsRaw.some((partRaw) => {
-          const partMessage = messageViewForRaw(message, partRaw);
+        : media
+          ? shouldDispatchMedia(message, effects.botUsername)
+          : shouldDispatch(
+              singleLocationContext === null
+                ? message
+                : messageViewForRaw(message, raw, carrierReading),
+              effects.botUsername,
+            )
+      : partsRaw.some((partRaw, partIndex) => {
+          const partMessage = messageViewForRaw(
+            message,
+            partRaw,
+            readings[partIndex],
+          );
           return mediaFromRaw(partRaw)
             ? shouldDispatchMedia(partMessage, effects.botUsername)
             : shouldDispatch(partMessage, effects.botUsername);
@@ -412,7 +510,9 @@ export async function runTelegramInbound(
 
   // 1b. Команды, которые роутятся в модель (/help, /restart, /new — обрабатывает поллер-мост
   //     out-of-band и сюда НЕ доставляет; здесь — только те, что нужны модели).
-  const cmdText = (message.text || "").trim();
+  const cmdText = (
+    singleReading?.rich ? singleReading.text : message.text || ""
+  ).trim();
   if (cmdText.startsWith("/")) {
     const cmd = cmdText.split(/\s+/)[0].replace(/@\w+$/, "").toLowerCase();
     const rest = cmdText.slice(cmdText.split(/\s+/)[0].length).trim();
@@ -462,6 +562,18 @@ export async function runTelegramInbound(
 
   // 2. Любой присланный файл (фото/документ/голос/аудио/видео/кружок/анимация/стикер).
   // uploadPolicy "disabled" → message.attachments пуст; берём ВСЁ из raw сами.
+  if (singleReading?.rich) {
+    await effects.startTyping();
+    const carrier = carrierTextEntries(singleReading.text);
+    return withPre({
+      auth: buildAuth(message),
+      context: [
+        ...carrier.entries,
+        ...(await richMediaEntries(effects, singleReading.rich)),
+      ],
+    });
+  }
+
   if (partsRaw.length === 1 && media) {
     await effects.startTyping();
     const result = await processMediaPart(effects, raw, media, {
@@ -484,35 +596,26 @@ export async function runTelegramInbound(
 
   // 3. Текстовая реплика юзера → daily (verbatim) + inbound security-гейт.
   if (partsRaw.length === 1) {
-    const userText = (message.text || "").trim();
-    const userDailyPath = userText
-      ? appendDaily("[text]", userText)
-      : undefined;
+    const carrier = carrierTextEntries(singleReading?.text ?? "");
 
     await effects.startTyping();
 
     // Санитайз: чистим невидимые/гомоглифы, флагуем инъекции (важно для ПЕРЕСЛАННОГО текста).
     // Обычный текст без сигналов — оставляем штатный поток нетронутым (context не переопределяем).
-    if (userText) {
-      const s = sanitizeInbound(userText);
-      if (s.blocked || s.flags.length) {
-        console.error(
-          "[security] inbound flagged:",
-          s.reason,
-          s.flags.join(","),
-        );
-        return withPre({
-          auth: buildAuth(message),
-          context: gatedTextEntries(s, userDailyPath),
-        });
-      }
-    }
+    if (carrier.flagged)
+      return withPre({ auth: buildAuth(message), context: carrier.entries });
     return withPre({ auth: buildAuth(message) });
   }
 
   await effects.startTyping();
   const context: string[] = [];
   for (const [partIndex, partRaw] of partsRaw.entries()) {
+    const reading = readings[partIndex];
+    if (reading.rich) {
+      context.push(...carrierTextEntries(reading.text).entries);
+      context.push(...(await richMediaEntries(effects, reading.rich)));
+      continue;
+    }
     const partMedia = mediaFromRaw(partRaw);
     if (partMedia) {
       const result = await processMediaPart(effects, partRaw, partMedia);
@@ -526,25 +629,13 @@ export async function runTelegramInbound(
       continue;
     }
 
-    const userText = (asText(partRaw.text) || asText(partRaw.caption)).trim();
+    const userText = reading.text.trim();
     if (!userText) continue;
-    const userDailyPath = appendDaily("[text]", userText);
-    const sanitized = sanitizeInbound(userText);
-    if (sanitized.blocked || sanitized.flags.length) {
-      console.error(
-        "[security] inbound flagged:",
-        sanitized.reason,
-        sanitized.flags.join(","),
-      );
-    }
-    const carrierText = (message.text || message.caption || "").trim();
+    const carrier = carrierTextEntries(userText);
+    const carrierText = carrierReading.text.trim();
     const isCleanCarrierText =
-      partIndex === 0 &&
-      userText === carrierText &&
-      !sanitized.blocked &&
-      !sanitized.flags.length;
-    if (!isCleanCarrierText)
-      context.push(...gatedTextEntries(sanitized, userDailyPath));
+      partIndex === 0 && userText === carrierText && !carrier.flagged;
+    if (!isCleanCarrierText) context.push(...carrier.entries);
   }
   return withPre({
     auth: buildAuth(message),
