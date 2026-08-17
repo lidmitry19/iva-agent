@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 222;
+const EXPECTED_PRODUCTION_COUNT = 224;
 const EXPECTED_INVENTORY_SHA256 =
-  "bdd76dc63afa4852533f8809f31111c3145c52634096896458b35e50199134af";
+  "fae91c6395e9dc94a7795ed52cc6874547722c0f90e6ec96f32a5f3278936ad0";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -68,6 +68,13 @@ const EXPECTED_INVENTORY_SHA256 =
 // it at 100% lines, 96.62% branches and 100% functions, with `plugin-source.ts` at 100%
 // and `plugin-install.ts` at 97.87% beside it. Nothing new is unreported, so the blind
 // spot stays 26.
+// The plugin build (ADR-0009) added two paths: `scripts/lib/plugin-build.ts`, which reads
+// the store and generates the eve mount, and `agent/lib/plugin-config.ts`, which that mount
+// reads at load time. Scoped coverage over `scripts/lib/plugin-build.test.ts`,
+// `agent/lib/plugin-config.test.ts`, `scripts/lib/version-update.test.ts`,
+// `scripts/cli/plugin.test.ts`, `scripts/cli/doctor.test.ts` and
+// `scripts/update-finish.test.ts` reports them at 95.02% and 100% lines, so the blind spot
+// stays 26.
 // The turn journal (ADR-0010) came next: `agent/lib/trace.ts` and `agent/hooks/trace.ts`.
 // Scoped coverage over `agent/lib/trace.test.ts`, `agent/lib/trace.property.test.ts` and
 // `agent/lib/trace-hook.test.ts` reports them at 97% and 98% lines, so the blind spot
