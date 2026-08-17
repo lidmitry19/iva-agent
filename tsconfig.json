@@ -16,6 +16,7 @@
     "evals/**/*.ts",
     "eslint.config.ts",
     "scripts/**/*.ts",
+    "services/**/*.ts",
     "**/*.mts",
     ".eve/**/*.d.ts"
   ]
