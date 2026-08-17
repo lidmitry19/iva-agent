@@ -161,7 +161,16 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.3.26 · 17.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.3.27 · 18.08.2026 — expand the latest releases</b></summary>
+
+### 18.08.2026
+
+#### v0.3.27
+
+- MCP servers of a plugin, both transports: `streamable-http` and `sse` in `mcp.json` become a generated eve connection `mcp-<name>--<server>`, and `${VAR}` in a header is filled at run time from `data/custom/plugins/<name>.env`, so no token is baked into a build. `stdio` runs as the systemd unit `iva-mcp-<name>-<server>.service` behind Iva's own MCP proxy (`services/mcp-proxy/`, `@modelcontextprotocol/sdk`): the agent reaches it over `127.0.0.1:<port>/mcp` with a bearer, and the token lives in `data/plugin-data/<name>/mcp-<server>.token` at mode 0600. The server sees only `PATH`, `HOME`, `PLUGIN_ROOT`, `PLUGIN_DATA`, its own env from `mcp.json` and `<name>.env` — nothing of the agent's environment reaches it. A second switch joins the first: `trusted`, through `iva plugin trust | untrust`, and `add` prints the processes and asks `Start these processes on this machine? [y/N]` (`--trust` answers yes; a shell without a terminal answers no). Ports are handed out from 8730, once, and stay until the plugin is removed. Proven end to end against a real stdio server and a real client from the SDK, not fakes.
+- Plugin services: `sh.iva/services/<svc>/service.json` with `{command,args,port}` becomes the unit `iva-plugin-<name>-<svc>.service` — env `IVA_SERVICE_PORT`, `IVA_DATA_DIR`, `PLUGIN_ROOT` and `PLUGIN_DATA`, the service's own folder as the working directory, started only while the plugin is enabled and trusted. `iva plugin update` restarts the units of a plugin whose content changed, `iva update` brings them back right after the flip, and `iva doctor` lists the units, prints `is-active` and calls `GET /health` on every MCP proxy. `sh.iva/` is now two kinds: an eve Extension (`sh.iva/package.json`, built into a version) and services, which never rebuild one.
+- The default Marketplace is live — `smixs/iva-plugins`: the list sits at [github.com/smixs/iva-plugins](https://github.com/smixs/iva-plugins) and carries two plugins. `trace` is the Trace viewer: the schema of Iva with the path of a turn lit across it, the feed of turns, replay at ×1, ×2 and ×4, tiles for today, 7 and 14 days; it listens on loopback only, and `iva trace open` prints the ready ssh tunnel command. `hello` is the demo code plugin authors copy: one skill, one tool. Three commands to get there: `iva plugin add trace`, `iva plugin trust trace`, `iva trace open`. Checked live from the public list: `list --available`, `add trace` pinned to a sha, `update`, `remove`.
+- Plugin docs: `docs/plugins.md` (Russian: `docs/ru/plugins.md`) — what a plugin is, how to install one (a folder, `owner/repo[/subdir][@ref]`, a git URL or a name from a Marketplace), how enabled differs from trusted, what `iva update` does to plugins, how to write your own (skills, an Extension under `sh.iva/`, `mcp.json`, services) and what you risk; `SECURITY.md` gains a Plugins section. Also: the `iva plugin` CLI is split into modules with no command changed, and on a development checkout `add` and `remove` of a code plugin stop promising a build that never happened and say plainly that no version was built there.
 
 ### 17.08.2026
 
@@ -192,21 +201,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 
 - A one-time reminder no longer gets lost silently: reminders go through the new `iva remind` command. When it fires, the agent checks whether the task is still open and words the message itself; the code delivers it with retries on network and Telegram failures. If the brain is down, the original text arrives with a ⏰.
 - A custom skill works right away: a skill dropped into `data/custom/agent/skills/` is visible on the next turn — no rebuild, no restart. Remove the file and the skill is gone.
-
-### 15.08.2026
-
-#### v0.3.22
-
-- The `iva` CLI no longer reorders PATH for child processes: a directory already on PATH is not added a second time, so the paths the caller put first stay first. Shipped as a port of contributor PR #177.
-- The setup wizard no longer writes hybrid memory mode without an embedding key: with no key and no other source it keeps the free BM25 search and says so in one line. `iva doctor` reads the same resolver as the runtime and names all three sources. Closes issue #180.
-
-#### v0.3.21
-
-- A stuck turn can be stopped: the Stop button works through the engine's public interface, long turns no longer die on a timeout, and the bot answers /start.
-- Memory search is 15× faster — the index is built once and updated only on change; the nightly pass processes only the cards that changed.
-- A typo in `MODEL_PROVIDER` no longer borrows another provider's config silently: the agent refuses with the four accepted names, and every repair path leads to the fix. Shipped as a port of contributor PR #171.
-- Re-running the installer is cheap: finished stages are skipped, any failure rolls back on every exit path, secrets never land in /tmp, your edits are never lost.
-- The description of an incoming photo now passes the injection screen — text on an image no longer reaches the agent as an instruction.
 
 </details>
 
