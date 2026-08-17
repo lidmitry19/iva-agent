@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 210;
+const EXPECTED_PRODUCTION_COUNT = 211;
 const EXPECTED_INVENTORY_SHA256 =
-  "2770f8fb55f967727d9cc2fad728be7b51ab604acef4d75e5272b3372ed2ca71";
+  "8d2e56e9f2cd5f8f841c7c2632c3f7261b30b0a19079a73669f9b92baaa8e03b";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -56,6 +56,9 @@ const EXPECTED_INVENTORY_SHA256 =
 // `scripts/lib/data-dir.ts`, and `scripts/memory/read-core.ts`. Their scoped seam tests
 // report all four at 100% lines. The shared context-window package implementation also
 // reports 100% lines, so moving the resolver does not add a blind spot; the snapshot stays 26.
+// The rich-message reader `agent/lib/telegram-rich-message.ts` came last. Its own test
+// reports it at 99.20% lines, 92.31% branches and 100% functions, so the blind spot
+// stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",
