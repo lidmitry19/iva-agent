@@ -169,6 +169,8 @@ function commands(
   root: string,
   hook?: CapHook,
   onLog?: (line: string) => void,
+  /** Дополнение к git-окружению теста: см. `httpsInsteadOf`. */
+  gitEnv: NodeJS.ProcessEnv = {},
 ) {
   const events: Events = [];
   const printed: string[] = [];
@@ -186,7 +188,7 @@ function commands(
       const result = spawnSync(command, [...args], {
         cwd: where,
         encoding: "utf8",
-        env: GIT_ENV,
+        env: { ...GIT_ENV, ...gitEnv },
       });
       const captured = {
         code: result.status ?? 1,
@@ -910,8 +912,25 @@ const offlineDefault: CapHook = (command, args, result, cwd) =>
       }
     : result;
 
+/**
+ * Маркетплейс имеет право назвать только `https://`, `ssh://` или `git@host:` — и
+ * это правило проверяется на настоящих формах, а не в обход. Чтобы тест остался без
+ * сети, https-адрес переписывается в локальный репозиторий средствами самого git
+ * (`url.<local>.insteadOf`), заданными через окружение, без файла конфига.
+ */
+function httpsInsteadOf(
+  pairs: ReadonlyArray<readonly [string, string]>,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([https, local], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = `url.${local}.insteadOf`;
+    env[`GIT_CONFIG_VALUE_${index}`] = https;
+  });
+  return env;
+}
+
 /** Список из трёх форм `source` плюс запись `npm`, которую мы не ставим. */
-function threeForms(mono: Remote, own: Remote): unknown {
+function threeForms(monoUrl: string, ownUrl: string): unknown {
   return {
     name: "iva-plugins",
     plugins: [
@@ -924,7 +943,7 @@ function threeForms(mono: Remote, own: Remote): unknown {
         name: "beta",
         source: {
           source: "git-subdir",
-          url: mono.url,
+          url: monoUrl,
           path: "plugins/beta",
           ref: null,
           sha: null,
@@ -932,7 +951,7 @@ function threeForms(mono: Remote, own: Remote): unknown {
       },
       {
         name: "gamma",
-        source: { source: "url", url: own.url, ref: null, sha: null },
+        source: { source: "url", url: ownUrl, ref: null, sha: null },
         description: "A repository of its own.",
       },
       {
@@ -986,11 +1005,23 @@ test("marketplace add reads the list once, and add by name installs all three so
     plantPlugin(join(work, "plugins/beta"), "beta", "beta-skill"),
   );
   const own = remote("gamma", "gamma-skill");
-  const market = marketplaceRemote(threeForms(mono, own), (work) =>
+  // Адреса в файле — настоящие https, как их напишет живой Marketplace; git
+  // переписывает их в локальные репозитории, поэтому теста без сети это не лишает.
+  const monoUrl = "https://gitlab.example.test/team/mono.git";
+  const ownUrl = "https://gitlab.example.test/team/gamma.git";
+  const market = marketplaceRemote(threeForms(monoUrl, ownUrl), (work) =>
     plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
   );
   const root = home();
-  const { cmdPlugin, events, printed, data } = commands(root, offlineDefault);
+  const { cmdPlugin, events, printed, data } = commands(
+    root,
+    offlineDefault,
+    undefined,
+    httpsInsteadOf([
+      [monoUrl, mono.url],
+      [ownUrl, own.url],
+    ]),
+  );
 
   await cmdPlugin(["marketplace", "add", market.url]);
   assert.match(messages(events, "ok"), /iva-plugins added — 3 plugin\(s\)/u);
@@ -1045,7 +1076,7 @@ test("marketplace add reads the list once, and add by name installs all three so
   const beta = (await readPluginsState(data)).plugins.find(
     (entry) => entry.name === "beta",
   );
-  assert.equal(beta?.source, `${mono.url}//plugins/beta`);
+  assert.equal(beta?.source, `${monoUrl}//plugins/beta`);
   assert.equal(beta?.sha, mono.sha);
   assert.equal(beta?.ref, "HEAD");
   assert.equal(beta?.marketplace, "iva-plugins");
@@ -1055,7 +1086,7 @@ test("marketplace add reads the list once, and add by name installs all three so
   const gamma = (await readPluginsState(data)).plugins.find(
     (entry) => entry.name === "gamma",
   );
-  assert.equal(gamma?.source, own.url);
+  assert.equal(gamma?.source, ownUrl);
   assert.equal(gamma?.sha, own.sha);
 
   // Скиллы всех трёх работают со следующего хода, без сборки и рестарта.
@@ -1375,4 +1406,56 @@ test("a marketplace on the disk is a git repository too, and its plugins stay re
   events.length = 0;
   await cmdPlugin(["sync"]);
   assert.match(messages(events, "ok"), /alpha restored/u);
+});
+
+test("a marketplace naming file:// gets nothing: not offered, not fetched, not installed", async () => {
+  // Репозиторий владельца с ВАЛИДНЫМ плагином в корне: раньше такая запись
+  // клонировалась в staging и держалась только на ридере манифеста.
+  const victim = remote("victim", "victim-skill");
+  const market = marketplaceRemote({
+    name: "iva-plugins",
+    plugins: [
+      { name: "victim", source: { source: "url", url: victim.url } },
+      {
+        name: "subdir-victim",
+        source: {
+          source: "git-subdir",
+          url: victim.url,
+          path: "skills",
+          ref: null,
+          sha: null,
+        },
+      },
+      { name: "plain", source: { source: "url", url: "http://h.test/x.git" } },
+    ],
+  });
+  const root = home();
+  const { cmdPlugin, events, printed, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  assert.match(messages(events, "ok"), /iva-plugins added — 0 plugin\(s\)/u);
+  for (const name of ["victim", "subdir-victim", "plain"])
+    assert.match(
+      messages(events, "warn"),
+      new RegExp(
+        `${name} skipped: source\\.url .* is not a remote repository`,
+        "u",
+      ),
+      name,
+    );
+
+  events.length = 0;
+  printed.length = 0;
+  await cmdPlugin(["list", "--available"]);
+  assert.match(printed.join("\n"), /Nothing on offer/u);
+  assert.doesNotMatch(printed.join("\n"), /victim/u);
+
+  events.length = 0;
+  await assert.rejects(
+    cmdPlugin(["add", "victim"]),
+    /no marketplace offers a plugin named "victim"/u,
+  );
+  assert.equal(existsSync(pluginRoot(data, "victim")), false);
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
 });

@@ -46,6 +46,15 @@ const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 // character is alphanumeric so a ref can never arrive at git looking like an option.
 const REF = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9._-]+)*$/u;
 
+/**
+ * Is this the `git@host:path` form? Asked by callers that accept only some written
+ * forms - the marketplace allowlist, for one. The grammar has one owner, so the
+ * pattern is not copied out of here.
+ */
+export function isScpLikeUrl(value: string): boolean {
+  return SCP_LIKE.test(value.trim());
+}
+
 function isLocal(raw: string): boolean {
   return (
     raw === "." ||

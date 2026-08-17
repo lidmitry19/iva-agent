@@ -31,7 +31,11 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { GitRunner } from "./plugin-install.ts";
-import { parsePluginSource, type PluginSource } from "./plugin-source.ts";
+import {
+  isScpLikeUrl,
+  parsePluginSource,
+  type PluginSource,
+} from "./plugin-source.ts";
 
 /** Ours, implicit while the owner's list is empty (ADR-0009). */
 export const DEFAULT_MARKETPLACE = "smixs/iva-plugins";
@@ -131,6 +135,27 @@ function pinField(
   return { value: value.trim() || null };
 }
 
+/**
+ * Which URLs a marketplace may name, as a list of what is allowed.
+ *
+ * A blacklist would be the wrong shape here: the file is untrusted, so the question
+ * is not "which schemes are dangerous" but "which ones do we know are safe to hand
+ * to git for a stranger". `file://` is the reason the rule exists - it points the
+ * install at a repository on the owner's own disk and runs that repository's
+ * `upload-pack` hooks; `http://` hands the plugin's bytes to whoever answers first.
+ * A `local` entry is not affected: it names a folder of the marketplace repository
+ * itself, so its URL is the one we already fetched the list from.
+ */
+const ALLOWED_URL_SCHEMES = ["https://", "ssh://"] as const;
+
+function remoteUrlProblem(url: string): string | null {
+  const value = url.trim().toLowerCase();
+  if (ALLOWED_URL_SCHEMES.some((scheme) => value.startsWith(scheme)))
+    return null;
+  if (isScpLikeUrl(url)) return null;
+  return `source.url ${JSON.stringify(url)} is not a remote repository; a marketplace may name only https://, ssh:// or git@host:path`;
+}
+
 const ENTRY_FIELDS = new Set(["name", "source", "description"]);
 const MARKETPLACE_FIELDS = new Set(["name", "plugins"]);
 const SOURCE_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -190,6 +215,8 @@ function parseEntrySource(
 
   const url = text(raw.url);
   if (!url) return "source.url must be a string";
+  const urlProblem = remoteUrlProblem(url);
+  if (urlProblem) return urlProblem;
   const ref = pinField(raw.ref, "source.ref");
   if ("problem" in ref) return ref.problem;
   const sha = pinField(raw.sha, "source.sha");

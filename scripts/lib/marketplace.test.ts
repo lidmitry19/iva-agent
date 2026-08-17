@@ -109,10 +109,59 @@ test("a local entry with no cached commit is refused, not silently unpinned", ()
   );
 });
 
+test("only https, ssh and git@host may be named: file, http and the rest are skipped", () => {
+  for (const [url, kind] of [
+    ["file:///Users/shima/dev/my/assistant", "url"],
+    ["file:///srv/mirror/plugin.git", "git-subdir"],
+    ["http://plugins.example.test/x.git", "url"],
+    ["http://plugins.example.test/x.git", "git-subdir"],
+    ["git://plugins.example.test/x.git", "url"],
+    ["/srv/plugins/x", "url"],
+    ["../up/x", "git-subdir"],
+    ["HTTP://plugins.example.test/x.git", "url"],
+  ] as const) {
+    const market = marketplace([
+      {
+        name: "alpha",
+        source:
+          kind === "url"
+            ? { source: kind, url }
+            : { source: kind, url, path: "plugins/alpha" },
+      },
+    ]);
+    // Пропущена по имени и в списке не показывается вовсе: ставить её нельзя, а
+    // предлагать то, что нельзя поставить, — врать владельцу.
+    assert.deepEqual(names(market), [], `${kind} ${url}`);
+    assert.deepEqual(
+      market.diagnostics,
+      [
+        `alpha skipped: source.url ${JSON.stringify(url)} is not a remote repository; a marketplace may name only https://, ssh:// or git@host:path`,
+      ],
+      `${kind} ${url}`,
+    );
+  }
+
+  // Разрешённые формы проходят и остаются собой.
+  for (const url of [
+    "https://github.com/smixs/iva-plugins.git",
+    "HTTPS://github.com/smixs/iva-plugins.git",
+    "ssh://git@gitlab.example.test/team/x.git",
+    "git@gitlab.example.test:team/x.git",
+  ]) {
+    const market = marketplace([
+      { name: "alpha", source: { source: "url", url } },
+    ]);
+    assert.deepEqual(names(market), ["alpha"], url);
+    assert.deepEqual(market.diagnostics, [], url);
+  }
+});
+
 test("a marketplace may only point at a repository, never at a path on the disk", () => {
   // Найдено property-тестом (seed 1692716552): `url: "./plugins/alpha"` разбирался
   // как локальная папка, и непроверенный файл ставил бы плагин с диска владельца —
   // а `sync` повторял бы этот путь всегда.
+  // Путь с диска не проходит уже разбор (список разрешённых схем), поэтому запись
+  // до резолва не доживает.
   for (const source of [
     { source: "url", url: "./plugins/alpha" },
     { source: "url", url: "/etc/plugins/alpha" },
@@ -120,13 +169,28 @@ test("a marketplace may only point at a repository, never at a path on the disk"
     { source: "git-subdir", url: "../up", path: "plugins/alpha" },
   ]) {
     const market = marketplace([{ name: "alpha", source }]);
-    assert.deepEqual(names(market), ["alpha"], JSON.stringify(source));
-    assert.throws(
-      () => marketplaceEntrySource(market.entries[0], REPO),
-      /is a local path, and a marketplace may only point at a repository/u,
+    assert.deepEqual(names(market), [], JSON.stringify(source));
+    assert.match(
+      market.diagnostics.join("\n"),
+      /is not a remote repository/u,
       JSON.stringify(source),
     );
   }
+
+  // Второй замок на той же двери: даже если запись как-то дойдёт до резолва,
+  // локальным источником она не станет.
+  assert.throws(
+    () =>
+      marketplaceEntrySource(
+        {
+          name: "alpha",
+          description: "",
+          source: { kind: "url", url: "./x", ref: null, sha: null },
+        },
+        REPO,
+      ),
+    /is a local path, and a marketplace may only point at a repository/u,
+  );
 });
 
 test("a git URL that is not GitHub keeps the URL form of the subdirectory", () => {
@@ -476,7 +540,12 @@ test("resolving a name says which marketplace answered, or why none could", () =
   ]);
   const second = loaded("other-plugins", [
     { name: "trace", source: "./plugins/trace" },
-    { name: "quiz", source: { source: "url", url: "not a url at all" } },
+    // Схему прошла, а ref в грамматику источника не влезает: такая запись отказывает
+    // на резолве, поимённо.
+    {
+      name: "quiz",
+      source: { source: "url", url: "https://h.test/x.git", ref: "bad ref" },
+    },
   ]);
 
   const single = resolveMarketplacePlugin([first], {
@@ -524,7 +593,7 @@ test("resolving a name says which marketplace answered, or why none could", () =
   assert.throws(
     () =>
       resolveMarketplacePlugin([second], { name: "quiz", marketplace: null }),
-    /other-plugins offers quiz, but its source cannot be used: unknown plugin source/u,
+    /other-plugins offers quiz, but its source cannot be used: plugin source has an unusable ref/u,
   );
 
   // Список без кэша не резолвится: пинить запись `local` было бы нечем.
