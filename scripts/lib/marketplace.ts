@@ -456,6 +456,22 @@ function withSubdir(url: string, path: string): string {
 }
 
 /**
+ * A source string as a git source, or an error. A Marketplace may only point at
+ * repositories: `{"source":"url","url":"./plugins/x"}` parses perfectly well as a
+ * local folder, and honouring it would let an untrusted file install from a path
+ * on the owner's disk - and have `sync` replay that path forever. Found by the
+ * property test, not by reading the code.
+ */
+function gitSource(written: string): PluginSource {
+  const parsed = parsePluginSource(written);
+  if (parsed.kind !== "git")
+    throw new Error(
+      `${JSON.stringify(written)} is a local path, and a marketplace may only point at a repository`,
+    );
+  return parsed;
+}
+
+/**
  * One marketplace entry as a plugin source. Throws when the entry cannot be
  * expressed as one - the caller reports that as a skipped entry, by name.
  *
@@ -472,14 +488,12 @@ export function marketplaceEntrySource(
       throw new Error(
         "the marketplace has no cached commit to pin its own folder to",
       );
-    return parsePluginSource(
-      `${withSubdir(repo.url, source.path)}@${repo.sha}`,
-    );
+    return gitSource(`${withSubdir(repo.url, source.path)}@${repo.sha}`);
   }
   // sha пинует, ref отслеживает; когда нет ни того, ни другого — HEAD источника.
   const pin = source.sha ?? source.ref;
   const at = pin ? `@${pin}` : "";
-  return parsePluginSource(
+  return gitSource(
     source.kind === "url"
       ? `${source.url}${at}`
       : `${withSubdir(source.url, source.path)}${at}`,

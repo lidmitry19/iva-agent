@@ -12,10 +12,14 @@ import test from "node:test";
 import fc from "fast-check";
 import { formatPluginSource, parsePluginSource } from "./plugin-source.ts";
 import {
+  DEFAULT_MARKETPLACE,
   marketplaceEntrySource,
   marketplaceSlug,
+  marketplaceSources,
   parseMarketplace,
   parseMarketplaceRequest,
+  resolveMarketplacePlugin,
+  type LoadedMarketplace,
   type Marketplace,
 } from "./marketplace.ts";
 
@@ -103,6 +107,26 @@ test("a local entry with no cached commit is refused, not silently unpinned", ()
     () => marketplaceEntrySource(market.entries[0], { ...REPO, sha: "" }),
     /no cached commit/u,
   );
+});
+
+test("a marketplace may only point at a repository, never at a path on the disk", () => {
+  // Найдено property-тестом (seed 1692716552): `url: "./plugins/alpha"` разбирался
+  // как локальная папка, и непроверенный файл ставил бы плагин с диска владельца —
+  // а `sync` повторял бы этот путь всегда.
+  for (const source of [
+    { source: "url", url: "./plugins/alpha" },
+    { source: "url", url: "/etc/plugins/alpha" },
+    { source: "url", url: "~/plugins/alpha" },
+    { source: "git-subdir", url: "../up", path: "plugins/alpha" },
+  ]) {
+    const market = marketplace([{ name: "alpha", source }]);
+    assert.deepEqual(names(market), ["alpha"], JSON.stringify(source));
+    assert.throws(
+      () => marketplaceEntrySource(market.entries[0], REPO),
+      /is a local path, and a marketplace may only point at a repository/u,
+      JSON.stringify(source),
+    );
+  }
 });
 
 test("a git URL that is not GitHub keeps the URL form of the subdirectory", () => {
@@ -427,4 +451,94 @@ test("property: any JSON is entries and diagnostics, never a throw", () => {
     }),
     RUNS,
   );
+});
+
+/** Загруженный Marketplace, собранный руками: чтение с диска здесь не проверяют. */
+function loaded(
+  name: string | null,
+  plugins: unknown,
+  repo: { readonly url: string; readonly sha: string } | null = REPO,
+): LoadedMarketplace {
+  const market = parseMarketplace({ name, plugins });
+  return {
+    recorded: name ?? "somewhere",
+    label: market.name ?? "somewhere",
+    market,
+    repo,
+    stale: false,
+    problem: null,
+  };
+}
+
+test("resolving a name says which marketplace answered, or why none could", () => {
+  const first = loaded("iva-plugins", [
+    { name: "trace", source: "./plugins/trace" },
+  ]);
+  const second = loaded("other-plugins", [
+    { name: "trace", source: "./plugins/trace" },
+    { name: "quiz", source: { source: "url", url: "not a url at all" } },
+  ]);
+
+  const single = resolveMarketplacePlugin([first], {
+    name: "trace",
+    marketplace: null,
+  });
+  assert.equal(single.marketplace, "iva-plugins");
+  assert.equal(single.name, "trace");
+  assert.equal(
+    formatPluginSource(single.source),
+    `smixs/iva-plugins/plugins/trace@${REPO.sha}`,
+  );
+
+  // Одно имя в двух списках — отказ с готовой командой, а не молчаливый выбор.
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([first, second], {
+        name: "trace",
+        marketplace: null,
+      }),
+    /trace is offered by iva-plugins and other-plugins — pick one: iva plugin add trace@iva-plugins/u,
+  );
+  assert.equal(
+    resolveMarketplacePlugin([first, second], {
+      name: "trace",
+      marketplace: "other-plugins",
+    }).marketplace,
+    "other-plugins",
+  );
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([first], {
+        name: "trace",
+        marketplace: "nowhere",
+      }),
+    /no marketplace named "nowhere"/u,
+  );
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([first], { name: "absent", marketplace: null }),
+    /no marketplace offers a plugin named "absent"/u,
+  );
+
+  // Запись прошла разбор, но источником не выражается: причина названа с именем.
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([second], { name: "quiz", marketplace: null }),
+    /other-plugins offers quiz, but its source cannot be used: unknown plugin source/u,
+  );
+
+  // Список без кэша не резолвится: пинить запись `local` было бы нечем.
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin(
+        [loaded("iva-plugins", [{ name: "trace", source: "./x" }], null)],
+        { name: "trace", marketplace: null },
+      ),
+    /has no cached list — run: iva plugin list --available/u,
+  );
+});
+
+test("an empty list of marketplaces means ours, and any list means exactly itself", () => {
+  assert.deepEqual(marketplaceSources([]), [DEFAULT_MARKETPLACE]);
+  assert.deepEqual(marketplaceSources(["mine/list"]), ["mine/list"]);
 });

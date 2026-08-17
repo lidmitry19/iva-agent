@@ -124,6 +124,31 @@ test("junk entries fall out and the survivors keep their order", () => {
   assert.equal(findPlugin(state, "alpha")?.source, "");
 });
 
+test("provenance is kept when it is a name, and dropped when it is anything else", async () => {
+  const data = world();
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [entry({ marketplace: "iva-plugins" })],
+  });
+  assert.equal(
+    (await readPluginsState(data)).plugins[0].marketplace,
+    "iva-plugins",
+  );
+
+  // Прямая установка провенанса не имеет, и пустого поля тоже: его отсутствие —
+  // это ответ «не через Marketplace», а не «неизвестно».
+  const direct = normalizePluginsState({ plugins: [{ name: "demo" }] });
+  assert.equal("marketplace" in direct.plugins[0], false);
+  const junk = normalizePluginsState({
+    plugins: [
+      { name: "demo", marketplace: 7 },
+      { name: "alpha", marketplace: "" },
+    ],
+  });
+  assert.equal("marketplace" in junk.plugins[0], false);
+  assert.equal("marketplace" in junk.plugins[1], false);
+});
+
 test("upsert replaces one plugin and remove takes only its entry", () => {
   const first = upsertPlugin(EMPTY_PLUGINS_STATE, entry());
   const replaced = upsertPlugin(first, entry({ sha: "b".repeat(40) }));

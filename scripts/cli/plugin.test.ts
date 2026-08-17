@@ -1311,3 +1311,24 @@ test("a marketplace that offers a plugin under another name installs nothing", a
   assert.deepEqual((await readPluginsState(data)).plugins, []);
   assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
 });
+
+test("a marketplace entry that is not a source at all is named, not obeyed", async () => {
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root, offlineDefault);
+  // Строка попала в plugins.json руками или из чужой версии: источником она не
+  // является, и притворяться, что список пуст, команда не имеет права.
+  await writePluginsState(data, {
+    marketplaces: ["not a source at all"],
+    plugins: [],
+  });
+
+  await cmdPlugin(["marketplace", "list"]);
+  assert.match(messages(events, "bad"), /unknown plugin source/u);
+
+  events.length = 0;
+  await assert.rejects(
+    cmdPlugin(["add", "trace"]),
+    /no marketplace offers a plugin named "trace"/u,
+  );
+  assert.match(messages(events, "bad"), /unknown plugin source/u);
+});
