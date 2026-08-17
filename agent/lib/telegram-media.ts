@@ -21,6 +21,7 @@ import {
   inboundTruncationNotice,
   injectionWarning,
 } from "./telegram-gate-notice.ts";
+import { readTelegramMessageText } from "./telegram-rich-message.ts";
 import { appendDaily, localStamp, saveBlob } from "./vault-daily.ts";
 import type { TelegramRawMedia, TelegramRawMessage } from "./telegram-parts.ts";
 
@@ -43,10 +44,6 @@ export type TelegramMediaPart = {
   readonly kind: "context" | "too-big" | "error" | "silent";
   readonly context: string[];
 };
-
-function asText(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
 
 // getFile → скачивание байтов. Возвращает байты, либо признак >20MB, либо null.
 async function fetchTelegramFile(
@@ -79,7 +76,7 @@ export async function processMediaPart(
   { dropSilent = false } = {},
 ): Promise<TelegramMediaPart> {
   const tag = `[${media.tag}]`;
-  const caption = asText(raw.caption).trim();
+  const caption = readTelegramMessageText(raw, "").text.trim();
   const capSuffix = caption ? `\n\n${caption}` : "";
   try {
     let cached = null;

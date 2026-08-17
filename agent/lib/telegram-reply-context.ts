@@ -1,3 +1,5 @@
+import { readTelegramMessageText } from "./telegram-rich-message.ts";
+
 export const TELEGRAM_REPLY_TEXT_MAX_CHARS = 8_000;
 
 const AUTHOR_FIELD_MAX_CHARS = 256;
@@ -327,13 +329,16 @@ export function buildTelegramReplyContext(
   const messageId = boundedTelegramMessageId(reply.message_id);
   if (messageId === null) return null;
 
-  const caption = typeof reply.caption === "string" ? reply.caption : "";
-  const rawText =
-    typeof reply.text === "string" && reply.text.trim().length > 0
-      ? reply.text
-      : caption;
+  const messageText = readTelegramMessageText(reply);
+  const caption = messageText.caption;
+  const rawText = messageText.text;
   const mediaIdentity = findMedia(reply);
-  if (rawText.trim().length === 0 && mediaIdentity === null) return null;
+  if (
+    rawText.trim().length === 0 &&
+    mediaIdentity === null &&
+    !messageText.rich?.truncated
+  )
+    return null;
 
   const textSecurity = sanitizeText(rawText);
   const captionSecurity =
@@ -364,7 +369,11 @@ export function buildTelegramReplyContext(
     messageId,
     author: author.value,
     text: text.text,
-    truncated: text.truncated || author.truncated || Boolean(media?.truncated),
+    truncated:
+      text.truncated ||
+      Boolean(messageText.rich?.truncated) ||
+      author.truncated ||
+      Boolean(media?.truncated),
     untrusted: true,
   };
   if (media !== null) item.media = media.value;
