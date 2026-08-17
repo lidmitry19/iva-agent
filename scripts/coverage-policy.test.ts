@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 226;
+const EXPECTED_PRODUCTION_COUNT = 231;
 const EXPECTED_INVENTORY_SHA256 =
-  "db614ac58f1d6fdb8f703322bb68c05726fc67a01c2354f39ed8ddeb95cf3cd1";
+  "721706c151d5b0bfa8c7b281608c1cae84dfa887311a1557ade3cf7cbdc64557";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -87,7 +87,6 @@ const EXPECTED_INVENTORY_SHA256 =
 // Python sender: `scripts/cli/post.test.ts` reports it at 93.14% lines, 82.64% branches
 // and 86.96% functions - the uncovered remainder is the tmpfiles.org upload and the
 // stdin reader, both injected in tests - so the blind spot stays 26.
-// stays 26.
 // The journal's second reader came next, one path: `scripts/cli/trace.ts`. Scoped coverage
 // over `scripts/cli/trace.test.ts` reports it at 98.71% lines, 90.57% branches and 96.25%
 // functions, so the blind spot stays 26.
@@ -101,6 +100,17 @@ const EXPECTED_INVENTORY_SHA256 =
 // so the blind spot stays 26. The MCP proxy itself (`services/mcp-proxy/*.ts`) is outside
 // this inventory: the walk covers `agent/` and `scripts/` only, and the proxy is a service
 // of its own, proved end to end by `services/mcp-proxy/proxy.test.ts`.
+// The smoothing pass of the plugin wave came last, five paths and no new behaviour:
+// `scripts/cli/plugin.ts` (1758 lines) was split into `plugin-cli-context.ts`,
+// `plugin-cli-install.ts`, `plugin-cli-trust.ts` and `plugin-cli-marketplace.ts`, and the
+// lazy translator both plugin and trace commands had a copy of moved to
+// `scripts/lib/cli-translate.ts`. Scoped coverage over `scripts/cli/plugin.test.ts`,
+// `scripts/cli/doctor.test.ts`, `scripts/cli/trace.test.ts`,
+// `scripts/lib/marketplace.test.ts` and the three `agent/lib/trace*.test.ts` reports every
+// one of them - 99.11%, 95.90%, 97.29%, 96.77%, 93.29% and 85.71% lines, the last one being
+// the lazy `#lib/i18n.ts` import that a test with its own table never takes - plus
+// `marketplace.ts` at 100%, `agent/lib/trace.ts` at 97.13% and `scripts/cli/trace.ts` at
+// 99.14%. Nothing new is unreported, so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",
