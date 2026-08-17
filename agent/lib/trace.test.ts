@@ -340,7 +340,13 @@ void test("вердикты гейтов и Стоп пишутся своими
     },
     120,
   );
-  trace.traceOutboundGate(false, [{ type: "api_key", name: "openai" }], 55);
+  trace.traceOutboundGate(
+    "turn_3",
+    "wrun_1",
+    false,
+    [{ type: "api_key", name: "openai" }],
+    55,
+  );
   trace.traceOutboxResult(
     "turn_3",
     "wrun_1",

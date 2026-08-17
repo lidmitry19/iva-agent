@@ -65,7 +65,12 @@ export type OutboxResult = {
 // Outbound-гейт: редактим утёкшие секреты и эксфил-URL ДО отправки. Fail-open —
 // нашли что-то, шлём отредактированное и громко логируем (блокировать текст целиком
 // хуже редкой утечки для единственного владельца инсталляции).
-export function redactNotice(text: string): string {
+export function redactNotice(
+  text: string,
+  // Ход и сессия — только для журнала: у ответа модели они есть, у служебной реплики
+  // канала их нет, и это честнее, чем приписать вердикт чужому ходу.
+  { turn = "", session = "" }: { turn?: string; session?: string } = {},
+): string {
   const guard = scanOutbound(text);
   if (!guard.clean)
     console.error(
@@ -75,7 +80,7 @@ export function redactNotice(text: string): string {
   // Trace: вердикт outbound-Gate. Стоит на самом вызове гейта, поэтому в журнал попадает
   // и ответ модели через шов, и служебная реплика канала через noticeSender. Превью
   // находки НЕ пишем: там кусок утёкшего секрета (ADR-0010).
-  traceOutboundGate(guard.clean, guard.findings, text.length);
+  traceOutboundGate(turn, session, guard.clean, guard.findings, text.length);
   return guard.text;
 }
 
@@ -108,7 +113,7 @@ export async function sendThroughOutbox(
   }: { limit?: number; turn?: string; session?: string } = {},
 ): Promise<OutboxResult> {
   const startedAt = Date.now();
-  const text = redactNotice(message);
+  const text = redactNotice(message, { turn, session });
 
   const result: OutboxResult = {
     ok: true,

@@ -473,6 +473,8 @@ export function traceTurnBound(
 
 /** Шов outbound-Gate: что нашёл сканер в тексте, уходящем в чат. */
 export function traceOutboundGate(
+  turn: string,
+  session: string,
   clean: boolean,
   findings: readonly { readonly type: string; readonly name: string }[],
   chars: number,
@@ -480,6 +482,8 @@ export function traceOutboundGate(
   emit(() => ({
     kind: "gate",
     name: "outbound",
+    turn,
+    session,
     source: "telegram",
     data: {
       clean,

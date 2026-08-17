@@ -495,6 +495,7 @@ await test("Trace: гейт и доставка ложатся в журнал �
     added.map((event) => `${String(event.kind)}.${String(event.name)}`),
     ["gate.outbound", "outbox.delivered"],
   );
+  assert.equal(added[0].turn, "turn_5");
   assert.deepEqual(added[0].data, {
     clean: true,
     findings: [],
