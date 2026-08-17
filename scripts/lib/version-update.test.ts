@@ -1720,7 +1720,7 @@ test("a plugin with code is copied into the version, built and mounted", async (
   assert.deepEqual(
     steps.filter((step) => step.includes("plugins/trace")),
     [
-      `npm install --omit=dev --no-audit --no-fund @ ${version}/plugins/trace/sh.iva`,
+      `npm install --omit=dev --omit=peer --no-audit --no-fund @ ${version}/plugins/trace/sh.iva`,
       `eve extension build @ ${version}/plugins/trace/sh.iva`,
     ],
   );
@@ -1750,7 +1750,7 @@ test("a lockfile in the plugin pins its dependencies instead of resolving them",
 
   assert.ok(
     steps.includes(
-      `npm ci --omit=dev --no-audit --no-fund @ versions/${outcome.version}/plugins/trace/sh.iva`,
+      `npm ci --omit=dev --omit=peer --no-audit --no-fund @ versions/${outcome.version}/plugins/trace/sh.iva`,
     ),
     steps.join("\n"),
   );

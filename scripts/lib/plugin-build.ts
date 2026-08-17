@@ -30,7 +30,15 @@ export const CODE_DIR = "sh.iva";
 /** The version's own eve: a plugin is always built by the eve that will run it. */
 const EVE_BIN = "node_modules/.bin/eve";
 const EVE_BUILD = ["extension", "build"];
-const PLUGIN_INSTALL = ["--omit=dev", "--no-audit", "--no-fund"];
+/**
+ * What a plugin's own dependencies are installed with. `--omit=peer` on purpose: eve's
+ * own scaffold declares `eve` as a peer dependency, and npm would install a SECOND copy
+ * of it beside the plugin - the extension would then be built against that eve instead
+ * of the one about to run it, which is the compatibility ADR-0009 promises. Declared is
+ * enough: eve's package boundary resolves the declaration up the tree, so the plugin
+ * builds against the version's own eve (verified against eve 0.30.8).
+ */
+const PLUGIN_INSTALL = ["--omit=dev", "--omit=peer", "--no-audit", "--no-fund"];
 const LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
 /** What eve accepts as a mount file name (its EXTENSION_SLUG_PATTERN, lowercased). */
 const MOUNT_SLUG = /^[a-z][a-z0-9_]{0,63}$/u;
