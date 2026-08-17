@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 220;
+const EXPECTED_PRODUCTION_COUNT = 221;
 const EXPECTED_INVENTORY_SHA256 =
-  "7e1ebaadd402cb64d09d7722b7c1c4cf5423ee718909f7938e60d805d4bbb7fa";
+  "fc70804cfbbc2f61fb41e9624da474ddb5869b1fade307e7f14267b40afa09f6";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -69,9 +69,12 @@ const EXPECTED_INVENTORY_SHA256 =
 // stays 26 - unlike `agent/hooks/transcript.ts`, this hook is loaded by its own test. That
 // test lives in `agent/lib/`, not beside the hook: eve treats every file under
 // `agent/hooks/` as a hook, and `trace.test` is not a legal hook name.
-// The rich-message reader `agent/lib/telegram-rich-message.ts` came last. Its own test
+// The rich-message reader `agent/lib/telegram-rich-message.ts` came next. Its own test
 // reports it at 99.53% lines, 92.69% branches and 100% functions, so the blind spot
-// stays 26.
+// stays 26. The rich-post CLI `scripts/cli/post.ts` came last, replacing the skill's
+// Python sender: `scripts/cli/post.test.ts` reports it at 93.54% lines, 82.64% branches
+// and 86.96% functions - the uncovered remainder is the tmpfiles.org upload and the
+// stdin reader, both injected in tests - so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

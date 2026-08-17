@@ -397,6 +397,32 @@ await test("таблица уходит одним rich-сообщением, о
   );
 });
 
+await test("alwaysRich шлёт rich даже без rich-конструкций в тексте", async (t) => {
+  captureErrors(t);
+  const post = stub({ rich: () => ({ ok: true }) });
+
+  // Пост из абзаца и картинки — needsRichMessage тут false, но rich выбрал вызывающий
+  // (`iva post`), и HTML-путь картинку не отрисует вовсе.
+  const result = await sendThroughOutbox(
+    "абзац\n\n![](https://example.com/a.jpg)",
+    post.transport,
+    { alwaysRich: true },
+  );
+
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(
+    post.sent.map((s) => s.kind),
+    ["rich"],
+  );
+
+  // Гейт стоит до выбора пути: секрет не уедет и rich-сообщением.
+  const leaky = stub({ rich: () => ({ ok: true }) });
+  await sendThroughOutbox(`токен ${SECRET}`, leaky.transport, {
+    alwaysRich: true,
+  });
+  assert.equal(leaky.sent[0].text.includes(SECRET), false);
+});
+
 await test("отказ rich-сообщения проваливается в HTML-путь", async (t) => {
   captureErrors(t);
   const { sent, transport } = stub({

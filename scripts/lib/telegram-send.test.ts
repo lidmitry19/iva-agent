@@ -205,6 +205,73 @@ void test("telegram-send fails an empty report without calling Telegram", async 
   assert.deepEqual(requests, []);
 });
 
+void test("a rich post goes to sendRichMessage, gated, with silent and thread fields", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests: CapturedRequest[] = [];
+  globalThis.fetch = (url: URL | RequestInfo, options?: RequestInit) => {
+    requests.push(captureRequest(url, options));
+    return Promise.resolve(new Response("", { status: 200 }));
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { sendTelegramRich } = await import("./telegram-send.ts");
+  const result = await sendTelegramRich(
+    "test-bot",
+    "test-chat",
+    `текст ![](https://example.com/a.jpg) api_key=${"x".repeat(24)}`,
+    { silent: true, threadId: "17" },
+  );
+
+  assert.deepEqual(result, { ok: true, fellBack: false, error: "" });
+  assert.deepEqual(
+    requests.map((request) => request.url),
+    ["https://api.telegram.org/bottest-bot/sendRichMessage"],
+  );
+  assert.deepEqual(requests[0].body, {
+    chat_id: "test-chat",
+    rich_message: {
+      markdown: "текст ![](https://example.com/a.jpg) [REDACTED]",
+    },
+    disable_notification: true,
+    message_thread_id: "17",
+  });
+});
+
+void test("a refused rich post falls back to the HTML path, not to an error", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests: CapturedRequest[] = [];
+  globalThis.fetch = (url: URL | RequestInfo, options?: RequestInit) => {
+    requests.push(captureRequest(url, options));
+    return Promise.resolve(
+      new Response(requests.length === 1 ? "rich unsupported" : "", {
+        status: requests.length === 1 ? 400 : 200,
+      }),
+    );
+  };
+  const originalError = console.error;
+  console.error = () => undefined;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  });
+
+  const { sendTelegramRich } = await import("./telegram-send.ts");
+  const result = await sendTelegramRich("test-bot", "test-chat", "**пост**");
+
+  assert.deepEqual(result, { ok: true, fellBack: false, error: "" });
+  assert.deepEqual(
+    requests.map((request) => request.url),
+    [
+      "https://api.telegram.org/bottest-bot/sendRichMessage",
+      "https://api.telegram.org/bottest-bot/sendMessage",
+    ],
+  );
+  assert.equal(requests[1].body.parse_mode, "HTML");
+  assert.equal(requests[1].body.text, "<b>пост</b>");
+});
+
 void test("telegram-send never throws on a report that is not a string", async (t) => {
   const originalFetch = globalThis.fetch;
   const requests: CapturedRequest[] = [];
