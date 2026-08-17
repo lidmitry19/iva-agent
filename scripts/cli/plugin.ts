@@ -210,6 +210,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
   ${C.d}${translate("Skills of an installed plugin work from the next turn: no build, no restart.", "Скиллы поставленного плагина работают со следующего хода: без сборки и рестарта.")}${C.x}
   ${C.d}${translate(`Marketplace by default: ${DEFAULT_MARKETPLACE}.`, `Marketplace по умолчанию: ${DEFAULT_MARKETPLACE}.`)}${C.x}
   ${C.d}${translate("A plugin with code in sh.iva/ is built into a version: that takes a build and a restart.", "Плагин с кодом в sh.iva/ собирается в версию: это сборка и рестарт.")}${C.x}
+  ${C.d}${translate("MCP servers and services of a plugin run only once it is trusted.", "MCP-серверы и сервисы плагина работают только у доверенного плагина.")}${C.x}
 `);
   }
 
