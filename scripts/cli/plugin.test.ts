@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -28,12 +29,14 @@ import {
   pluginsStateFile,
   readPluginsState,
   writePluginsState,
+  type PluginEntry,
 } from "#lib/plugin-store.ts";
 import {
   DEFAULT_MARKETPLACE,
   marketplaceCachePath,
   marketplaceSlug,
 } from "../lib/marketplace.ts";
+import { createSystemdControl } from "../lib/systemd-control.ts";
 import { createPluginCommands, leftoverPluginDirs } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
 import type { PluginVersionBuild } from "./version-update-command.ts";
@@ -85,8 +88,16 @@ function write(root: string, path: string, contents: string): void {
   writeFileSync(target, contents);
 }
 
-function manifest(name: string, version = "1.0.0"): string {
-  return JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name, version }, null, 2);
+function manifest(
+  name: string,
+  version = "1.0.0",
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify(
+    { $schema: PLUGIN_SCHEMA_URL, name, version, ...extra },
+    null,
+    2,
+  );
 }
 
 function skill(name: string, description = `Do the ${name} work.`): string {
@@ -115,6 +126,13 @@ function codePlugin(
 ): string {
   const folder = join(world("code"), name);
   plantPlugin(folder, name, skill, version);
+  // Ключ `extensions["sh.iva"]` — заявка автора на наш namespace; без него папка
+  // `sh.iva/` не читается вовсе (ADR-0009, решение 12).
+  write(
+    folder,
+    "plugin.json",
+    manifest(name, version, { extensions: { "sh.iva": {} } }),
+  );
   write(folder, "sh.iva/index.ts", body);
   // Свой tsconfig — часть контракта расширения: без него eve не эмитит декларации
   // внутри дерева версии (TS5112), и `add` отказывает ещё до стора.
@@ -221,6 +239,60 @@ function buildStub(
   return stub;
 }
 
+/**
+ * `systemctl --user` фейком плюс свой каталог юнитов: живого systemd в тестах нет и
+ * быть не может, а на Linux `hasSystemd()` сказал бы «да» и погнал бы команды в
+ * настоящие пользовательские юниты.
+ */
+function unitWorld() {
+  const dir = join(world("units"), "systemd");
+  mkdirSync(dir, { recursive: true });
+  const calls: string[] = [];
+  const enabled = new Set<string>();
+  const active = new Set<string>();
+  const control = createSystemdControl({
+    run: (args) => {
+      calls.push(args.join(" "));
+      const [action, ...rest] = args;
+      const unit = rest.filter((value) => !value.startsWith("--")).at(0) ?? "";
+      switch (action) {
+        case "enable":
+          enabled.add(unit);
+          if (rest.includes("--now")) active.add(unit);
+          return { code: 0, out: "" };
+        case "disable":
+        case "stop":
+          enabled.delete(unit);
+          active.delete(unit);
+          return { code: 0, out: "" };
+        case "is-enabled":
+          return enabled.has(unit)
+            ? { code: 0, out: "enabled" }
+            : { code: 1, out: "disabled" };
+        case "is-active":
+          return active.has(unit)
+            ? { code: 0, out: "active" }
+            : { code: 3, out: "inactive" };
+        default:
+          return { code: 0, out: "" };
+      }
+    },
+  });
+  return {
+    dir,
+    calls,
+    control,
+    /** Юниты плагинов на диске, по именам. */
+    units: () =>
+      readdirSync(dir)
+        .filter((name) => /^iva-(?:mcp|plugin)-/u.test(name))
+        .sort(),
+    active: () => [...active].sort(),
+  };
+}
+
+type Units = ReturnType<typeof unitWorld>;
+
 function commands(
   root: string,
   hook?: CapHook,
@@ -228,6 +300,8 @@ function commands(
   /** Дополнение к git-окружению теста: см. `httpsInsteadOf`. */
   gitEnv: NodeJS.ProcessEnv = {},
   build?: Build,
+  /** Фейковый systemd и ответ на вопрос доверия. */
+  extra: { units?: Units; confirm?: () => Promise<boolean> } = {},
 ) {
   const events: Events = [];
   const printed: string[] = [];
@@ -235,6 +309,12 @@ function commands(
   const runtime: Runtime = {
     ...base,
     C: NO_COLOR,
+    // systemd в тестах только фейковый: без него команды честно говорят «нет systemd».
+    hasSystemd: () => extra.units !== undefined,
+    ...(extra.units
+      ? { systemd: extra.units.control, UNIT_DIR: extra.units.dir }
+      : {}),
+    ...(extra.confirm ? { confirm: extra.confirm } : {}),
     ok: (message) => events.push(["ok", message]),
     warn: (message) => events.push(["warn", message]),
     bad: (message) => events.push(["bad", message]),
@@ -660,10 +740,14 @@ test("a plugin with code and MCP is built into a version; only MCP still waits",
     /code is built into the version that runs/u,
   );
   assert.match(messages(events, "ok"), /carrier__/u);
+  // Процессы плагина видны владельцу построчно, а ответ по умолчанию — «нет»: тест
+  // не TTY, и `--trust` не передан.
+  assert.match(printed.join("\n"), /^ {4}mcp db: node$/mu);
   assert.match(
     messages(events, "warn"),
-    /MCP servers are read and reported, but not started yet/u,
+    /carrier is not trusted: its MCP servers and services stay off/u,
   );
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, false);
   assert.ok(existsSync(join(pluginRoot(data, "carrier"), "sh.iva/index.ts")));
 
   events.length = 0;
@@ -728,8 +812,9 @@ test("leftovers of an interrupted install are reported, then swept under the loc
   mkdirSync(join(plugins, ".staging-abc"), { recursive: true });
   mkdirSync(join(plugins, ".replaced-9f"), { recursive: true });
   // Старая смещённая копия: за ней уже некому вернуться. Свежую уборка не трогает —
-  // её держит идущая установка, и на это есть свой тест.
-  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  // её держит идущая установка, и на это есть свой тест. Время — от часов харнеса
+  // (`now`), а не от настоящих: иначе «старая» становилась бы свежей после полудня.
+  const old = new Date("2026-08-17T09:00:00.000Z");
   utimesSync(join(plugins, ".replaced-9f"), old, old);
   // Законное имя плагина, которое сметало бы вместе с недоделками, если бы уборка
   // смотрела на `.replaced-` где угодно в имени, а не в его начале.
@@ -1637,7 +1722,11 @@ test("an update whose build fails puts the previous copy of the plugin back", as
 
   // Автор выпустил новую версию, и она не собирается.
   write(folder, "sh.iva/index.ts", "export const two = 2;\n");
-  write(folder, "plugin.json", manifest("carrier", "2.0.0"));
+  write(
+    folder,
+    "plugin.json",
+    manifest("carrier", "2.0.0", { extensions: { "sh.iva": {} } }),
+  );
   build.outcome = { status: "failed", reason: "eve: boom" };
 
   await assert.rejects(
@@ -1913,4 +2002,298 @@ test("sync refuses to restore a plugin whose code wants a taken mount file", asy
     /my-tool and my\.tool both need the extension mount my_tool\.ts/u,
   );
   assert.equal(existsSync(pluginRoot(data, "my-tool")), false);
+});
+
+/** Плагин со stdio-MCP и сервисом: ровно то, ради чего существует доверие. */
+function processPlugin(
+  name: string,
+  { servicePort = 8726 }: { servicePort?: number } = {},
+): string {
+  const folder = join(world("processes"), name);
+  plantPlugin(folder, name);
+  write(
+    folder,
+    "plugin.json",
+    manifest(name, "1.0.0", { extensions: { "sh.iva": {} } }),
+  );
+  write(
+    folder,
+    "mcp.json",
+    JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: {
+        viewer: { type: "stdio", command: "node", args: ["serve.mjs"] },
+        api: { type: "streamable-http", url: "https://api.test/mcp" },
+      },
+    }),
+  );
+  write(
+    folder,
+    "sh.iva/services/web/service.json",
+    JSON.stringify({
+      command: "node",
+      args: ["server.mjs", "${PLUGIN_DATA}"],
+      port: servicePort,
+    }),
+  );
+  write(folder, "sh.iva/services/web/server.mjs", "// server\n");
+  return folder;
+}
+
+test("trust hands out ports and tokens, writes the units and starts them", async () => {
+  const root = home();
+  const folder = processPlugin("trace");
+  const units = unitWorld();
+  const build = buildStub();
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+    { units },
+  );
+
+  await cmdPlugin(["add", folder]);
+  // Без доверия — ни юнитов, ни портов, ни сборки: скиллы и так живые.
+  assert.deepEqual(units.units(), []);
+  assert.equal((await readPluginsState(data)).plugins[0].mcp, undefined);
+  assert.deepEqual(build.calls, []);
+
+  events.length = 0;
+  await cmdPlugin(["trust", "trace"]);
+
+  const entry = (await readPluginsState(data)).plugins[0];
+  assert.equal(entry.trusted, true);
+  // Порт только у stdio-сервера: `streamable-http` ходит напрямую, без прокси.
+  assert.deepEqual(entry.mcp, { viewer: { port: 8730 } });
+  // Сервис получил порт, который просил.
+  assert.deepEqual(entry.services, { web: { port: 8726 } });
+  // Токен — 32 байта hex и режим 0600.
+  const token = join(pluginDataDir(data, "trace"), "mcp-viewer.token");
+  assert.match(readFileSync(token, "utf8").trim(), /^[a-f0-9]{64}$/u);
+  assert.equal(statSync(token).mode & 0o777, 0o600);
+  // Юниты на диске и подняты.
+  assert.deepEqual(units.units(), [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+  ]);
+  assert.deepEqual(units.active(), units.units());
+  const proxy = readFileSync(
+    join(units.dir, "iva-mcp-trace-viewer.service"),
+    "utf8",
+  );
+  assert.match(proxy, /--plugin "trace" --server "viewer" --port 8730/u);
+  assert.match(proxy, new RegExp(`--token-file "${token}"`, "u"));
+  const service = readFileSync(
+    join(units.dir, "iva-plugin-trace-web.service"),
+    "utf8",
+  );
+  // Плейсхолдер раскрыт до записи в юнит: systemd его не раскрывает.
+  assert.match(
+    service,
+    new RegExp(
+      `^ExecStart=/usr/bin/env "node" "server.mjs" "${pluginDataDir(data, "trace")}"$`,
+      "mu",
+    ),
+  );
+  assert.match(service, /^Environment=IVA_SERVICE_PORT=8726$/mu);
+  // Плагин с MCP пересобирает версию: connection-файлы живут в ней.
+  assert.deepEqual(build.calls, [{ requirePlugins: true }]);
+  assert.match(messages(events, "ok"), /trace trusted/u);
+
+  // Повторное доверие ничего не двигает и второй сборки не просит.
+  events.length = 0;
+  build.calls.length = 0;
+  await cmdPlugin(["trust", "trace"]);
+  assert.match(messages(events, "ok"), /already trusted/u);
+  assert.deepEqual(build.calls, []);
+
+  // untrust гасит и снимает юниты, порты остаются за плагином.
+  events.length = 0;
+  await cmdPlugin(["untrust", "trace"]);
+  assert.deepEqual(units.units(), []);
+  assert.deepEqual(units.active(), []);
+  const after = (await readPluginsState(data)).plugins[0];
+  assert.equal(after.trusted, false);
+  assert.deepEqual(after.mcp, { viewer: { port: 8730 } });
+  assert.deepEqual(build.calls, [{ requirePlugins: false }]);
+  assert.match(messages(events, "ok"), /trace .* processes are stopped/u);
+
+  // Второе доверие возвращает ТЕ ЖЕ порты: они в юните и в connection-файле.
+  await cmdPlugin(["trust", "trace"]);
+  assert.deepEqual((await readPluginsState(data)).plugins[0].mcp, {
+    viewer: { port: 8730 },
+  });
+  assert.deepEqual(units.units(), [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+  ]);
+});
+
+test("add --trust answers the question, and a yes at the prompt does the same", async () => {
+  const root = home();
+  const units = unitWorld();
+  const build = buildStub();
+  const { cmdPlugin, printed, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+    { units },
+  );
+
+  await cmdPlugin(["add", processPlugin("trace"), "--trust"]);
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, true);
+  // Команды всё равно напечатаны: `--trust` отвечает на вопрос, а не прячет его.
+  assert.match(printed.join("\n"), /^ {4}mcp viewer: node serve\.mjs$/mu);
+  assert.match(printed.join("\n"), /^ {4}service web: node server\.mjs/mu);
+  assert.deepEqual(units.units(), [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+  ]);
+  // Одна сборка на установку: доверие решено до неё.
+  assert.deepEqual(build.calls, [{ requirePlugins: true }]);
+
+  // Тот же ответ из терминала.
+  const second = home();
+  const yes = commands(second, undefined, undefined, {}, buildStub(), {
+    units: unitWorld(),
+    confirm: () => Promise.resolve(true),
+  });
+  await yes.cmdPlugin(["add", processPlugin("other")]);
+  assert.equal((await readPluginsState(yes.data)).plugins[0].trusted, true);
+});
+
+test("disable takes the units down, enable brings them back", async () => {
+  const root = home();
+  const units = unitWorld();
+  const { cmdPlugin, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    buildStub(),
+    { units },
+  );
+
+  await cmdPlugin(["add", processPlugin("trace"), "--trust"]);
+  assert.equal(units.units().length, 2);
+
+  await cmdPlugin(["disable", "trace"]);
+  assert.deepEqual(units.units(), [], "a disabled plugin runs nothing");
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, true);
+
+  await cmdPlugin(["enable", "trace"]);
+  assert.equal(units.units().length, 2);
+
+  await cmdPlugin(["remove", "trace"]);
+  assert.deepEqual(units.units(), []);
+  // Данные плагина, включая токен, остаются (спека §9.1).
+  assert.ok(existsSync(join(pluginDataDir(data, "trace"), "mcp-viewer.token")));
+});
+
+test("a plugin with services and no code needs no version build", async () => {
+  const root = home();
+  const folder = join(world("service-only"), "svc");
+  plantPlugin(folder, "svc");
+  write(
+    folder,
+    "plugin.json",
+    manifest("svc", "1.0.0", { extensions: { "sh.iva": {} } }),
+  );
+  write(
+    folder,
+    "sh.iva/services/web/service.json",
+    JSON.stringify({ command: "node", args: ["server.mjs"], port: 8726 }),
+  );
+  const units = unitWorld();
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build, {
+    units,
+  });
+
+  await cmdPlugin(["add", folder, "--trust"]);
+
+  // Ни кода, ни MCP — версии пересобирать нечего, юнит всё равно есть.
+  assert.deepEqual(build.calls, []);
+  assert.deepEqual(units.units(), ["iva-plugin-svc-web.service"]);
+  assert.deepEqual((await readPluginsState(data)).plugins[0].services, {
+    web: { port: 8726 },
+  });
+});
+
+test("sync finishes what trust does and puts the units back", async () => {
+  const root = home();
+  const units = unitWorld();
+  const { cmdPlugin, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    buildStub(),
+    { units },
+  );
+  await cmdPlugin(["add", processPlugin("trace"), "--trust"]);
+
+  // Кто-то снёс юниты руками и потерял порты из состояния.
+  for (const unit of units.units()) rmSync(join(units.dir, unit));
+  const state = await readPluginsState(data);
+  await writePluginsState(data, {
+    ...state,
+    plugins: state.plugins.map((entry) => {
+      const stripped: Record<string, unknown> = { ...entry };
+      delete stripped.mcp;
+      delete stripped.services;
+      return stripped as unknown as PluginEntry;
+    }),
+  });
+
+  await cmdPlugin(["sync"]);
+
+  const entry = (await readPluginsState(data)).plugins[0];
+  assert.deepEqual(entry.mcp, { viewer: { port: 8730 } });
+  assert.deepEqual(entry.services, { web: { port: 8726 } });
+  assert.deepEqual(units.units(), [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+  ]);
+});
+
+test("without systemd the state still changes and the command says so", async () => {
+  const root = home();
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    buildStub(),
+  );
+
+  await cmdPlugin(["add", processPlugin("trace"), "--trust"]);
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, true);
+  assert.match(
+    messages(events, "warn"),
+    /no systemd here: the units of the plugin are not written/u,
+  );
+});
+
+test("a trust whose version build fails leaves the plugin untrusted", async () => {
+  const root = home();
+  const units = unitWorld();
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build, {
+    units,
+  });
+  await cmdPlugin(["add", processPlugin("trace")]);
+  build.outcome = { status: "failed", reason: "eve: boom" };
+
+  await assert.rejects(
+    cmdPlugin(["trust", "trace"]),
+    /trace stays untrusted: eve: boom/u,
+  );
+
+  assert.equal((await readPluginsState(data)).plugins[0].trusted, false);
+  assert.deepEqual(units.units(), [], "nothing runs for an untrusted plugin");
 });

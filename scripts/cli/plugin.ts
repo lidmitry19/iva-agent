@@ -9,12 +9,15 @@
 // that carries code is built into a version instead - the same rails as `iva update`,
 // down to the probe, the flip and the restart (ADR-0009) - so installing one takes as
 // long as an update, and a build that fails undoes the install rather than the box.
-// Starting MCP servers arrives in a later ticket; this command already reads and
-// reports them, so the owner sees what a plugin carries before it is installed.
+// MCP servers and the services a plugin declares are processes on the machine, so they
+// wait for a second switch: `trusted`. `add` prints the commands it would start and asks
+// once; `trust`/`untrust` answer the same question later. Without trust a plugin still
+// gives its skills - only nothing runs and nothing calls out.
 //
 // Everything that lives in the authored tree comes through `loadPluginCore()`,
 // never a static import: `iva` has to start on an installation whose `agent/` is
 // missing (ADR-0003, scripts/authored-tree-guard.test.ts).
+import { randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -23,6 +26,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -34,6 +38,13 @@ import {
   pluginCodeProblem,
   pluginNamespace,
 } from "../lib/plugin-build.ts";
+import {
+  pluginUnitPlan,
+  reconcilePluginUnits,
+  unitPartProblem,
+  type PluginUnitSource,
+} from "../lib/plugin-units.ts";
+import { systemdExecArgument } from "../lib/systemd-control.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import {
   DEFAULT_MARKETPLACE,
@@ -135,7 +146,23 @@ export function createPluginCommands(
   runtime: CliRuntime,
   dependencies: PluginDependencies = {},
 ) {
-  const { C, ok, warn, bad, step, cap, childEnv, dataDirAbs } = runtime;
+  const {
+    C,
+    ok,
+    warn,
+    bad,
+    step,
+    cap,
+    childEnv,
+    confirm,
+    dataDirAbs,
+    hasSystemd,
+    systemd,
+    NODE,
+    NODE_BIN_DIR,
+    ROOT,
+    UNIT_DIR,
+  } = runtime;
   const now = dependencies.now ?? (() => new Date());
   const cwd = dependencies.cwd ?? (() => process.cwd());
   const buildVersion = dependencies.buildVersion;
@@ -169,11 +196,13 @@ export function createPluginCommands(
     log(`
 ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "установка плагинов и уход за ними")}
 
-  ${C.c}iva plugin add${C.x} <name|source>   ${translate("install by name from a Marketplace, or from a folder, owner/repo[/subdir][@ref], https:// or git@", "поставить по имени из Marketplace или из папки, owner/repo[/подпапка][@ref], https:// или git@")}
+  ${C.c}iva plugin add${C.x} <name|source> [--trust]   ${translate("install by name from a Marketplace, or from a folder, owner/repo[/subdir][@ref], https:// or git@", "поставить по имени из Marketplace или из папки, owner/repo[/подпапка][@ref], https:// или git@")}
   ${C.c}iva plugin list${C.x} [--available]  ${translate("what is installed; --available: what the marketplaces offer", "что стоит; --available: что предлагают маркетплейсы")}
   ${C.c}iva plugin update${C.x} [name] [--force]  ${translate("pull the tracked ref, printing old → new", "подтянуть отслеживаемый ref, печатая old → new")}
   ${C.c}iva plugin enable${C.x} <name>  ${translate("turn the plugin back on", "включить плагин обратно")}
   ${C.c}iva plugin disable${C.x} <name> ${translate("turn the plugin off without removing it", "выключить плагин, не удаляя")}
+  ${C.c}iva plugin trust${C.x} <name>   ${translate("let its MCP servers and services run on this machine", "разрешить запускать его MCP-серверы и сервисы на этой машине")}
+  ${C.c}iva plugin untrust${C.x} <name> ${translate("stop and remove them; the plugin stays installed", "погасить и снять их; сам плагин остаётся")}
   ${C.c}iva plugin remove${C.x} <name>  ${translate("remove the plugin; its data is kept", "удалить плагин; данные плагина остаются")}
   ${C.c}iva plugin sync${C.x}           ${translate("repair: rebuild plugins.json and reinstall what is missing", "починка: пересобрать plugins.json и доставить недостающее")}
   ${C.c}iva plugin marketplace${C.x} add <source> | remove <name> | list  ${translate("lists of plugins to install by name", "списки плагинов, которые ставятся по имени")}
@@ -189,11 +218,14 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     sub: string,
     argv: readonly string[],
   ): Promise<void> {
-    const { pluginTreeDigest, readPlugin } = core.reader;
+    const { expandPluginPlaceholders, pluginTreeDigest, readPlugin } =
+      core.reader;
     const {
+      assignPluginPorts,
       findPlugin,
       pluginDataDir,
       pluginRoot,
+      pluginTokenFile,
       pluginsDir,
       pluginsStateFile,
       readPluginsState,
@@ -212,6 +244,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     } = core.install;
 
     const force = argv.includes("--force");
+    const trustAsked = argv.includes("--trust");
     const args = argv.filter((value) => !value.startsWith("--"));
 
     /** Что плагин несёт — одной строкой, до установки и в `list`. */
@@ -224,6 +257,8 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       if (report.code) parts.push("code: sh.iva");
       const servers = Object.keys(report.mcp);
       if (servers.length) parts.push(`mcp: ${servers.join(", ")}`);
+      const services = Object.keys(report.services);
+      if (services.length) parts.push(`services: ${services.join(", ")}`);
       return parts.length
         ? parts.join("; ")
         : translate("no components", "компонент нет");
@@ -556,6 +591,256 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         rmSync(undo.displaced, { recursive: true, force: true });
     }
 
+    /**
+     * Что плагин просит запустить на этой машине: `stdio`-серверы `mcp.json` и сервисы,
+     * объявленные в `sh.iva/`. Ровно эти строки владелец и видит перед вопросом о
+     * доверии — не «плагин просит доверия», а команда, которая пойдёт в юнит.
+     */
+    function processCommands(report: PluginReport): string[] {
+      const lines: string[] = [];
+      for (const [server, declared] of Object.entries(report.mcp)) {
+        if (declared.type !== "stdio") continue;
+        lines.push(
+          `mcp ${server}: ${[declared.command, ...(declared.args ?? [])].join(" ")}`,
+        );
+      }
+      for (const [service, declared] of Object.entries(report.services))
+        lines.push(
+          `service ${service}: ${[declared.command, ...(declared.args ?? [])].join(" ")}`,
+        );
+      return lines;
+    }
+
+    /**
+     * Есть ли у плагина то, что живёт в версии: код или connection-файлы. Сервисы в
+     * версию не попадают вовсе — они запускаются из стора юнитом (ADR-0009), поэтому
+     * плагин с одними сервисами ничего не пересобирает.
+     */
+    function inVersion(report: PluginReport, trusted: boolean): boolean {
+      return report.code || (trusted && Object.keys(report.mcp).length > 0);
+    }
+
+    /** Серверы, которым нужен MCP proxy: только `stdio`, остальные ходят напрямую. */
+    function proxiedServers(report: PluginReport): string[] {
+      return Object.entries(report.mcp)
+        .filter(([, declared]) => declared.type === "stdio")
+        .map(([server]) => server)
+        .sort();
+    }
+
+    /**
+     * Токен MCP proxy: 32 байта hex, режим 0600, создаётся один раз. Существующий не
+     * перезаписываем — его уже читает работающий прокси, и новый файл означал бы
+     * 401 до рестарта юнита.
+     */
+    function ensureProxyToken(
+      data: string,
+      name: string,
+      server: string,
+    ): void {
+      const file = pluginTokenFile(data, name, server);
+      if (existsSync(file)) return;
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `${randomBytes(32).toString("hex")}\n`, {
+        mode: 0o600,
+      });
+    }
+
+    /** Порты и токены плагина, которому только что доверили. Состояние — наружу. */
+    function grantPorts(
+      data: string,
+      state: PluginsState,
+      name: string,
+      report: PluginReport,
+    ): PluginsState {
+      const servers = proxiedServers(report).filter(
+        (server) => unitPartProblem("MCP server", server) === null,
+      );
+      const services: Record<string, number> = {};
+      for (const [service, declared] of Object.entries(report.services)) {
+        if (unitPartProblem("service", service) === null)
+          services[service] = declared.port;
+      }
+      const next = assignPluginPorts(state, { name, mcp: servers, services });
+      // PLUGIN_DATA — дом токена, и он обязан быть до того, как юнит стартует.
+      mkdirSync(pluginDataDir(data, name), { recursive: true });
+      for (const server of servers) ensureProxyToken(data, name, server);
+      return next;
+    }
+
+    /** Что юниты должны знать о каждом плагине: прочитанное, а не догадки. */
+    async function unitSources(
+      data: string,
+      state: PluginsState,
+    ): Promise<PluginUnitSource[]> {
+      const sources: PluginUnitSource[] = [];
+      for (const entry of state.plugins) {
+        if (!entry.enabled || !entry.trusted) continue;
+        const root = pluginRoot(data, entry.name);
+        if (!existsSync(root)) continue;
+        const report = await readPlugin(root);
+        if (!report.manifest) continue;
+        const paths = { root, data: pluginDataDir(data, entry.name) };
+        sources.push({
+          name: entry.name,
+          enabled: entry.enabled,
+          trusted: entry.trusted,
+          root,
+          data: paths.data,
+          mcp: proxiedServers(report).map((server) => ({
+            server,
+            port: entry.mcp?.[server]?.port,
+            // Имя, из которого нельзя сделать имя файла, до токена не доходит: план
+            // назовёт его сам, а `pluginTokenFile` на нём кидает.
+            tokenFile:
+              unitPartProblem("MCP server", server) === null
+                ? pluginTokenFile(data, entry.name, server)
+                : "",
+          })),
+          services: Object.entries(report.services).map(
+            ([service, declared]) => ({
+              service,
+              command: declared.command,
+              args: (declared.args ?? []).map((argument) =>
+                expandPluginPlaceholders(argument, paths),
+              ),
+              port: entry.services?.[service]?.port,
+            }),
+          ),
+        });
+      }
+      return sources;
+    }
+
+    /**
+     * Привести юниты к состоянию: написать нужные, поднять их, снять лишние. Идёт после
+     * каждой команды, которая меняет `plugins.json`, — состояние решает, юниты следуют.
+     *
+     * Без systemd (macOS, контейнер разработчика) юниты не пишутся вовсе: состояние всё
+     * равно обновлено, а на сервере его подхватит первый же `iva plugin sync`.
+     */
+    async function reconcileUnits(
+      data: string,
+      state: PluginsState,
+    ): Promise<void> {
+      const plan = pluginUnitPlan({
+        plugins: await unitSources(data, state),
+        root: ROOT,
+        node: NODE,
+        nodeBinDir: NODE_BIN_DIR,
+        dataDir: data,
+        dataDirEnvironment: systemdExecArgument(`ASSISTANT_DATA_DIR=${data}`),
+      });
+      for (const line of plan.diagnostics) warn(line);
+      if (!hasSystemd()) {
+        if (plan.units.length)
+          warn(
+            translate(
+              "no systemd here: the units of the plugin are not written (they only run on a Linux server)",
+              "systemd здесь нет: юниты плагина не пишутся (они работают только на Linux-сервере)",
+            ),
+          );
+        return;
+      }
+      const done = reconcilePluginUnits({
+        plan,
+        unitDir: UNIT_DIR,
+        systemd,
+        ensureDataDir: (plugin) =>
+          mkdirSync(pluginDataDir(data, plugin), { recursive: true }),
+        log: (message) => ok(message),
+      });
+      if (done.started.length)
+        ok(`running: ${done.started.map((unit) => unit).join(", ")}`);
+      for (const failure of done.failures) bad(failure);
+    }
+
+    /**
+     * Вопрос доверия при `add`. Печатаются команды, а ответ по умолчанию — «нет»:
+     * не-TTY (скрипт, ansible) без `--trust` доверия не получает, потому что никто
+     * не ответил.
+     */
+    async function askTrust(report: PluginReport): Promise<boolean> {
+      const lines = processCommands(report);
+      if (lines.length === 0) return false;
+      log(
+        translate(
+          "  This plugin wants to run processes on this machine:",
+          "  Этот плагин хочет запускать процессы на этой машине:",
+        ),
+      );
+      for (const line of lines) log(`    ${line}`);
+      if (trustAsked) return true;
+      return confirm(
+        translate(
+          "Start these processes on this machine?",
+          "Запускать эти процессы на этой машине?",
+        ),
+        false,
+      );
+    }
+
+    async function setTrusted(trusted: boolean): Promise<void> {
+      const data = dataDirAbs();
+      const { entry, report, changed } = await locked(data, async () => {
+        const state = await readPluginsState(data);
+        const found = mustFind(state, args[0]);
+        const read = await readPlugin(pluginRoot(data, found.name));
+        if (!read.manifest && trusted)
+          throw new Error(
+            `${found.name} is not readable: ${read.diagnostics.at(-1) ?? "no reason given"}`,
+          );
+        if (found.trusted === trusted) {
+          // Состояние уже такое: юниты всё равно сверяем — их могли снести руками.
+          await reconcileUnits(data, state);
+          return { entry: found, report: read, changed: false };
+        }
+        let next = upsertPlugin(state, { ...found, trusted });
+        if (trusted) next = grantPorts(data, next, found.name, read);
+        await writePluginsState(data, next);
+        await reconcileUnits(data, next);
+        return {
+          entry: findPlugin(next, found.name) ?? found,
+          report: read,
+          changed: true,
+        };
+      });
+      if (!changed) {
+        ok(`${entry.name} is already ${trusted ? "trusted" : "untrusted"}`);
+        return;
+      }
+      // Connection-файлы живут в версии, поэтому смена доверия у плагина с MCP — это
+      // сборка и рестарт. Доверие, которое не собралось, снимается обратно: иначе
+      // владелец остался бы с записью «доверен» и без тулов в работающей версии.
+      if (Object.keys(report.mcp).length && entry.enabled) {
+        const failure = await buildCode(entry.name, trusted);
+        if (failure !== null) {
+          if (trusted) {
+            await locked(data, async () => {
+              const state = await readPluginsState(data);
+              const back = upsertPlugin(state, { ...entry, trusted: false });
+              await writePluginsState(data, back);
+              await reconcileUnits(data, back);
+            });
+            throw new Error(`${entry.name} stays untrusted: ${failure}`);
+          }
+          warn(failure);
+        }
+      }
+      const running = processCommands(report).length;
+      ok(
+        trusted
+          ? translate(
+              `${entry.name} trusted${running ? ` — ${running} process(es) run as systemd units` : ""}`,
+              `${entry.name} доверен${running ? ` — процессов под systemd: ${running}` : ""}`,
+            )
+          : translate(
+              `${entry.name} untrusted — its processes are stopped and its units removed`,
+              `${entry.name} больше не доверен — процессы погашены, юниты сняты`,
+            ),
+      );
+    }
+
     async function add(): Promise<void> {
       const raw = args[0];
       if (!raw)
@@ -602,17 +887,26 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             : `Installing ${formatPluginSource(source)}`,
         );
         const installed = await install(data, state, source, null, provenance);
+        // Вопрос доверия — здесь, до сборки версии: connection-файлы плагина зависят
+        // от ответа, и спросить после сборки значило бы собирать версию дважды.
+        const trusted = await askTrust(installed.report);
+        let next = upsertPlugin(state, { ...installed.entry, trusted });
+        if (trusted)
+          next = grantPorts(data, next, installed.entry.name, installed.report);
         await writePluginsState(data, {
-          ...upsertPlugin(state, installed.entry),
+          ...next,
           riskNoticeShownAt: state.riskNoticeShownAt ?? now().toISOString(),
         });
-        return installed;
+        return {
+          ...installed,
+          entry: findPlugin(next, installed.entry.name) ?? installed.entry,
+        };
       });
 
-      // Код плагина живёт в версии, поэтому установка заканчивается сборкой и
-      // рестартом. Сборка не прошла — установки не было: стор и plugins.json
-      // возвращаются как были, работающая версия не тронута (ADR-0003).
-      if (report.code && entry.enabled) {
+      // Код плагина и его connection-файлы живут в версии, поэтому установка
+      // заканчивается сборкой и рестартом. Сборка не прошла — установки не было: стор и
+      // plugins.json возвращаются как были, работающая версия не тронута (ADR-0003).
+      if (entry.enabled && inVersion(report, entry.trusted)) {
         const failure = await buildCode(entry.name, true);
         if (failure !== null) {
           await undoInstalls(data, [undo]);
@@ -620,6 +914,11 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         }
       }
       dropDisplaced(undo);
+      // Юниты — после сборки: прокси запускается из версии, которая уже собрана.
+      if (entry.trusted)
+        await locked(data, async () =>
+          reconcileUnits(data, await readPluginsState(data)),
+        );
 
       ok(`${entry.name} installed`);
       if (report.skills.length)
@@ -636,11 +935,19 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             `код собран в работающую версию; тулы идут с префиксом ${pluginNamespace(entry.name)}__`,
           ),
         );
-      if (Object.keys(report.mcp).length)
+      const running = processCommands(report).length;
+      if (running && !entry.trusted)
         warn(
           translate(
-            "MCP servers are read and reported, but not started yet",
-            "MCP-серверы прочитаны и показаны, но пока не запускаются",
+            `${entry.name} is not trusted: its MCP servers and services stay off — allow them with: iva plugin trust ${entry.name}`,
+            `${entry.name} не доверен: его MCP-серверы и сервисы не работают — разрешить: iva plugin trust ${entry.name}`,
+          ),
+        );
+      if (Object.keys(report.mcp).length && entry.trusted)
+        ok(
+          translate(
+            "its MCP tools reach the agent from the next turn",
+            "тулы его MCP-серверов доступны агенту со следующего хода",
           ),
         );
     }
@@ -744,13 +1051,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       const { entry, code } = await locked(data, async () => {
         const state = await readPluginsState(data);
         const found = mustFind(state, args[0]);
-        if (found.enabled !== enabled)
-          await writePluginsState(
-            data,
-            upsertPlugin(state, { ...found, enabled }),
-          );
+        let next = state;
+        if (found.enabled !== enabled) {
+          next = upsertPlugin(state, { ...found, enabled });
+          await writePluginsState(data, next);
+        }
         const report = await readPlugin(pluginRoot(data, found.name));
-        return { entry: found, code: report.code };
+        // Выключенный плагин ничего не запускает: `enabled` гасит и юниты тоже.
+        await reconcileUnits(data, next);
+        return { entry: found, code: inVersion(report, found.trusted) };
       });
       if (entry.enabled === enabled) {
         ok(`${entry.name} is already ${enabled ? "enabled" : "disabled"}`);
@@ -796,8 +1105,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         // Код читается ДО удаления папки: после него узнать, был ли он, неоткуда.
         const report = await readPlugin(pluginRoot(data, found.name));
         rmSync(pluginRoot(data, found.name), { recursive: true, force: true });
-        await writePluginsState(data, removePlugin(state, found.name));
-        return { entry: found, code: report.code && found.enabled };
+        const next = removePlugin(state, found.name);
+        await writePluginsState(data, next);
+        // Юниты снятого плагина уходят вместе с записью, до сборки версии: они держат
+        // порты и процессы, и ждать сборки им незачем.
+        await reconcileUnits(data, next);
+        return {
+          entry: found,
+          code: inVersion(report, found.trusted) && found.enabled,
+        };
       });
       // Плагин удалён, а его код всё ещё в работающей версии: убирает его сборка.
       if (code) {
@@ -897,7 +1213,9 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       return {
         state: upsertPlugin(state, installed),
         undo,
-        code: report.code && installed.enabled,
+        // Доверенный плагин с MCP пересобирается и без кода: его connection-файлы
+        // описывают тот `mcp.json`, который только что приехал.
+        code: inVersion(report, installed.trusted) && installed.enabled,
       };
     }
 
@@ -927,7 +1245,17 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             bad(`${entry.name}: ${(error as Error).message}`);
           }
         }
+        // Обновление могло привезти новый MCP-сервер или сервис: доверенному плагину
+        // они получают порт и токен здесь, иначе версия собралась бы с connection без
+        // порта, а юнита у сервера не было бы вовсе.
+        for (const entry of next.plugins) {
+          if (!entry.trusted) continue;
+          const report = await readPlugin(pluginRoot(data, entry.name));
+          if (report.manifest)
+            next = grantPorts(data, next, entry.name, report);
+        }
         await writePluginsState(data, next);
+        await reconcileUnits(data, next);
       });
       // Одна сборка на весь прогон: версия собирается со всеми плагинами сразу, и
       // отдельная сборка на каждый стоила бы столько же рестартов, сколько плагинов.
@@ -1082,7 +1410,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         // починки показывать его снова незачем.
         if (!next.riskNoticeShownAt && next.plugins.length)
           next = { ...next, riskNoticeShownAt: now().toISOString() };
+        // Доверенный плагин мог приехать без портов и токенов: `sync` — это починка,
+        // и она доделывает то, что делает `trust`, прежде чем сверять юниты.
+        for (const entry of next.plugins) {
+          if (!entry.trusted) continue;
+          const report = await readPlugin(pluginRoot(data, entry.name));
+          if (report.manifest)
+            next = grantPorts(data, next, entry.name, report);
+        }
         await writePluginsState(data, next);
+        await reconcileUnits(data, next);
         const sourceless = next.plugins.filter((entry) => !entry.source);
         if (sourceless.length)
           warn(
@@ -1299,6 +1636,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         return toggle(true);
       case "disable":
         return toggle(false);
+      case "trust":
+        return setTrusted(true);
+      case "untrust":
+        return setTrusted(false);
       case "update":
         return update();
       case "sync":
@@ -1307,7 +1648,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         return marketplaceCommand();
       default:
         throw new Error(
-          `unknown: iva plugin ${sub} — add, list, update, enable, disable, remove, sync, marketplace`,
+          `unknown: iva plugin ${sub} — add, list, update, enable, disable, trust, untrust, remove, sync, marketplace`,
         );
     }
   }
