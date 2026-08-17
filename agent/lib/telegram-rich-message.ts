@@ -708,10 +708,6 @@ export function readRichMessage(value: unknown): RichMessageReading {
 
   try {
     while (stack.length > 0) {
-      if (chars > MAX_RICH_MESSAGE_CHARS) {
-        truncated = true;
-        break;
-      }
       const task = stack.pop();
       if (task === undefined) break;
       if (task.kind === "close") {
@@ -729,6 +725,12 @@ export function readRichMessage(value: unknown): RichMessageReading {
           suffix: task.suffix,
         });
         continue;
+      }
+      // Потолки проверяются на задаче с содержимым, а не на закрытии кадра:
+      // иначе truncated врал бы про сообщение, которое дочитано до конца.
+      if (chars > MAX_RICH_MESSAGE_CHARS) {
+        truncated = true;
+        break;
       }
       if (task.kind === "emit") {
         emit(task.value);

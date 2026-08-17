@@ -1381,6 +1381,26 @@ test("budget: a message just under the node ceiling is not truncated", () => {
   assert.ok(reading.text.endsWith("p999|"));
 });
 
+// Флаг обязан быть честным в обе стороны: один лист длиннее потолка дочитан до
+// конца, обрезать было нечего, а сосед за ним уже теряется — и это видно.
+test("budget: truncated tells the truth at the character ceiling", () => {
+  const oversized = "A".repeat(MAX_RICH_MESSAGE_CHARS + 10);
+  const alone = readRichMessage({
+    blocks: [{ type: "paragraph", text: oversized }],
+  });
+  assert.equal(alone.truncated, false);
+  assert.equal(alone.text.length, oversized.length);
+
+  const withSibling = readRichMessage({
+    blocks: [
+      { type: "paragraph", text: oversized },
+      { type: "paragraph", text: "SECOND" },
+    ],
+  });
+  assert.equal(withSibling.truncated, true);
+  assert.ok(withSibling.text.startsWith("AAA"));
+});
+
 const photoSize = fc.record(
   {
     file_id: fc.string({ minLength: 1, maxLength: 6 }),
