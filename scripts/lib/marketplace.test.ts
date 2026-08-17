@@ -13,6 +13,7 @@ import fc from "fast-check";
 import { formatPluginSource, parsePluginSource } from "./plugin-source.ts";
 import {
   DEFAULT_MARKETPLACE,
+  isMarketplaceQualifier,
   marketplaceEntrySource,
   marketplaceSlug,
   marketplaceSources,
@@ -300,6 +301,15 @@ test("a bare name is a marketplace request; every source form is not", () => {
   assert.deepEqual(parseMarketplaceRequest("trace@iva-plugins"), {
     name: "trace",
     marketplace: "iva-plugins",
+  });
+  // Квалификатором может быть и строка источника — та, что видна в `marketplace list`.
+  assert.deepEqual(parseMarketplaceRequest("trace@smixs/iva-plugins"), {
+    name: "trace",
+    marketplace: "smixs/iva-plugins",
+  });
+  assert.deepEqual(parseMarketplaceRequest("trace@/srv/lists/mine"), {
+    name: "trace",
+    marketplace: "/srv/lists/mine",
   });
   for (const raw of [
     "smixs/iva-plugins",
@@ -604,6 +614,74 @@ test("resolving a name says which marketplace answered, or why none could", () =
         { name: "trace", marketplace: null },
       ),
     /has no cached list — run: iva plugin list --available/u,
+  );
+});
+
+test("the qualifier reaches a list by its source string, and a clash names both", () => {
+  const twin = (recorded: string): LoadedMarketplace => ({
+    ...loaded("iva-plugins", [{ name: "trace", source: "./plugins/trace" }]),
+    recorded,
+  });
+  const first = twin("smixs/iva-plugins");
+  const second = twin("mine/iva-plugins");
+
+  // Имя из файла у обоих одно: выбрать можно строкой источника, которую записал
+  // сам владелец.
+  assert.equal(
+    resolveMarketplacePlugin([first, second], {
+      name: "trace",
+      marketplace: "mine/iva-plugins",
+    }).marketplace,
+    "iva-plugins",
+  );
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([first, second], {
+        name: "trace",
+        marketplace: null,
+      }),
+    /trace is offered by iva-plugins \(smixs\/iva-plugins\) and iva-plugins \(mine\/iva-plugins\) — pick one: iva plugin add trace@smixs\/iva-plugins/u,
+  );
+
+  // Источник со схемой квалификатором не набрать — тогда выход в другом: снять один.
+  const scheme = twin("https://gitlab.example.test/team/lists.git");
+  assert.throws(
+    () =>
+      resolveMarketplacePlugin([scheme, second], {
+        name: "trace",
+        marketplace: null,
+      }),
+    /drop one of them: iva plugin marketplace remove https:\/\/gitlab\.example\.test\/team\/lists\.git/u,
+  );
+  assert.equal(isMarketplaceQualifier("smixs/iva-plugins"), true);
+  assert.equal(isMarketplaceQualifier("/srv/lists/mine"), true);
+  assert.equal(isMarketplaceQualifier("https://h.test/x.git"), false);
+});
+
+test("a list whose own name cannot be typed is refused, not left half usable", () => {
+  for (const name of [
+    "iva plugins",
+    "https://h.test/x",
+    "-plugins",
+    ".hidden",
+    "плагины",
+    "a".repeat(65),
+  ]) {
+    const market = parseMarketplace({
+      name,
+      plugins: [{ name: "trace", source: "./plugins/trace" }],
+    });
+    assert.equal(market.name, null, name);
+    assert.deepEqual(market.entries, [], name);
+    assert.match(
+      market.diagnostics.join("\n"),
+      /must be letters, digits, dots and dashes/u,
+      name,
+    );
+  }
+  assert.equal(
+    parseMarketplace({ name: "iva-plugins", plugins: [] }).name,
+    "iva-plugins",
   );
 });
 

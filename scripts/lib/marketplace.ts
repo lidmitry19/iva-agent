@@ -77,6 +77,9 @@ export type Marketplace = {
   readonly diagnostics: readonly string[];
 };
 
+/** English first, Russian second - the CLI passes its own (`#lib/i18n.ts`). */
+export type Translate = (en: string, ru: string) => string;
+
 /** The marketplace repository a `local` entry is resolved against. */
 export type MarketplaceRepo = {
   /** Git URL of the repository holding the list. */
@@ -104,8 +107,17 @@ export type MarketplaceCache = {
  * No source form can be mistaken for a name - every one of them carries a `/`,
  * a `:` or a leading `.`, `~`, `/`.
  */
-const NAME_REQUEST =
-  /^([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:@([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$/u;
+const SIMPLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+// Квалификатор `<имя>@<чей список>` — имя Marketplace ИЛИ строка его источника.
+// Двоеточие и второй `@` исключены: с ними строка была бы законной формой источника
+// (`git@host:path`), и запрос имени украл бы её.
+const QUALIFIER = /^[^\s:@]+$/u;
+const NAME_REQUEST = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:@([^\s:@]+))?$/u;
+
+/** Годится ли строка источника в квалификатор, который владелец может набрать. */
+export function isMarketplaceQualifier(value: string): boolean {
+  return QUALIFIER.test(value);
+}
 
 export function parseMarketplaceRequest(
   raw: string,
@@ -253,6 +265,13 @@ export function parseMarketplace(raw: unknown): Marketplace {
   if (!isRecord(raw)) return rejected("must be a JSON object");
   const name = text(raw.name);
   if (!name) return rejected("name must be a non-empty string");
+  // Имя списка — то, чем владелец его называет в `add <плагин>@<список>`. Имя с
+  // пробелом или двоеточием набрать нельзя, значит плагины такого списка недостижимы:
+  // отказываем файлу, а не оставляем его наполовину рабочим.
+  if (!SIMPLE_NAME.test(name))
+    return rejected(
+      `name ${JSON.stringify(name)} must be letters, digits, dots and dashes, starting alphanumeric`,
+    );
 
   for (const key of Object.keys(raw)) {
     if (!MARKETPLACE_FIELDS.has(key))
@@ -278,7 +297,7 @@ export function parseMarketplace(raw: unknown): Marketplace {
     const entryName = text(item.name);
     // Имя записи — ключ поиска, а не путь: в файловую систему оно не попадает
     // (папку плагина называет манифест). Поэтому проверка мягкая.
-    if (!entryName || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(entryName)) {
+    if (!entryName || !SIMPLE_NAME.test(entryName)) {
       diagnostics.push(`${position} skipped: name must be a plain plugin name`);
       continue;
     }
@@ -615,17 +634,27 @@ export async function loadMarketplaces(
 export function resolveMarketplacePlugin(
   all: readonly LoadedMarketplace[],
   request: { readonly name: string; readonly marketplace: string | null },
+  translate: Translate = (en) => en,
 ): {
   readonly source: PluginSource;
   readonly marketplace: string;
   readonly name: string;
 } {
+  // Квалификатор называет список либо именем из файла, либо строкой источника: имя
+  // живёт в чужом файле и может смениться, а источник записал сам владелец.
   const searched = request.marketplace
-    ? all.filter((one) => one.market.name === request.marketplace)
+    ? all.filter(
+        (one) =>
+          one.market.name === request.marketplace ||
+          one.recorded === request.marketplace,
+      )
     : all;
   if (request.marketplace && searched.length === 0)
     throw new Error(
-      `no marketplace named ${JSON.stringify(request.marketplace)} — iva plugin marketplace list`,
+      translate(
+        `no marketplace named ${JSON.stringify(request.marketplace)} — iva plugin marketplace list`,
+        `маркетплейса ${JSON.stringify(request.marketplace)} в списке нет — iva plugin marketplace list`,
+      ),
     );
   const hits = searched.flatMap((one) => {
     const entry = one.market.entries.find((item) => item.name === request.name);
@@ -633,16 +662,45 @@ export function resolveMarketplacePlugin(
   });
   if (hits.length === 0)
     throw new Error(
-      `no marketplace offers a plugin named ${JSON.stringify(request.name)} — iva plugin list --available`,
+      translate(
+        `no marketplace offers a plugin named ${JSON.stringify(request.name)} — iva plugin list --available`,
+        `ни один маркетплейс не предлагает плагин ${JSON.stringify(request.name)} — iva plugin list --available`,
+      ),
     );
-  if (hits.length > 1)
+  if (hits.length > 1) {
+    // Две записи под одним именем — подсказка обязана называть источники, иначе
+    // `add <имя>@<имя списка>` привёл бы ровно к этому же отказу.
+    const labels = hits.map((hit) => hit.one.label);
+    const clash = new Set(labels).size !== labels.length;
+    const named = hits.map((hit) =>
+      clash ? `${hit.one.label} (${hit.one.recorded})` : hit.one.label,
+    );
+    const qualifier = clash ? hits[0].one.recorded : hits[0].one.label;
+    // Строку источника со схемой набрать квалификатором нельзя: тогда выход — снять
+    // один из списков, и это тоже надо сказать, а не оставить владельца в тупике.
+    const how = isMarketplaceQualifier(qualifier)
+      ? translate(
+          `pick one: iva plugin add ${request.name}@${qualifier}`,
+          `выбери один: iva plugin add ${request.name}@${qualifier}`,
+        )
+      : translate(
+          `drop one of them: iva plugin marketplace remove ${qualifier}`,
+          `сними один из них: iva plugin marketplace remove ${qualifier}`,
+        );
     throw new Error(
-      `${request.name} is offered by ${hits.map((hit) => hit.one.label).join(" and ")} — pick one: iva plugin add ${request.name}@${hits[0].one.label}`,
+      translate(
+        `${request.name} is offered by ${named.join(" and ")} — ${how}`,
+        `${request.name} предлагают ${named.join(" и ")} — ${how}`,
+      ),
     );
+  }
   const [{ one, entry }] = hits;
   if (!one.repo)
     throw new Error(
-      `${one.label} has no cached list — run: iva plugin list --available`,
+      translate(
+        `${one.label} has no cached list — run: iva plugin list --available`,
+        `у ${one.label} нет прочитанного списка — запусти: iva plugin list --available`,
+      ),
     );
   try {
     return {
@@ -652,7 +710,10 @@ export function resolveMarketplacePlugin(
     };
   } catch (error) {
     throw new Error(
-      `${one.label} offers ${entry.name}, but its source cannot be used: ${(error as Error).message}`,
+      translate(
+        `${one.label} offers ${entry.name}, but its source cannot be used: ${(error as Error).message}`,
+        `${one.label} предлагает ${entry.name}, но её источник непригоден: ${(error as Error).message}`,
+      ),
       { cause: error },
     );
   }

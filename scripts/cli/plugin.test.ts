@@ -1175,6 +1175,11 @@ test("one name in two marketplaces is the owner's choice, not ours", async () =>
     /no marketplace named "nowhere"/u,
   );
 
+  // Квалификатор — имя из файла или строка источника (см. marketplace.test.ts);
+  // адрес со схемой в него не влезает и уходит в разбор источника, где и отказывает.
+  // Важно одно: ничего не ставится.
+  await assert.rejects(cmdPlugin(["add", `alpha@${first.url}`]));
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
   events.length = 0;
   await cmdPlugin(["add", "alpha@other-plugins"]);
   const entry = (await readPluginsState(data)).plugins[0];

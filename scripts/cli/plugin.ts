@@ -861,18 +861,31 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       await locked(data, async () => {
         const state = await readPluginsState(data);
         if (marketplaceSources(state.marketplaces).includes(recorded)) {
-          ok(`${recorded} is already on the list`);
+          ok(
+            translate(
+              `${recorded} is already on the list`,
+              `${recorded} в списке уже есть`,
+            ),
+          );
           return;
         }
         step(`Reading ${recorded}`);
         const one = await loadMarketplace(git, data, recorded, true);
         try {
           if (one.problem && !one.repo)
-            throw new Error(`${recorded} could not be read: ${one.problem}`);
+            throw new Error(
+              translate(
+                `${recorded} could not be read: ${one.problem}`,
+                `${recorded} не читается: ${one.problem}`,
+              ),
+            );
           reportMarketplace(one);
           if (!one.market.name)
             throw new Error(
-              `${recorded} has no usable ${MARKETPLACE_FILE} — that file is what makes a repository a Marketplace`,
+              translate(
+                `${recorded} has no usable ${MARKETPLACE_FILE} — that file is what makes a repository a Marketplace`,
+                `у ${recorded} нет пригодного ${MARKETPLACE_FILE} — именно этот файл делает репозиторий маркетплейсом`,
+              ),
             );
           // Одно имя на два списка сделало бы `add <имя>@<marketplace>` невыразимым.
           const taken = (
@@ -880,7 +893,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           ).find((other) => other.market.name === one.market.name);
           if (taken)
             throw new Error(
-              `a marketplace named ${JSON.stringify(one.market.name)} is already on the list (${taken.recorded})`,
+              translate(
+                `a marketplace named ${JSON.stringify(one.market.name)} is already on the list (${taken.recorded})`,
+                `маркетплейс с именем ${JSON.stringify(one.market.name)} в списке уже есть (${taken.recorded})`,
+              ),
             );
         } catch (error) {
           // Список не принят — его выкачанная копия в data/ тоже не нужна.
@@ -899,7 +915,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             : [DEFAULT_MARKETPLACE, recorded],
         });
         ok(
-          `${one.market.name} added — ${one.market.entries.length} plugin(s) on offer`,
+          translate(
+            `${one.market.name} added — ${one.market.entries.length} plugin(s) on offer`,
+            `${one.market.name} добавлен — плагинов на выбор: ${one.market.entries.length}`,
+          ),
         );
       });
     }
@@ -925,7 +944,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         if (one.market.name === wanted) return recorded;
       }
       throw new Error(
-        `${wanted} is not on the list — iva plugin marketplace list`,
+        translate(
+          `${wanted} is not on the list — iva plugin marketplace list`,
+          `${wanted} в списке нет — iva plugin marketplace list`,
+        ),
       );
     }
 
@@ -946,8 +968,14 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           );
           throw new Error(
             wanted === DEFAULT_MARKETPLACE || fallback.market.name === wanted
-              ? `${DEFAULT_MARKETPLACE} is the built-in default, not a list entry — add your own marketplace first, then remove this one`
-              : `${wanted} is not on the list — iva plugin marketplace list`,
+              ? translate(
+                  `${DEFAULT_MARKETPLACE} is the built-in default, not a list entry — add your own marketplace first, then remove this one`,
+                  `${DEFAULT_MARKETPLACE} — встроенный список по умолчанию, а не запись: сначала добавь свой маркетплейс, потом снимай этот`,
+                )
+              : translate(
+                  `${wanted} is not on the list — iva plugin marketplace list`,
+                  `${wanted} в списке нет — iva plugin marketplace list`,
+                ),
           );
         }
         const target = await findMarketplace(data, state, wanted);
@@ -960,7 +988,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           recursive: true,
           force: true,
         });
-        ok(`${target} removed`);
+        ok(translate(`${target} removed`, `${target} снят`));
       });
     }
 
