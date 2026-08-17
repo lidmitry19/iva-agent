@@ -666,7 +666,8 @@ test("the owner hears about a switched-off plugin once a week, sooner if it chan
   assert.match(sent[0], /iva plugin enable trace/u);
   // Вывод самого апдейта — не Alert: его владелец и просил, и он печатается всегда.
   assert.equal(said.length, 2);
-  assert.match(said[0], /switched off/u);
+  // Локальный вывод — тот же текст, что уходит в чат, плюс причина, которой в чате нет.
+  assert.match(said[0], /switched the plugin trace off/u);
   assert.match(said[0], /extension build failed/u);
 
   // Плагин изменился — существо проблемы другое, и говорить надо сразу.

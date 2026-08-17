@@ -1870,3 +1870,45 @@ test("sync says the code of a restored plugin is not in the version that runs", 
     /carrier: code is not built into the current version — run: iva update/u,
   );
 });
+
+test("sync refuses to restore a plugin whose code wants a taken mount file", async () => {
+  const root = home();
+  const first = codePlugin("my.tool", { skill: "one" });
+  const build = buildStub();
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    build,
+  );
+  await cmdPlugin(["add", first]);
+  // A state file that asks for two plugins whose code folds onto one mount: `add`
+  // refuses such a pair, so this one comes from a hand-edited or salvaged plugins.json.
+  const second = codePlugin("my-tool", { skill: "two" });
+  const state = await readPluginsState(data);
+  await writePluginsState(data, {
+    ...state,
+    plugins: [
+      ...state.plugins,
+      {
+        name: "my-tool",
+        source: second,
+        ref: "",
+        sha: "",
+        digest: "",
+        enabled: true,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+    ],
+  });
+  events.length = 0;
+
+  await assert.rejects(cmdPlugin(["sync"]), /could not restore: my-tool/u);
+
+  assert.match(
+    messages(events, "bad"),
+    /my-tool and my\.tool both need the extension mount my_tool\.ts/u,
+  );
+  assert.equal(existsSync(pluginRoot(data, "my-tool")), false);
+});
