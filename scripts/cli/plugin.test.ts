@@ -241,6 +241,15 @@ test("add copies a local folder without following symlinks out of it", async () 
   assert.equal(state.plugins[0].source, folder);
   assert.equal(state.plugins[0].sha, "");
 
+  // Относительный путь записывается абсолютным: `sync` запускают из другого
+  // каталога, и `./…` там указывало бы в другое место.
+  const relativeHome = home();
+  const nested = join(relativeHome, "workspace", "second-plugin");
+  plantPlugin(nested, "second-demo", "beta");
+  const second = commands(relativeHome);
+  await second.cmdPlugin(["add", "./workspace/second-plugin"]);
+  assert.equal((await readPluginsState(second.data)).plugins[0].source, nested);
+
   const hostile = join(world("hostile"), "evil-plugin");
   plantPlugin(hostile, "evil");
   symlinkSync(join(outside, "secret.txt"), join(hostile, "leak.txt"));

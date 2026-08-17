@@ -156,14 +156,24 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
     }
 
+    /**
+     * Локальный источник записывается абсолютным путём: `plugins.json` читает потом
+     * `iva plugin sync`, а он запускается из другого каталога, и `./my-plugin` там
+     * означал бы совсем другую папку.
+     */
+    function absolute(source: PluginSource): PluginSource {
+      return source.kind === "local"
+        ? { kind: "local", path: resolve(cwd(), expandHome(source.path)) }
+        : source;
+    }
+
     /** Плагин во временной папке: git-источник — fetch, локальный — копия. */
     async function stage(
       source: PluginSource,
       staging: string,
     ): Promise<Staged> {
       if (source.kind === "local") {
-        const from = resolve(cwd(), expandHome(source.path));
-        await copyPluginTree(from, staging);
+        await copyPluginTree(source.path, staging);
         return { root: staging, sha: "", ref: "" };
       }
       const { sha, ref } = resolveRemoteSha(git, source.url, source.ref);
@@ -213,9 +223,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     async function install(
       data: string,
       state: PluginsState,
-      source: PluginSource,
+      raw: PluginSource,
       previous: PluginEntry | null,
     ): Promise<{ readonly entry: PluginEntry; readonly report: PluginReport }> {
+      const source = absolute(raw);
       mkdirSync(pluginsDir(data), { recursive: true });
       // Staging живёт внутри стора: переезд в стор обязан быть переименованием, а
       // переименование работает только в пределах одной файловой системы.
