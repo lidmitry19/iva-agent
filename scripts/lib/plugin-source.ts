@@ -10,7 +10,7 @@
  * Pure: no filesystem, no network, no `~` expansion (the caller owns the home
  * directory it belongs to). A plugin name from a Marketplace is still not a form
  * here: the name is resolved into one of these forms before the parser sees it
- * (`scripts/lib/plugin-marketplace.ts`), so what `plugins.json` records and what
+ * (`scripts/lib/marketplace.ts`), so what `plugins.json` records and what
  * `sync` replays stays a source string with a repository behind it.
  */
 

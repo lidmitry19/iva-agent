@@ -90,7 +90,7 @@ ${C.b}Commands:${C.x}
   ${C.c}iva login${C.x} [--browser]  sign in to an OpenAI subscription (ChatGPT) for MODEL_PROVIDER=codex
   ${C.c}iva rollback${C.x}       go back to the previous version (symlink flip + restart)
   ${C.c}iva doctor${C.x}         diagnose and safely auto-repair the install
-  ${C.c}iva plugin${C.x} <cmd>     plugins: add|list|update|enable|disable|remove|sync
+  ${C.c}iva plugin${C.x} <cmd>     plugins: add|list|update|enable|disable|remove|sync|marketplace
   ${C.c}iva status${C.x}         status of services and nightly timers
   ${C.c}iva restart${C.x}        restart the agent and Telegram bridge
   ${C.c}iva reset${C.x}          full reset: clear stuck workflows and restart

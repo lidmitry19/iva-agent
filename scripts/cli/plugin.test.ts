@@ -28,6 +28,11 @@ import {
   readPluginsState,
   writePluginsState,
 } from "#lib/plugin-store.ts";
+import {
+  DEFAULT_MARKETPLACE,
+  marketplaceCachePath,
+  marketplaceSlug,
+} from "../lib/marketplace.ts";
 import { createPluginCommands, leftoverPluginDirs } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
 
@@ -99,8 +104,8 @@ function plantPlugin(
 
 type Remote = { readonly url: string; readonly work: string; sha: string };
 
-/** Локальный bare-репозиторий в роли удалённого источника. */
-function remote(name: string, skillName = "alpha"): Remote {
+/** Локальный bare-репозиторий в роли удалённого: содержимое кладёт вызывающий. */
+function bareRemote(seed: (work: string) => void): Remote {
   const base = world("remote");
   const bare = join(base, "remote.git");
   // `--initial-branch`: HEAD раскрытого репозитория должен указывать на ту ветку,
@@ -109,11 +114,31 @@ function remote(name: string, skillName = "alpha"): Remote {
   const work = join(base, "work");
   mkdirSync(work, { recursive: true });
   git(["init", "-q", "--initial-branch=main"], work);
-  plantPlugin(work, name, skillName);
+  seed(work);
   git(["add", "-A"], work);
   git(["commit", "-qm", "plugin"], work);
   git(["push", "-q", `file://${bare}`, "HEAD:refs/heads/main"], work);
   return { url: `file://${bare}`, work, sha: git(["rev-parse", "HEAD"], work) };
+}
+
+/** Репозиторий, корень которого — сам плагин. */
+function remote(name: string, skillName = "alpha"): Remote {
+  return bareRemote((work) => plantPlugin(work, name, skillName));
+}
+
+/** Репозиторий-Marketplace: список в конвенции Codex плюс то, что он раздаёт. */
+function marketplaceRemote(
+  list: unknown,
+  seed: (work: string) => void = () => undefined,
+): Remote {
+  return bareRemote((work) => {
+    write(
+      work,
+      ".agents/plugins/marketplace.json",
+      JSON.stringify(list, null, 2),
+    );
+    seed(work);
+  });
 }
 
 /** Ещё один коммит в удалённом: даёт `update` куда двигаться. */
@@ -136,6 +161,8 @@ type CapHook = (
   command: string,
   args: readonly string[],
   result: { code: number; out: string; err: string },
+  /** Где команда была запущена: по нему отличают кэш Marketplace от установки. */
+  cwd: string,
 ) => { code: number; out: string; err: string };
 
 function commands(
@@ -155,8 +182,9 @@ function commands(
     step: (message) => events.push(["step", message]),
     readEnv: () => ({}),
     cap: (command, args, options = {}) => {
+      const where = typeof options.cwd === "string" ? options.cwd : root;
       const result = spawnSync(command, [...args], {
-        cwd: typeof options.cwd === "string" ? options.cwd : root,
+        cwd: where,
         encoding: "utf8",
         env: GIT_ENV,
       });
@@ -165,7 +193,7 @@ function commands(
         out: (result.stdout || "").trim(),
         err: (result.stderr || "").trim(),
       };
-      return hook ? hook(command, args, captured) : captured;
+      return hook ? hook(command, args, captured, where) : captured;
     },
   };
   const { cmdPlugin } = createPluginCommands(runtime, {
@@ -862,4 +890,424 @@ test("a disable issued during a slow install is refused, not swallowed", async (
   assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
   await second.cmdPlugin(["update", "demo"]);
   assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
+});
+
+// ─── Marketplace ───────────────────────────────────────────────────────────────
+//
+// Дефолтный `smixs/iva-plugins` в тестах недостижим — ровно как сегодня в жизни:
+// репозитория ещё нет. Хук глушит любую команду git в его кэше, поэтому ни один
+// тест не выходит в сеть, а сообщения об отказе проверяются на настоящем пути.
+const DEFAULT_CACHE = marketplaceSlug(DEFAULT_MARKETPLACE);
+
+const offlineDefault: CapHook = (command, args, result, cwd) =>
+  command === "git" &&
+  (cwd.includes(DEFAULT_CACHE) ||
+    args.some((arg) => arg.includes("smixs/iva-plugins")))
+    ? {
+        code: 128,
+        out: "",
+        err: "fatal: repository 'https://github.com/smixs/iva-plugins.git/' not found",
+      }
+    : result;
+
+/** Список из трёх форм `source` плюс запись `npm`, которую мы не ставим. */
+function threeForms(mono: Remote, own: Remote): unknown {
+  return {
+    name: "iva-plugins",
+    plugins: [
+      {
+        name: "alpha",
+        source: "./plugins/alpha",
+        description: "A folder of the marketplace itself.",
+      },
+      {
+        name: "beta",
+        source: {
+          source: "git-subdir",
+          url: mono.url,
+          path: "plugins/beta",
+          ref: null,
+          sha: null,
+        },
+      },
+      {
+        name: "gamma",
+        source: { source: "url", url: own.url, ref: null, sha: null },
+        description: "A repository of its own.",
+      },
+      {
+        name: "packaged",
+        source: { source: "npm", package: "iva-plugin-packaged" },
+        policy: { network: "deny" },
+      },
+    ],
+  };
+}
+
+test("the default marketplace is implicit, and it cannot offer a name it has not got", async () => {
+  const root = home();
+  const { cmdPlugin, events, printed, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "list"]);
+  assert.match(printed.join("\n"), /smixs\/iva-plugins/u);
+  assert.match(printed.join("\n"), /\(default\)/u);
+  assert.match(printed.join("\n"), /not read yet/u);
+
+  events.length = 0;
+  await assert.rejects(
+    cmdPlugin(["add", "trace"]),
+    /no marketplace offers a plugin named "trace" — iva plugin list --available/u,
+  );
+  // Причина отказа названа отдельной строкой, а не стектрейсом.
+  assert.match(
+    messages(events, "bad"),
+    /could not be read: fatal: repository/u,
+  );
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+
+  events.length = 0;
+  printed.length = 0;
+  await cmdPlugin(["list", "--available"]);
+  assert.match(messages(events, "bad"), /could not be read/u);
+  assert.match(printed.join("\n"), /Nothing on offer/u);
+
+  await assert.rejects(
+    cmdPlugin(["marketplace", "remove", DEFAULT_MARKETPLACE]),
+    /is the built-in default, not a list entry/u,
+  );
+  await assert.rejects(
+    cmdPlugin(["marketplace", "remove", "whatever"]),
+    /whatever is not on the list/u,
+  );
+});
+
+test("marketplace add reads the list once, and add by name installs all three source forms", async () => {
+  const mono = bareRemote((work) =>
+    plantPlugin(join(work, "plugins/beta"), "beta", "beta-skill"),
+  );
+  const own = remote("gamma", "gamma-skill");
+  const market = marketplaceRemote(threeForms(mono, own), (work) =>
+    plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
+  );
+  const root = home();
+  const { cmdPlugin, events, printed, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  assert.match(messages(events, "ok"), /iva-plugins added — 3 plugin\(s\)/u);
+  // Запись `npm` и поле `policy` не молчат.
+  assert.match(
+    messages(events, "warn"),
+    /iva-plugins: packaged skipped: npm sources are not installed by Iva/u,
+  );
+  assert.match(messages(events, "warn"), /packaged: field "policy" ignored/u);
+  // Первый свой список материализует дефолт, первым: снять его теперь есть чем.
+  assert.deepEqual((await readPluginsState(data)).marketplaces, [
+    DEFAULT_MARKETPLACE,
+    market.url,
+  ]);
+
+  events.length = 0;
+  printed.length = 0;
+  await cmdPlugin(["list", "--available"]);
+  const table = printed.join("\n");
+  assert.match(table, /NAME\s+DESCRIPTION\s+MARKETPLACE/u);
+  assert.match(
+    table,
+    /alpha .*A folder of the marketplace itself\..*available/u,
+  );
+  assert.match(table, /beta .*-.*iva-plugins.*available/u);
+  assert.match(table, /gamma .*A repository of its own\..*available/u);
+  assert.doesNotMatch(table, /packaged/u);
+
+  // Форма 1: папка самого Marketplace — подпапка его репозитория на прочитанном sha.
+  events.length = 0;
+  await cmdPlugin(["add", "alpha"]);
+  const afterAlpha = await readPluginsState(data);
+  assert.deepEqual(
+    { ...afterAlpha.plugins[0], digest: "", installedAt: "" },
+    {
+      name: "alpha",
+      source: `${market.url}//plugins/alpha@${market.sha}`,
+      ref: market.sha,
+      sha: market.sha,
+      digest: "",
+      enabled: true,
+      trusted: false,
+      installedAt: "",
+      marketplace: "iva-plugins",
+    },
+  );
+  assert.ok(existsSync(join(pluginRoot(data, "alpha"), "plugin.json")));
+  assert.match(messages(events, "step"), /Installing alpha from iva-plugins/u);
+
+  // Форма 2: подпапка чужого репозитория — тот же путь установки, sha от него.
+  await cmdPlugin(["add", "beta"]);
+  const beta = (await readPluginsState(data)).plugins.find(
+    (entry) => entry.name === "beta",
+  );
+  assert.equal(beta?.source, `${mono.url}//plugins/beta`);
+  assert.equal(beta?.sha, mono.sha);
+  assert.equal(beta?.ref, "HEAD");
+  assert.equal(beta?.marketplace, "iva-plugins");
+
+  // Форма 3: отдельный репозиторий — строка источника ровно его URL.
+  await cmdPlugin(["add", "gamma"]);
+  const gamma = (await readPluginsState(data)).plugins.find(
+    (entry) => entry.name === "gamma",
+  );
+  assert.equal(gamma?.source, own.url);
+  assert.equal(gamma?.sha, own.sha);
+
+  // Скиллы всех трёх работают со следующего хода, без сборки и рестарта.
+  assert.deepEqual(await nextTurnSkills(data), [
+    "alpha-skill",
+    "beta-skill",
+    "gamma-skill",
+  ]);
+
+  // Провенанс виден в `list`, а поставленное — в `list --available`.
+  printed.length = 0;
+  await cmdPlugin(["list"]);
+  assert.match(printed.join("\n"), /via iva-plugins/u);
+  printed.length = 0;
+  await cmdPlugin(["list", "--available"]);
+  assert.match(printed.join("\n"), /alpha .*installed/u);
+});
+
+test("sync and update replay a source resolved through a marketplace", async () => {
+  const market = marketplaceRemote(
+    {
+      name: "iva-plugins",
+      plugins: [{ name: "alpha", source: "./plugins/alpha" }],
+    },
+    (work) => plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
+  );
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  await cmdPlugin(["add", "alpha"]);
+  const installed = await readPluginsState(data);
+
+  // Папку снесли: `sync` доставляет ровно запиненный коммит по записанной строке.
+  rmSync(pluginRoot(data, "alpha"), { recursive: true, force: true });
+  events.length = 0;
+  await cmdPlugin(["sync"]);
+  assert.match(messages(events, "ok"), /alpha restored/u);
+  const restored = await readPluginsState(data);
+  assert.deepEqual(restored.plugins[0], installed.plugins[0]);
+  assert.ok(existsSync(join(pluginRoot(data, "alpha"), "plugin.json")));
+
+  // `update` идёт по той же строке и видит, что двигаться некуда: Marketplace
+  // запинил коммит. Как сойти с пина — сказано прямо.
+  events.length = 0;
+  await cmdPlugin(["update", "alpha"]);
+  assert.match(messages(events, "ok"), /alpha is already at/u);
+  assert.match(
+    messages(events, "ok"),
+    /pinned by iva-plugins.*iva plugin remove alpha/u,
+  );
+  assert.deepEqual(
+    (await readPluginsState(data)).plugins[0],
+    installed.plugins[0],
+  );
+});
+
+test("one name in two marketplaces is the owner's choice, not ours", async () => {
+  const list = (name: string): unknown => ({
+    name,
+    plugins: [{ name: "alpha", source: "./plugins/alpha" }],
+  });
+  const plant = (work: string): void =>
+    plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill");
+  const first = marketplaceRemote(list("iva-plugins"), plant);
+  const second = marketplaceRemote(list("other-plugins"), plant);
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", first.url]);
+  await cmdPlugin(["marketplace", "add", second.url]);
+
+  await assert.rejects(
+    cmdPlugin(["add", "alpha"]),
+    /alpha is offered by iva-plugins and other-plugins — pick one: iva plugin add alpha@iva-plugins/u,
+  );
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+
+  await assert.rejects(
+    cmdPlugin(["add", "alpha@nowhere"]),
+    /no marketplace named "nowhere"/u,
+  );
+
+  events.length = 0;
+  await cmdPlugin(["add", "alpha@other-plugins"]);
+  const entry = (await readPluginsState(data)).plugins[0];
+  assert.equal(entry.marketplace, "other-plugins");
+  assert.equal(entry.source, `${second.url}//plugins/alpha@${second.sha}`);
+
+  // Два списка под одним именем сделали бы этот выбор невыразимым.
+  const twin = marketplaceRemote(list("iva-plugins"), plant);
+  await assert.rejects(
+    cmdPlugin(["marketplace", "add", twin.url]),
+    /a marketplace named "iva-plugins" is already on the list/u,
+  );
+});
+
+test("a marketplace that cannot be refreshed serves the cached list and says it is stale", async () => {
+  const market = marketplaceRemote(
+    {
+      name: "iva-plugins",
+      plugins: [{ name: "alpha", source: "./plugins/alpha" }],
+    },
+    (work) => plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
+  );
+  const root = home();
+  const cache = marketplaceCachePath(join(root, "data"), market.url);
+  let offline = false;
+  const { cmdPlugin, events, printed, data } = commands(
+    root,
+    (command, args, result, cwd) => {
+      // Гаснет только обновление кэша: установка обязана и дальше ходить в git.
+      if (offline && command === "git" && args[0] === "fetch" && cwd === cache)
+        return { code: 128, out: "", err: "fatal: unable to access remote" };
+      return offlineDefault(command, args, result, cwd);
+    },
+  );
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  offline = true;
+
+  events.length = 0;
+  printed.length = 0;
+  await cmdPlugin(["list", "--available"]);
+  assert.match(
+    messages(events, "warn"),
+    /iva-plugins could not be refreshed \(fatal: unable to access remote\) — using the cached list, it may be stale/u,
+  );
+  assert.match(printed.join("\n"), /alpha/u);
+
+  events.length = 0;
+  await cmdPlugin(["add", "alpha"]);
+  assert.match(
+    messages(events, "warn"),
+    /using the cached list, it may be stale/u,
+  );
+  assert.ok(existsSync(join(pluginRoot(data, "alpha"), "plugin.json")));
+  assert.equal((await readPluginsState(data)).plugins[0].sha, market.sha);
+});
+
+test("a repository without a usable list is not a marketplace, and nothing is recorded", async () => {
+  const broken = bareRemote((work) =>
+    write(work, ".agents/plugins/marketplace.json", "{ broken"),
+  );
+  const nameless = marketplaceRemote({ plugins: [] });
+  const plain = remote("demo");
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root, offlineDefault);
+
+  for (const [source, why] of [
+    [broken.url, /is not valid JSON/u],
+    [nameless.url, /name must be a non-empty string/u],
+    [plain.url, /no \.agents\/plugins\/marketplace\.json in the repository/u],
+  ] as const) {
+    events.length = 0;
+    await assert.rejects(
+      cmdPlugin(["marketplace", "add", source]),
+      /has no usable \.agents\/plugins\/marketplace\.json/u,
+      source,
+    );
+    assert.match(messages(events, "warn"), why, source);
+    assert.deepEqual((await readPluginsState(data)).marketplaces, [], source);
+  }
+
+  // Битый файл у УЖЕ добавленного списка не роняет команду и виден в диагностике.
+  const market = marketplaceRemote(
+    {
+      name: "iva-plugins",
+      plugins: [{ name: "alpha", source: "./plugins/alpha" }],
+    },
+    (work) => plantPlugin(join(work, "plugins/alpha"), "alpha", "alpha-skill"),
+  );
+  await cmdPlugin(["marketplace", "add", market.url]);
+  write(market.work, ".agents/plugins/marketplace.json", "{ broken");
+  git(["add", "-A"], market.work);
+  git(["commit", "-qm", "break"], market.work);
+  git(["push", "-q", market.url, "HEAD:refs/heads/main"], market.work);
+
+  events.length = 0;
+  await assert.rejects(
+    cmdPlugin(["add", "alpha"]),
+    /no marketplace offers a plugin named "alpha"/u,
+  );
+  // Имя маркетплейса живёт в его файле: файл сломан — в строке остаётся источник,
+  // из которого он взят. Другого имени взять негде, и выдумывать его нечем.
+  assert.match(
+    messages(events, "warn"),
+    /remote\.git: \.agents\/plugins\/marketplace\.json is not valid JSON/u,
+  );
+});
+
+test("marketplace remove takes the entry and its cache, by name or by source", async () => {
+  const market = marketplaceRemote({ name: "iva-plugins", plugins: [] });
+  const other = marketplaceRemote({ name: "other-plugins", plugins: [] });
+  const root = home();
+  const { cmdPlugin, events, printed, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  await cmdPlugin(["marketplace", "add", other.url]);
+  assert.ok(existsSync(marketplaceCachePath(data, market.url)));
+
+  events.length = 0;
+  await cmdPlugin(["marketplace", "remove", "iva-plugins"]);
+  assert.match(messages(events, "ok"), /removed/u);
+  assert.equal(existsSync(marketplaceCachePath(data, market.url)), false);
+  assert.deepEqual((await readPluginsState(data)).marketplaces, [
+    DEFAULT_MARKETPLACE,
+    other.url,
+  ]);
+
+  printed.length = 0;
+  await cmdPlugin(["marketplace", "list"]);
+  assert.match(printed.join("\n"), /other-plugins.*0 plugin\(s\)/u);
+  assert.doesNotMatch(printed.join("\n"), /\(default\)/u);
+
+  await cmdPlugin(["marketplace", "remove", other.url]);
+  await cmdPlugin(["marketplace", "remove", DEFAULT_MARKETPLACE]);
+  // Список опустел — дефолт снова неявный, и это единственное его состояние.
+  assert.deepEqual((await readPluginsState(data)).marketplaces, []);
+  printed.length = 0;
+  await cmdPlugin(["marketplace", "list"]);
+  assert.match(printed.join("\n"), /smixs\/iva-plugins.*\(default\)/u);
+
+  await assert.rejects(
+    cmdPlugin(["marketplace", "frobnicate"]),
+    /unknown: iva plugin marketplace frobnicate — add, remove, list/u,
+  );
+  await assert.rejects(
+    cmdPlugin(["marketplace", "add"]),
+    /iva plugin marketplace add <source>/u,
+  );
+});
+
+test("a marketplace that offers a plugin under another name installs nothing", async () => {
+  const market = marketplaceRemote(
+    {
+      name: "iva-plugins",
+      plugins: [{ name: "trace", source: "./plugins/trace" }],
+    },
+    // В папке лежит плагин с ДРУГИМ именем: файл списка непроверенный, имя
+    // объявляет манифест.
+    (work) => plantPlugin(join(work, "plugins/trace"), "evil", "evil-skill"),
+  );
+  const root = home();
+  const { cmdPlugin, data } = commands(root, offlineDefault);
+
+  await cmdPlugin(["marketplace", "add", market.url]);
+  await assert.rejects(
+    cmdPlugin(["add", "trace"]),
+    /iva-plugins offers trace, but this plugin calls itself "evil" — refusing to install it/u,
+  );
+  assert.equal(existsSync(pluginRoot(data, "evil")), false);
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
 });

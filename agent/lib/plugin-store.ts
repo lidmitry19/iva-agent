@@ -32,6 +32,11 @@ export type PluginEntry = {
   /** Разрешение поднимать MCP-серверы плагина. Тумблер отдельный (ADR-0009). */
   readonly trusted: boolean;
   readonly installedAt: string;
+  /**
+   * Имя Marketplace, через который плагин нашли по имени. Прямая установка из
+   * git-источника или папки поля не имеет: провенанс — это факт, а не заготовка.
+   */
+  readonly marketplace?: string;
 };
 
 export type PluginsState = {
@@ -93,6 +98,9 @@ function normalizeEntry(raw: unknown): PluginEntry | null {
     enabled: raw.enabled !== false,
     trusted: raw.trusted === true,
     installedAt: string(raw.installedAt),
+    ...(string(raw.marketplace)
+      ? { marketplace: raw.marketplace as string }
+      : {}),
   };
 }
 

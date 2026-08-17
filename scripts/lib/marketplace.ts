@@ -485,3 +485,133 @@ export function marketplaceEntrySource(
       : `${withSubdir(source.url, source.path)}${at}`,
   );
 }
+
+/** Один Marketplace целиком: что записано, что лежит в кэше, что прочитано. */
+export type LoadedMarketplace = {
+  /** Строка источника ровно как в `plugins.json`. */
+  readonly recorded: string;
+  /** Имя из файла, а пока файла нет — сама строка источника. */
+  readonly label: string;
+  readonly market: Marketplace;
+  /** URL и коммит кэша: то, к чему пинуется запись `local`. Нет кэша — `null`. */
+  readonly repo: MarketplaceRepo | null;
+  readonly stale: boolean;
+  readonly problem: string | null;
+};
+
+const EMPTY: Marketplace = { name: null, entries: [], diagnostics: [] };
+
+/** Список владельца; пустой означает наш Marketplace по умолчанию (ADR-0009). */
+export function marketplaceSources(
+  recorded: readonly string[],
+): readonly string[] {
+  return recorded.length ? recorded : [DEFAULT_MARKETPLACE];
+}
+
+/**
+ * Один Marketplace с диска. Кэш обновляется только когда команда за этим и
+ * пришла (`add <name>`, `list --available`) — `marketplace list` печатает то, что
+ * уже лежит, и в сеть не идёт.
+ */
+export async function loadMarketplace(
+  git: GitRunner,
+  dataDir: string,
+  recorded: string,
+  refresh: boolean,
+): Promise<LoadedMarketplace> {
+  let parsed: PluginSource;
+  try {
+    parsed = parsePluginSource(recorded);
+  } catch (error) {
+    return {
+      recorded,
+      label: recorded,
+      market: EMPTY,
+      repo: null,
+      stale: false,
+      problem: (error as Error).message,
+    };
+  }
+  const path = marketplaceCachePath(dataDir, recorded);
+  const cache = refresh
+    ? refreshMarketplaceCache(git, dataDir, recorded, parsed)
+    : {
+        path,
+        sha: cachedMarketplaceSha(git, path).sha,
+        stale: false,
+        problem: null,
+      };
+  const market = cache.sha ? await readMarketplace(cache.path) : EMPTY;
+  return {
+    recorded,
+    label: market.name ?? recorded,
+    market,
+    repo: cache.sha
+      ? { url: marketplaceRepoUrl(parsed), sha: cache.sha }
+      : null,
+    stale: cache.stale,
+    problem: cache.problem,
+  };
+}
+
+export async function loadMarketplaces(
+  git: GitRunner,
+  dataDir: string,
+  recorded: readonly string[],
+  refresh: boolean,
+): Promise<readonly LoadedMarketplace[]> {
+  const all: LoadedMarketplace[] = [];
+  for (const source of marketplaceSources(recorded))
+    all.push(await loadMarketplace(git, dataDir, source, refresh));
+  return all;
+}
+
+/**
+ * Имя → источник плагина. Одно имя в двух Marketplace остаётся выбором владельца:
+ * молча взять первый значило бы поставить чужой плагин под знакомым именем.
+ */
+export function resolveMarketplacePlugin(
+  all: readonly LoadedMarketplace[],
+  request: { readonly name: string; readonly marketplace: string | null },
+): {
+  readonly source: PluginSource;
+  readonly marketplace: string;
+  readonly name: string;
+} {
+  const searched = request.marketplace
+    ? all.filter((one) => one.market.name === request.marketplace)
+    : all;
+  if (request.marketplace && searched.length === 0)
+    throw new Error(
+      `no marketplace named ${JSON.stringify(request.marketplace)} — iva plugin marketplace list`,
+    );
+  const hits = searched.flatMap((one) => {
+    const entry = one.market.entries.find((item) => item.name === request.name);
+    return entry ? [{ one, entry }] : [];
+  });
+  if (hits.length === 0)
+    throw new Error(
+      `no marketplace offers a plugin named ${JSON.stringify(request.name)} — iva plugin list --available`,
+    );
+  if (hits.length > 1)
+    throw new Error(
+      `${request.name} is offered by ${hits.map((hit) => hit.one.label).join(" and ")} — pick one: iva plugin add ${request.name}@${hits[0].one.label}`,
+    );
+  const [{ one, entry }] = hits;
+  if (!one.repo)
+    throw new Error(
+      `${one.label} has no cached list — run: iva plugin list --available`,
+    );
+  try {
+    return {
+      source: marketplaceEntrySource(entry, one.repo),
+      marketplace: one.label,
+      name: entry.name,
+    };
+  } catch (error) {
+    throw new Error(
+      `${one.label} offers ${entry.name}, but its source cannot be used: ${(error as Error).message}`,
+      { cause: error },
+    );
+  }
+}

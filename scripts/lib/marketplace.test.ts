@@ -17,7 +17,7 @@ import {
   parseMarketplace,
   parseMarketplaceRequest,
   type Marketplace,
-} from "./plugin-marketplace.ts";
+} from "./marketplace.ts";
 
 const REPO = {
   url: "https://github.com/smixs/iva-plugins.git",

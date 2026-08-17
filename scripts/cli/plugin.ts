@@ -28,6 +28,17 @@ import type { PluginManifest, PluginReport } from "#lib/plugin-reader.ts";
 import type { PluginEntry, PluginsState } from "#lib/plugin-store.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import {
+  DEFAULT_MARKETPLACE,
+  loadMarketplace,
+  loadMarketplaces,
+  marketplaceCachePath,
+  MARKETPLACE_FILE,
+  marketplaceSources,
+  parseMarketplaceRequest,
+  resolveMarketplacePlugin,
+  type LoadedMarketplace,
+} from "../lib/marketplace.ts";
+import {
   formatPluginSource,
   parsePluginSource,
   type PluginSource,
@@ -50,6 +61,13 @@ type Staged = {
   readonly root: string;
   readonly sha: string;
   readonly ref: string;
+};
+
+/** Откуда пришёл плагин, когда его нашли по имени. */
+type Provenance = {
+  readonly marketplace: string;
+  /** Имя, которое Marketplace обещал: манифест обязан его подтвердить. */
+  readonly expect: string;
 };
 
 // Префиксы наших временных папок. Обе начинаются с точки, а имя плагина по спеке
@@ -110,15 +128,17 @@ export function createPluginCommands(
     log(`
 ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "установка плагинов и уход за ними")}
 
-  ${C.c}iva plugin add${C.x} <source>   ${translate("install from a folder, owner/repo[/subdir][@ref], https:// or git@", "поставить из папки, owner/repo[/подпапка][@ref], https:// или git@")}
-  ${C.c}iva plugin list${C.x}           ${translate("what is installed: sha, toggles, components", "что стоит: sha, тумблеры, компоненты")}
+  ${C.c}iva plugin add${C.x} <name|source>   ${translate("install by name from a Marketplace, or from a folder, owner/repo[/subdir][@ref], https:// or git@", "поставить по имени из Marketplace или из папки, owner/repo[/подпапка][@ref], https:// или git@")}
+  ${C.c}iva plugin list${C.x} [--available]  ${translate("what is installed; --available: what the marketplaces offer", "что стоит; --available: что предлагают маркетплейсы")}
   ${C.c}iva plugin update${C.x} [name] [--force]  ${translate("pull the tracked ref, printing old → new", "подтянуть отслеживаемый ref, печатая old → new")}
   ${C.c}iva plugin enable${C.x} <name>  ${translate("turn the plugin back on", "включить плагин обратно")}
   ${C.c}iva plugin disable${C.x} <name> ${translate("turn the plugin off without removing it", "выключить плагин, не удаляя")}
   ${C.c}iva plugin remove${C.x} <name>  ${translate("remove the plugin; its data is kept", "удалить плагин; данные плагина остаются")}
   ${C.c}iva plugin sync${C.x}           ${translate("repair: rebuild plugins.json and reinstall what is missing", "починка: пересобрать plugins.json и доставить недостающее")}
+  ${C.c}iva plugin marketplace${C.x} add <source> | remove <name> | list  ${translate("lists of plugins to install by name", "списки плагинов, которые ставятся по имени")}
 
   ${C.d}${translate("Skills of an installed plugin work from the next turn: no build, no restart.", "Скиллы поставленного плагина работают со следующего хода: без сборки и рестарта.")}${C.x}
+  ${C.d}${translate(`Marketplace by default: ${DEFAULT_MARKETPLACE}.`, `Marketplace по умолчанию: ${DEFAULT_MARKETPLACE}.`)}${C.x}
 `);
   }
 
@@ -236,6 +256,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       state: PluginsState,
       raw: PluginSource,
       previous: PluginEntry | null,
+      provenance: Provenance | null = null,
     ): Promise<{ readonly entry: PluginEntry; readonly report: PluginReport }> {
       const source = absolute(raw);
       mkdirSync(pluginsDir(data), { recursive: true });
@@ -252,6 +273,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         if (previous && previous.name !== name)
           throw new Error(
             `${formatPluginSource(source)} now calls itself ${JSON.stringify(name)}, not ${JSON.stringify(previous.name)} — remove the old one first`,
+          );
+        // Marketplace — непроверенный файл: он обещает имя, а имя объявляет манифест.
+        // Разошлись — ставится не то, что просили, поэтому отказ до переезда в стор.
+        if (provenance && provenance.expect !== name)
+          throw new Error(
+            `${provenance.marketplace} offers ${provenance.expect}, but this plugin calls itself ${JSON.stringify(name)} — refusing to install it`,
           );
         // Запись БЕЗ источника — не заявка на имя, а след починки (`sync` подобрал
         // папку, из которой она пришла, узнать неоткуда). Такую перекрываем, иначе
@@ -286,6 +313,8 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         swapIntoStore(staged.root, pluginRoot(data, name));
         // PLUGIN_DATA переживает и обновление, и удаление плагина (спека §9.1).
         await mkdir(pluginDataDir(data, name), { recursive: true });
+        const marketplace =
+          provenance?.marketplace ?? (previous ?? recorded)?.marketplace;
         return {
           entry: {
             name,
@@ -296,6 +325,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             enabled: (previous ?? recorded)?.enabled ?? true,
             trusted: (previous ?? recorded)?.trusted ?? false,
             installedAt: now().toISOString(),
+            ...(marketplace ? { marketplace } : {}),
           },
           report,
         };
@@ -336,13 +366,30 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       }
     }
 
+    /** Что с Marketplace не так — вслух, до того как его список пойдёт в работу. */
+    function reportMarketplace(one: LoadedMarketplace): void {
+      if (one.problem)
+        (one.stale ? warn : bad)(
+          one.stale
+            ? translate(
+                `${one.label} could not be refreshed (${one.problem}) — using the cached list, it may be stale`,
+                `${one.label} не обновился (${one.problem}) — беру список из кэша, он может быть устаревшим`,
+              )
+            : `${one.label} could not be read: ${one.problem}`,
+        );
+      for (const line of one.market.diagnostics) warn(`${one.label}: ${line}`);
+    }
+
     async function add(): Promise<void> {
       const raw = args[0];
       if (!raw)
         throw new Error(
-          "iva plugin add <source> — a folder, owner/repo[/subdir][@ref], https://… or git@…",
+          "iva plugin add <name|source> — a name from a Marketplace, a folder, owner/repo[/subdir][@ref], https://… or git@…",
         );
-      const source = parsePluginSource(raw);
+      // Голое имя — запрос к Marketplace; всё остальное разбирается как источник
+      // здесь же, до лока: неизвестная форма не должна занимать лок апдейта.
+      const request = parseMarketplaceRequest(raw);
+      const typed = request ? null : parsePluginSource(raw);
       const data = dataDirAbs();
 
       // Состояние читается и пишется ВНУТРИ лока: прочитать до лока значило бы
@@ -353,8 +400,26 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           warn(translate(RISK_EN, RISK_RU));
           log();
         }
-        step(`Installing ${formatPluginSource(source)}`);
-        const installed = await install(data, state, source, null);
+        let source = typed as PluginSource;
+        let provenance: Provenance | null = null;
+        if (request) {
+          const all = await loadMarketplaces(
+            git,
+            data,
+            state.marketplaces,
+            true,
+          );
+          for (const one of all) reportMarketplace(one);
+          const hit = resolveMarketplacePlugin(all, request);
+          source = hit.source;
+          provenance = { marketplace: hit.marketplace, expect: hit.name };
+        }
+        step(
+          provenance
+            ? `Installing ${provenance.expect} from ${provenance.marketplace} (${formatPluginSource(source)})`
+            : `Installing ${formatPluginSource(source)}`,
+        );
+        const installed = await install(data, state, source, null, provenance);
         await writePluginsState(data, {
           ...upsertPlugin(state, installed.entry),
           riskNoticeShownAt: state.riskNoticeShownAt ?? now().toISOString(),
@@ -379,9 +444,46 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         );
     }
 
+    /** Что предлагают Marketplace: имя, описание, чей список, стоит ли уже. */
+    async function available(data: string, state: PluginsState): Promise<void> {
+      const all = await loadMarketplaces(git, data, state.marketplaces, true);
+      const installed = new Set(state.plugins.map((entry) => entry.name));
+      const rows: string[][] = [];
+      for (const one of all) {
+        reportMarketplace(one);
+        for (const entry of one.market.entries)
+          rows.push([
+            entry.name,
+            entry.description.length > 60
+              ? `${entry.description.slice(0, 59)}…`
+              : entry.description || "-",
+            one.label,
+            installed.has(entry.name) ? "installed" : "available",
+          ]);
+      }
+      if (rows.length === 0) {
+        log(
+          translate(
+            "Nothing on offer. Add a marketplace: iva plugin marketplace add <source>",
+            "Предлагать нечего. Добавить маркетплейс: iva plugin marketplace add <источник>",
+          ),
+        );
+        return;
+      }
+      const header = ["NAME", "DESCRIPTION", "MARKETPLACE", ""];
+      const width = (column: number): number =>
+        Math.max(...[header, ...rows].map((row) => row[column].length));
+      const line = (row: readonly string[]): string =>
+        `${row[0].padEnd(width(0))}  ${row[1].padEnd(width(1))}  ${row[2].padEnd(width(2))}  ${row[3]}`;
+      log(`${C.d}${line(header)}${C.x}`);
+      for (const row of rows)
+        log(row[3] === "installed" ? `${C.d}${line(row)}${C.x}` : line(row));
+    }
+
     async function list(): Promise<void> {
       const data = dataDirAbs();
       const state = await readPluginsState(data);
+      if (argv.includes("--available")) return available(data, state);
       for (const name of leftoverPluginDirs(pluginsDir(data)))
         warn(
           `${name} is a leftover of an interrupted install — iva plugin sync`,
@@ -414,7 +516,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           `${C.b}${entry.name}${C.x}  ${version}  ${sha}  ${flags}  ${components(report)}`,
         );
         log(
-          `  ${C.d}${entry.source || translate("no source recorded", "источник не записан")}${entry.ref ? ` @${entry.ref}` : ""}${C.x}`,
+          `  ${C.d}${entry.source || translate("no source recorded", "источник не записан")}${entry.ref ? ` @${entry.ref}` : ""}${entry.marketplace ? ` · via ${entry.marketplace}` : ""}${C.x}`,
         );
         for (const line of report.diagnostics) warn(`  ${line}`);
       }
@@ -528,6 +630,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         const { sha } = resolveRemoteSha(git, source.url, source.ref);
         if (sha === entry.sha && existsSync(root) && !force) {
           ok(`${entry.name} is already at ${sha.slice(0, 12)}`);
+          // Запись Marketplace могла запинить коммит: тогда `update` двигать нечего,
+          // и владелец должен узнать, чем с пина сходят, а не решать, что команда врёт.
+          if (entry.marketplace && entry.ref === entry.sha)
+            ok(
+              translate(
+                `${entry.name} is pinned by ${entry.marketplace} — to move it: iva plugin remove ${entry.name} && iva plugin add ${entry.name}`,
+                `${entry.name} запинен маркетплейсом ${entry.marketplace} — сойти с пина: iva plugin remove ${entry.name} && iva plugin add ${entry.name}`,
+              ),
+            );
           return state;
         }
       }
@@ -715,6 +826,157 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       });
     }
 
+    /**
+     * `marketplace add`: клонируем один раз, чтобы прочитать файл, и только потом
+     * записываем строку источника. Репозиторий без `marketplace.json` — не
+     * Marketplace, и узнать это лучше сразу, а не при первом `add <имя>`.
+     */
+    async function marketplaceAdd(data: string): Promise<void> {
+      const raw = args[1];
+      if (!raw)
+        throw new Error(
+          "iva plugin marketplace add <source> — owner/repo[@ref], https://…, git@… or a local git repository",
+        );
+      const recorded = formatPluginSource(absolute(parsePluginSource(raw)));
+      await locked(data, async () => {
+        const state = await readPluginsState(data);
+        if (marketplaceSources(state.marketplaces).includes(recorded)) {
+          ok(`${recorded} is already on the list`);
+          return;
+        }
+        step(`Reading ${recorded}`);
+        const one = await loadMarketplace(git, data, recorded, true);
+        if (one.problem && !one.repo)
+          throw new Error(`${recorded} could not be read: ${one.problem}`);
+        reportMarketplace(one);
+        if (!one.market.name)
+          throw new Error(
+            `${recorded} has no usable ${MARKETPLACE_FILE} — that file is what makes a repository a Marketplace`,
+          );
+        // Одно имя на два списка сделало бы `add <имя>@<marketplace>` невыразимым.
+        const taken = (
+          await loadMarketplaces(git, data, state.marketplaces, false)
+        ).find((other) => other.market.name === one.market.name);
+        if (taken)
+          throw new Error(
+            `a marketplace named ${JSON.stringify(one.market.name)} is already on the list (${taken.recorded})`,
+          );
+        // Первый свой список материализует и дефолт, первым: иначе «добавил свой»
+        // молча отключало бы встроенный, и снять дефолт было бы нечем.
+        await writePluginsState(data, {
+          ...state,
+          marketplaces: state.marketplaces.length
+            ? [...state.marketplaces, recorded]
+            : [DEFAULT_MARKETPLACE, recorded],
+        });
+        ok(
+          `${one.market.name} added — ${one.market.entries.length} plugin(s) on offer`,
+        );
+      });
+    }
+
+    /** Запись списка по строке источника или по имени из файла. */
+    async function findMarketplace(
+      data: string,
+      state: PluginsState,
+      wanted: string,
+    ): Promise<string> {
+      let formatted: string | null = null;
+      try {
+        formatted = formatPluginSource(absolute(parsePluginSource(wanted)));
+      } catch {
+        // Не источник — значит имя из файла, его ищем ниже.
+      }
+      const bySource = state.marketplaces.find(
+        (item) => item === wanted || item === formatted,
+      );
+      if (bySource) return bySource;
+      for (const recorded of state.marketplaces) {
+        const one = await loadMarketplace(git, data, recorded, false);
+        if (one.market.name === wanted) return recorded;
+      }
+      throw new Error(
+        `${wanted} is not on the list — iva plugin marketplace list`,
+      );
+    }
+
+    async function marketplaceRemove(data: string): Promise<void> {
+      const wanted = args[1];
+      if (!wanted)
+        throw new Error(
+          "iva plugin marketplace remove <name|source> — iva plugin marketplace list",
+        );
+      await locked(data, async () => {
+        const state = await readPluginsState(data);
+        if (state.marketplaces.length === 0) {
+          const fallback = await loadMarketplace(
+            git,
+            data,
+            DEFAULT_MARKETPLACE,
+            false,
+          );
+          throw new Error(
+            wanted === DEFAULT_MARKETPLACE || fallback.market.name === wanted
+              ? `${DEFAULT_MARKETPLACE} is the built-in default, not a list entry — add your own marketplace first, then remove this one`
+              : `${wanted} is not on the list — iva plugin marketplace list`,
+          );
+        }
+        const target = await findMarketplace(data, state, wanted);
+        await writePluginsState(data, {
+          ...state,
+          marketplaces: state.marketplaces.filter((item) => item !== target),
+        });
+        // Кэш наш и лежит в data/: снимаем его вместе с записью.
+        rmSync(marketplaceCachePath(data, target), {
+          recursive: true,
+          force: true,
+        });
+        ok(`${target} removed`);
+      });
+    }
+
+    async function marketplaceList(data: string): Promise<void> {
+      const state = await readPluginsState(data);
+      const implicit = state.marketplaces.length === 0;
+      for (const recorded of marketplaceSources(state.marketplaces)) {
+        const one = await loadMarketplace(git, data, recorded, false);
+        const mark = implicit ? `  ${C.d}(default)${C.x}` : "";
+        if (one.problem) {
+          bad(`${recorded}${mark}  ${one.problem}`);
+          continue;
+        }
+        if (!one.repo) {
+          log(
+            `${C.b}${recorded}${C.x}${mark}  ${translate(
+              "not read yet — run: iva plugin list --available",
+              "ещё не читали — запусти: iva plugin list --available",
+            )}`,
+          );
+          continue;
+        }
+        log(
+          `${C.b}${one.label}${C.x}${mark}  ${recorded}  ${one.market.entries.length} plugin(s)  ${one.repo.sha.slice(0, 12)}`,
+        );
+        for (const line of one.market.diagnostics) warn(`  ${line}`);
+      }
+    }
+
+    function marketplaceCommand(): Promise<void> {
+      const data = dataDirAbs();
+      switch (args[0] ?? "list") {
+        case "add":
+          return marketplaceAdd(data);
+        case "remove":
+          return marketplaceRemove(data);
+        case "list":
+          return marketplaceList(data);
+        default:
+          throw new Error(
+            `unknown: iva plugin marketplace ${args[0]} — add, remove, list`,
+          );
+      }
+    }
+
     switch (sub) {
       case "add":
         return add();
@@ -730,9 +992,11 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         return update();
       case "sync":
         return sync();
+      case "marketplace":
+        return marketplaceCommand();
       default:
         throw new Error(
-          `unknown: iva plugin ${sub} — add, list, update, enable, disable, remove, sync`,
+          `unknown: iva plugin ${sub} — add, list, update, enable, disable, remove, sync, marketplace`,
         );
     }
   }
