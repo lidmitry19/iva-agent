@@ -639,14 +639,25 @@ export function eventFacts(event: TraceLine): string {
   return head ? `${head} ${duration(ms)}` : duration(ms);
 }
 
-/** The first content field the event carries, capped — or the writer's marker instead. */
-export function eventPreview(event: TraceLine, limit: number): string {
+/**
+ * The content fields the event carries, in reading order: present and not empty. One rule
+ * for the one-line preview and the full listing alike.
+ */
+function contentFields(event: TraceLine): [string, unknown][] {
+  const fields: [string, unknown][] = [];
   for (const key of CONTENT_KEYS) {
     const value = event.data[key];
     if (value === undefined || value === null || value === "") continue;
     if (Array.isArray(value) && value.length === 0) continue;
-    return `${key}: ${oneLine(value, limit)}`;
+    fields.push([key, value]);
   }
+  return fields;
+}
+
+/** The first content field the event carries, capped — or the writer's marker instead. */
+export function eventPreview(event: TraceLine, limit: number): string {
+  const [first] = contentFields(event);
+  if (first) return `${first[0]}: ${oneLine(first[1], limit)}`;
   if (event.data.traceTrimmed === true) return "content: …[trimmed]";
   if (event.data.traceUnreadable === true) return "content: …[unreadable]";
   return "";
@@ -677,10 +688,7 @@ function contentLines(
   indent: string,
 ): string[] {
   const out: string[] = [];
-  for (const key of CONTENT_KEYS) {
-    const value = event.data[key];
-    if (value === undefined || value === null || value === "") continue;
-    if (Array.isArray(value) && value.length === 0) continue;
+  for (const [key, value] of contentFields(event)) {
     if (!full) {
       out.push(`${indent}${key}: ${oneLine(value, SHOW_PREVIEW_CHARS)}`);
       continue;
@@ -695,14 +703,20 @@ function contentLines(
   return out;
 }
 
+/** When the turn started, when it ended, how long it took. One reading for both views. */
+function turnSpan(turn: StitchedTurn) {
+  const from = turn.events[0]?.at ?? 0;
+  const to = turn.events.at(-1)?.at ?? 0;
+  return { from, to, ms: to - from };
+}
+
 /** One turn as text: two header lines, then its events with the gap between them. */
 export function formatTurn(
   turn: StitchedTurn,
   options: { readonly timeZone: string; readonly full?: boolean },
 ): string[] {
   const { timeZone } = options;
-  const first = turn.events[0];
-  const last = turn.events.at(-1);
+  const span = turnSpan(turn);
   const tools = turnTools(turn);
   const out = [
     [
@@ -712,15 +726,15 @@ export function formatTurn(
       `session ${label(turn.session, 80)}`,
     ].join(" · "),
     [
-      `${clock(first?.at ?? 0, timeZone)} → ${clock(last?.at ?? 0, timeZone)}`,
-      duration((last?.at ?? 0) - (first?.at ?? 0)),
+      `${clock(span.from, timeZone)} → ${clock(span.to, timeZone)}`,
+      duration(span.ms),
       stepLabel(countSteps(turn)),
       tools.length ? `tools ${oneLine(tools.join(", "), 120)}` : "no tools",
       turnOutcome(turn),
     ].join(" · "),
     "",
   ];
-  let previous = first?.at ?? 0;
+  let previous = span.from;
   for (const event of turn.events) {
     // A subagent step carries the parent key with a `#planner` suffix; the indent is what
     // says whose step it is, and `eve.subagent.started` above it says the name.
@@ -753,15 +767,14 @@ export function formatTurnList(
   options: { readonly timeZone: string; readonly limit?: number },
 ): string[] {
   return turns.slice(-(options.limit ?? TURN_LIST_LIMIT)).map((turn) => {
-    const first = turn.events[0];
-    const last = turn.events.at(-1);
+    const span = turnSpan(turn);
     return [
-      stamp(first?.at ?? 0, options.timeZone),
+      stamp(span.from, options.timeZone),
       column(oneLine(turnSource(turn), 9), 9),
       column(shortTurn(turn.turnId || turn.key, 20), 20),
       column(stepLabel(countSteps(turn)), 8),
       column(oneLine(turnTools(turn).join(", "), 24), 24),
-      column(duration((last?.at ?? 0) - (first?.at ?? 0)), 7),
+      column(duration(span.ms), 7),
       turnOutcome(turn),
     ]
       .join("  ")

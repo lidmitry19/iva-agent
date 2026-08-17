@@ -330,7 +330,7 @@ export function parseMarketplace(raw: unknown): Marketplace {
 }
 
 /** The list out of a cached marketplace repository. Never throws. */
-export async function readMarketplace(cache: string): Promise<Marketplace> {
+async function readMarketplace(cache: string): Promise<Marketplace> {
   const file = join(cache, ...MARKETPLACE_FILE.split("/"));
   let raw: string;
   try {
@@ -363,7 +363,7 @@ export async function readMarketplace(cache: string): Promise<Marketplace> {
 }
 
 /** Where every cached marketplace lives. Never outside the data directory. */
-export function marketplaceCacheRoot(dataDir: string): string {
+function marketplaceCacheRoot(dataDir: string): string {
   return join(dataDir, "marketplace-cache");
 }
 
@@ -392,7 +392,7 @@ export function marketplaceCachePath(dataDir: string, source: string): string {
  * `file://` is what makes it one source form instead of two: the plugin source
  * strings resolved out of it stay strings a later `sync` can replay.
  */
-export function marketplaceRepoUrl(source: PluginSource): string {
+function marketplaceRepoUrl(source: PluginSource): string {
   return source.kind === "local"
     ? `file://${resolve(source.path)}`
     : source.url;
@@ -407,14 +407,11 @@ function firstLine(output: string): string {
   );
 }
 
-/** What lies in the cache right now, without asking the network. */
-export function cachedMarketplaceSha(
-  git: GitRunner,
-  cache: string,
-): { readonly sha: string } {
-  if (!existsSync(join(cache, ".git"))) return { sha: "" };
+/** What lies in the cache right now, without asking the network. Empty - nothing does. */
+function cachedMarketplaceSha(git: GitRunner, cache: string): string {
+  if (!existsSync(join(cache, ".git"))) return "";
   const head = git(["rev-parse", "HEAD"], cache);
-  return { sha: head.code === 0 ? head.out.trim() : "" };
+  return head.code === 0 ? head.out.trim() : "";
 }
 
 /**
@@ -427,7 +424,7 @@ export function cachedMarketplaceSha(
  * fetch over a warm cache is not an error: the cached list is served and told to
  * be stale.
  */
-export function refreshMarketplaceCache(
+function refreshMarketplaceCache(
   git: GitRunner,
   dataDir: string,
   source: string,
@@ -439,7 +436,7 @@ export function refreshMarketplaceCache(
   positional([url, ref]);
 
   const failed = (why: string): MarketplaceCache => {
-    const { sha } = cachedMarketplaceSha(git, path);
+    const sha = cachedMarketplaceSha(git, path);
     return { path, sha, stale: sha !== "", problem: why || "git failed" };
   };
 
@@ -464,7 +461,7 @@ export function refreshMarketplaceCache(
   if (fetched.code !== 0) return failed(firstLine(fetched.err || fetched.out));
   const checked = git(["checkout", "-q", "FETCH_HEAD"], path);
   if (checked.code !== 0) return failed(firstLine(checked.err || checked.out));
-  const { sha } = cachedMarketplaceSha(git, path);
+  const sha = cachedMarketplaceSha(git, path);
   if (!sha) return failed("the fetched commit could not be read");
   return { path, sha, stale: false, problem: null };
 }
@@ -591,7 +588,7 @@ export async function loadMarketplace(
     ? refreshMarketplaceCache(git, dataDir, recorded, parsed)
     : {
         path,
-        sha: cachedMarketplaceSha(git, path).sha,
+        sha: cachedMarketplaceSha(git, path),
         stale: false,
         problem: null,
       };
