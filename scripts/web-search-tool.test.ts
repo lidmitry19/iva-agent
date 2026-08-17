@@ -1,11 +1,36 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 // Ответ поискового провайдера — такой же недоверенный web-ввод, как страница.
 // Тул читает глобальный fetch в рантайме, поэтому провайдер подменяется на время
 // одного вызова (образец scripts/lib/search-catalog.test.ts).
+// Журнал хода (ADR-0010): выдача поисковика гейтится в середине хода, и её вердикт
+// обязан нести ключ хода из ctx тула. Каталог данных — временный, до импорта тула.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-web-search-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
 const { default: webSearchTool } = await import("../agent/tools/web_search.ts");
+const trace = await import("#lib/trace.ts");
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 type SearchResult = {
   results?: { title: string; url: string; snippet: string }[];
@@ -20,6 +45,7 @@ type ToolContext = Parameters<typeof webSearchTool.execute>[1];
 async function search(
   payload: unknown,
   query = "курс доллара",
+  ctx: ToolContext = {} as unknown as ToolContext,
 ): Promise<{ value: SearchResult; logs: string[] }> {
   const originalFetch = globalThis.fetch;
   const originalError = console.error;
@@ -37,10 +63,7 @@ async function search(
     logs.push(args.map(String).join(" "));
   };
   try {
-    const value = (await webSearchTool.execute(
-      { query },
-      {} as unknown as ToolContext,
-    )) as SearchResult;
+    const value = (await webSearchTool.execute({ query }, ctx)) as SearchResult;
     return { value, logs };
   } finally {
     globalThis.fetch = originalFetch;
@@ -196,4 +219,34 @@ test("percent-encoded инъекция в url результата помеча�
 
   assert.equal(value.results?.[0].url, url, "url не переписывается гейтом");
   assert.ok(value.warning, "нагрузка в адресе видна только раскодированной");
+});
+
+test("Trace: вердикт web-гейта уезжает с ходом из контекста тула", async () => {
+  const before = traceEvents().length;
+  const turnContext = {
+    session: { id: "wrun_8", turn: { id: "turn_3", sequence: 3 } },
+  } as unknown as ToolContext;
+
+  await search(
+    { answer: "Курс — 12 500 сум.", results: [] },
+    "курс доллара",
+    turnContext,
+  );
+
+  const gate = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "gate");
+  assert.ok(gate.length >= 1, "вердикт web-гейта в журнал не попал");
+  assert.equal(gate[0].name, "web");
+  assert.equal(gate[0].turn, "turn_3");
+  assert.equal(gate[0].session, "wrun_8");
+  assert.equal((gate[0].data as Record<string, unknown>).surface, "web");
+});
+
+test("Trace: та же выдача без сессии в контексте журнал не трогает", async () => {
+  const before = traceEvents().length;
+
+  await search({ answer: "Курс — 12 500 сум.", results: [] });
+
+  assert.equal(traceEvents().length, before);
 });

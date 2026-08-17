@@ -179,8 +179,13 @@ void test("ошибка записи не выходит наружу", (t) => {
   console.error = (...args: unknown[]) => {
     errors.push(args.map((part) => String(part)).join(" "));
   };
+  // Часы сдвинуты вперёд на весь тест: сколько бы жалоб ни случилось ДО него в этом
+  // файле, интервал дросселя заведомо истёк. Порядок тестов на результат не влияет.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 10 * 60_000;
   t.after(() => {
     console.error = original;
+    Date.now = realNow;
   });
 
   for (let i = 0; i < 5; i++) {
