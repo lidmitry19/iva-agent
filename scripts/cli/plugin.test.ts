@@ -35,6 +35,7 @@ import {
 } from "../lib/marketplace.ts";
 import { createPluginCommands, leftoverPluginDirs } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
+import type { PluginVersionBuild } from "./version-update-command.ts";
 
 type Runtime = ReturnType<typeof createCliRuntime>;
 type Events = Array<[string, string]>;
@@ -102,6 +103,30 @@ function plantPlugin(
   write(dir, `skills/${skillName}/SKILL.md`, skill(skillName));
 }
 
+/** Папка плагина с кодом: `sh.iva/` — это eve Extension (ADR-0009). */
+function codePlugin(
+  name: string,
+  {
+    body = "export {};\n",
+    version = "1.0.0",
+    skill = "alpha",
+  }: { body?: string; version?: string; skill?: string } = {},
+): string {
+  const folder = join(world("code"), name);
+  plantPlugin(folder, name, skill, version);
+  write(folder, "sh.iva/index.ts", body);
+  write(
+    folder,
+    "sh.iva/package.json",
+    JSON.stringify({
+      name,
+      version,
+      eve: { extension: { source: "./extension", dist: "./dist/extension" } },
+    }),
+  );
+  return folder;
+}
+
 type Remote = { readonly url: string; readonly work: string; sha: string };
 
 /** Локальный bare-репозиторий в роли удалённого: содержимое кладёт вызывающий. */
@@ -165,12 +190,40 @@ type CapHook = (
   cwd: string,
 ) => { code: number; out: string; err: string };
 
+type Build = {
+  readonly calls: { readonly requirePlugins: boolean }[];
+  outcome: PluginVersionBuild;
+  readonly buildVersion: (options: {
+    readonly requirePlugins: boolean;
+  }) => Promise<PluginVersionBuild>;
+};
+
+/** Сборка версии как её видит команда: что попросили и чем это кончилось. */
+function buildStub(
+  outcome: PluginVersionBuild = {
+    status: "built",
+    version: "0.3.24-abcdefabcdef",
+  },
+): Build {
+  const calls: { requirePlugins: boolean }[] = [];
+  const stub: Build = {
+    calls,
+    outcome,
+    buildVersion: (options) => {
+      calls.push({ requirePlugins: options.requirePlugins });
+      return Promise.resolve(stub.outcome);
+    },
+  };
+  return stub;
+}
+
 function commands(
   root: string,
   hook?: CapHook,
   onLog?: (line: string) => void,
   /** Дополнение к git-окружению теста: см. `httpsInsteadOf`. */
   gitEnv: NodeJS.ProcessEnv = {},
+  build?: Build,
 ) {
   const events: Events = [];
   const printed: string[] = [];
@@ -199,6 +252,7 @@ function commands(
     },
   };
   const { cmdPlugin } = createPluginCommands(runtime, {
+    ...(build ? { buildVersion: build.buildVersion } : {}),
     now: () => new Date("2026-08-17T12:00:00.000Z"),
     log: (...args: unknown[]) => {
       const line = args.map(String).join(" ");
@@ -570,12 +624,9 @@ test("what add installs is what the next turn sees, with no build and no restart
   assert.deepEqual(await nextTurnSkills(data), []);
 });
 
-test("a plugin with code and MCP is installed, reported, and started by nobody yet", async () => {
+test("a plugin with code and MCP is built into a version; only MCP still waits", async () => {
   const root = home();
-  const folder = join(world("code"), "with-code");
-  plantPlugin(folder, "carrier");
-  mkdirSync(join(folder, "sh.iva"), { recursive: true });
-  writeFileSync(join(folder, "sh.iva", "index.ts"), "export {};\n");
+  const folder = codePlugin("carrier");
   writeFileSync(
     join(folder, "mcp.json"),
     JSON.stringify({
@@ -583,7 +634,14 @@ test("a plugin with code and MCP is installed, reported, and started by nobody y
       mcpServers: { db: { type: "stdio", command: "node" } },
     }),
   );
-  const { cmdPlugin, events, printed, data } = commands(root);
+  const build = buildStub();
+  const { cmdPlugin, events, printed, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+  );
 
   await cmdPlugin(["add", folder]);
 
@@ -591,9 +649,16 @@ test("a plugin with code and MCP is installed, reported, and started by nobody y
     printed.join("\n"),
     /carrier 1\.0\.0 — skills: alpha; code: sh\.iva; mcp: db/u,
   );
+  // Код собирается по рельсам апдейтера, и его отказ обязан отменить установку.
+  assert.deepEqual(build.calls, [{ requirePlugins: true }]);
+  assert.match(
+    messages(events, "ok"),
+    /code is built into the version that runs/u,
+  );
+  assert.match(messages(events, "ok"), /carrier__/u);
   assert.match(
     messages(events, "warn"),
-    /code and MCP servers are read and reported, but not built or started yet/u,
+    /MCP servers are read and reported, but not started yet/u,
   );
   assert.ok(existsSync(join(pluginRoot(data, "carrier"), "sh.iva/index.ts")));
 
@@ -1517,4 +1582,169 @@ test("the git of plugins never stops to ask for a password", async () => {
     ["GIT_TERMINAL_PROMPT=0"],
     "every git call of the plugin rails carries the switch",
   );
+});
+
+// ── Код плагина: сборка версии как часть команды (ADR-0009) ──────────────────────────────
+
+test("a plugin with only skills is installed without building any version", async () => {
+  const root = home();
+  const folder = join(world("skills"), "quiet");
+  plantPlugin(folder, "quiet");
+  const build = buildStub();
+  const { cmdPlugin, events } = commands(root, undefined, undefined, {}, build);
+
+  await cmdPlugin(["add", folder]);
+
+  assert.deepEqual(build.calls, []);
+  assert.match(messages(events, "ok"), /skills work from the next turn/u);
+});
+
+test("a plugin whose version build fails is not installed at all", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub({
+    status: "failed",
+    reason: "eve: extension build failed",
+  });
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+
+  await assert.rejects(
+    cmdPlugin(["add", folder]),
+    /carrier was not installed: eve: extension build failed/u,
+  );
+
+  // Ни папки, ни записи: команда вернула стор туда, откуда взяла.
+  assert.equal(existsSync(pluginRoot(data, "carrier")), false);
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
+});
+
+test("an update whose build fails puts the previous copy of the plugin back", async () => {
+  const root = home();
+  const folder = codePlugin("carrier", { body: "export const one = 1;\n" });
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+  await cmdPlugin(["add", folder]);
+  const installed = await readPluginsState(data);
+
+  // Автор выпустил новую версию, и она не собирается.
+  write(folder, "sh.iva/index.ts", "export const two = 2;\n");
+  write(folder, "plugin.json", manifest("carrier", "2.0.0"));
+  build.outcome = { status: "failed", reason: "eve: boom" };
+
+  await assert.rejects(
+    cmdPlugin(["update", "carrier"]),
+    /nothing was updated/u,
+  );
+
+  assert.equal(
+    readFileSync(join(pluginRoot(data, "carrier"), "sh.iva/index.ts"), "utf8"),
+    "export const one = 1;\n",
+  );
+  assert.deepEqual(await readPluginsState(data), installed);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
+});
+
+test("an enable that will not build leaves the plugin disabled", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+  await cmdPlugin(["add", folder]);
+  await cmdPlugin(["disable", "carrier"]);
+  build.calls.length = 0;
+  build.outcome = { status: "failed", reason: "eve: boom" };
+
+  await assert.rejects(
+    cmdPlugin(["enable", "carrier"]),
+    /carrier stays disabled: eve: boom/u,
+  );
+
+  assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
+  assert.deepEqual(build.calls, [{ requirePlugins: true }]);
+});
+
+test("switching a plugin off and removing it rebuild without demanding it", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+  await cmdPlugin(["add", folder]);
+  build.calls.length = 0;
+
+  await cmdPlugin(["disable", "carrier"]);
+  // Выключенный плагин уже не в составе версии, поэтому включать его назад нечему.
+  await cmdPlugin(["enable", "carrier"]);
+  await cmdPlugin(["remove", "carrier"]);
+
+  assert.deepEqual(build.calls, [
+    { requirePlugins: false },
+    { requirePlugins: true },
+    { requirePlugins: false },
+  ]);
+  assert.equal(existsSync(pluginRoot(data, "carrier")), false);
+});
+
+test("a build that cannot happen here leaves the plugin installed and says why", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub({
+    status: "skipped",
+    reason:
+      "this tree is a development checkout - build it yourself: npm run build",
+  });
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+  );
+
+  await cmdPlugin(["add", folder]);
+
+  assert.match(messages(events, "warn"), /development checkout/u);
+  assert.equal((await readPluginsState(data)).plugins.length, 1);
+});
+
+test("two plugins whose code wants one mount file are not installed together", async () => {
+  const root = home();
+  const first = codePlugin("my.tool");
+  const second = codePlugin("my-tool", { skill: "beta" });
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+
+  await cmdPlugin(["add", first]);
+  await assert.rejects(
+    cmdPlugin(["add", second]),
+    /my-tool and my\.tool both need the extension mount my_tool\.ts/u,
+  );
+
+  assert.deepEqual(
+    (await readPluginsState(data)).plugins.map((entry) => entry.name),
+    ["my.tool"],
+  );
+  // Отказ до переезда в стор: папка второго плагина не появилась.
+  assert.equal(existsSync(pluginRoot(data, "my-tool")), false);
+  assert.deepEqual(build.calls, [{ requirePlugins: true }]);
+});
+
+test("a name eve cannot mount is refused for code and fine for skills", async () => {
+  const root = home();
+  const withCode = codePlugin("7zip");
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+
+  await assert.rejects(cmdPlugin(["add", withCode]), /eve accepts a letter/u);
+  assert.equal(existsSync(pluginRoot(data, "7zip")), false);
+
+  // Тот же плагин без кода — обычный плагин со скиллом, ему mount не нужен.
+  const skillsOnly = join(world("skills"), "7zip");
+  plantPlugin(skillsOnly, "7zip");
+  await cmdPlugin(["add", skillsOnly]);
+  assert.deepEqual(
+    (await readPluginsState(data)).plugins.map((entry) => entry.name),
+    ["7zip"],
+  );
+  assert.deepEqual(build.calls, []);
 });

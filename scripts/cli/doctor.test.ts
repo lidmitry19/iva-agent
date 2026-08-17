@@ -617,3 +617,61 @@ test("doctor sees the leftovers of an interrupted install that its dot filter hi
     ],
   ]);
 });
+
+test("doctor says whether an enabled plugin's code is in the version that runs", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "iva-cli-doctor-version-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeFileSync(join(home, ".env"), "present=true\n");
+  const store = createVersionStore(home);
+  const name = "0.3.24-abcdefabcdef+11223344";
+  const dir = store.stage(name);
+  mkdirSync(join(dir, ".output/server"), { recursive: true });
+  writeFileSync(join(dir, ".output/server/index.mjs"), "export {};\n");
+  store.linkState(dir);
+  store.complete(name);
+  store.activate(name);
+  const data = join(home, "data");
+  plantStorePlugin(data, "carrier");
+  mkdirSync(join(pluginRoot(data, "carrier"), "sh.iva"), { recursive: true });
+  writeFileSync(
+    join(pluginRoot(data, "carrier"), "sh.iva/index.ts"),
+    "export {};\n",
+  );
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [
+      {
+        name: "carrier",
+        source: "./carrier",
+        ref: "",
+        sha: "",
+        digest: "",
+        enabled: true,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+    ],
+  });
+
+  // Плагин стоит, а версия собрана без него: тулов плагина у агента нет.
+  assert.deepEqual(await pluginEvents(dir), [
+    ["ok", "plugin carrier: 1 skills, code"],
+    [
+      "warn",
+      "plugin carrier: built into current version: no — run: iva update",
+    ],
+  ]);
+
+  // Сборка версии оставляет копию плагина и его mount — доктор видит ровно их.
+  mkdirSync(join(dir, "plugins/carrier"), { recursive: true });
+  mkdirSync(join(dir, "agent/extensions"), { recursive: true });
+  writeFileSync(
+    join(dir, "agent/extensions/carrier.ts"),
+    "export default 1;\n",
+  );
+
+  assert.deepEqual(await pluginEvents(dir), [
+    ["ok", "plugin carrier: 1 skills, code"],
+    ["ok", "plugin carrier: built into current version: yes"],
+  ]);
+});

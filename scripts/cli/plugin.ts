@@ -494,18 +494,31 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       return null;
     }
 
-    /** Вернуть стор и plugins.json в то состояние, из которого установка вышла. */
-    async function undoInstall(data: string, undo: Undo): Promise<void> {
-      const target = pluginRoot(data, undo.name);
-      if (undo.displaced) restoreDisplaced(undo.displaced, target);
-      else rmSync(target, { recursive: true, force: true });
-      const state = await readPluginsState(data);
-      await writePluginsState(
-        data,
-        undo.previous
-          ? upsertPlugin(state, undo.previous)
-          : removePlugin(state, undo.name),
-      );
+    /**
+     * Вернуть стор и plugins.json в то состояние, из которого вышли установки, чью
+     * версию не удалось собрать.
+     *
+     * Папки возвращаются ДО лока, а не под ним: `locked` первым делом подметает
+     * недоделки прерванной установки, а смещённая копия выглядит ровно как они — она
+     * бы её и снесла. Состояние пишется одной записью под локом.
+     */
+    async function undoInstalls(
+      data: string,
+      undos: readonly Undo[],
+    ): Promise<void> {
+      for (const undo of undos) {
+        const target = pluginRoot(data, undo.name);
+        if (undo.displaced) restoreDisplaced(undo.displaced, target);
+        else rmSync(target, { recursive: true, force: true });
+      }
+      await locked(data, async () => {
+        let state = await readPluginsState(data);
+        for (const undo of undos)
+          state = undo.previous
+            ? upsertPlugin(state, undo.previous)
+            : removePlugin(state, undo.name);
+        await writePluginsState(data, state);
+      });
     }
 
     /** Сборка прошла — смещённая папка больше не нужна. */
@@ -573,7 +586,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       if (report.code && entry.enabled) {
         const failure = await buildCode(entry.name, true);
         if (failure !== null) {
-          await locked(data, () => undoInstall(data, undo));
+          await undoInstalls(data, [undo]);
           throw new Error(`${entry.name} was not installed: ${failure}`);
         }
       }
@@ -892,9 +905,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       if (rebuilt.length) {
         const failure = await buildCode(rebuilt.join(", "), true);
         if (failure !== null) {
-          await locked(data, async () => {
-            for (const undo of undone) await undoInstall(data, undo);
-          });
+          await undoInstalls(data, undone);
           throw new Error(`nothing was updated: ${failure}`);
         }
       }
