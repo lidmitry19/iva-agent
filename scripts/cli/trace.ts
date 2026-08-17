@@ -24,12 +24,12 @@ import {
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import type { TraceEvent } from "#lib/trace.ts";
+import { createLazyTranslate, type Translate } from "../lib/cli-translate.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import { resolveTimeZone } from "../lib/timezone.ts";
 import type { createCliRuntime } from "./runtime.ts";
 
 type CliRuntime = ReturnType<typeof createCliRuntime>;
-type Translate = (en: string, ru: string) => string;
 
 /** Only the contract's pure helpers: where a day file lives and what it is called. */
 type TraceCore = Pick<
@@ -987,16 +987,9 @@ export function createTraceCommands(
 
   // English until the language is known: the translation table lives in the authored tree
   // too, and help has to print without it.
-  let translate: Translate = dependencies.translate ?? ((en) => en);
-
-  async function resolveTranslate(): Promise<void> {
-    if (dependencies.translate) return;
-    try {
-      translate = (await import("#lib/i18n.ts")).tr;
-    } catch {
-      // agent/ is not built yet — English is not a reason to fail.
-    }
-  }
+  const { tr: translate, resolve: resolveTranslate } = createLazyTranslate(
+    dependencies.translate,
+  );
 
   async function core(): Promise<TraceCore> {
     try {

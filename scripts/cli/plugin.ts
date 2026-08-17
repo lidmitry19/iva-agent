@@ -46,6 +46,7 @@ import {
   unitPartProblem,
   type PluginUnitSource,
 } from "../lib/plugin-units.ts";
+import { createLazyTranslate, type Translate } from "../lib/cli-translate.ts";
 import { systemdExecArgument } from "../lib/systemd-control.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import {
@@ -69,7 +70,6 @@ import type { createCliRuntime } from "./runtime.ts";
 import type { PluginVersionBuild } from "./version-update-command.ts";
 
 type CliRuntime = ReturnType<typeof createCliRuntime>;
-type Translate = (en: string, ru: string) => string;
 
 type PluginDependencies = {
   readonly now?: () => Date;
@@ -183,16 +183,9 @@ export function createPluginCommands(
 
   // Английский, пока язык не спрошен: таблица переводов тоже живёт в authored tree,
   // а помощь команда обязана печатать и без него.
-  let translate: Translate = dependencies.translate ?? ((en) => en);
-
-  async function resolveTranslate(): Promise<void> {
-    if (dependencies.translate) return;
-    try {
-      translate = (await import("#lib/i18n.ts")).tr;
-    } catch {
-      // agent/ ещё не собран — остаёмся на английском, это не повод падать.
-    }
-  }
+  const { tr: translate, resolve: resolveTranslate } = createLazyTranslate(
+    dependencies.translate,
+  );
 
   function help(): void {
     log(`
