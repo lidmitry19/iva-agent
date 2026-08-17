@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  alertOwnerAboutPlugins,
   captureOptionalWriterState,
   restoreMigratedWriterState,
   restoreOptionalWriterState,
@@ -9,13 +10,20 @@ import {
   stopWriterUnits,
   tombstoned,
 } from "./update-finish.ts";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LEGACY_BRAIN_UNITS,
   LEGACY_MEMORY_UNITS,
 } from "./lib/legacy-memory-units.ts";
+import { layoutFor } from "./lib/version-store.ts";
 
 type WriterRuntime = Parameters<typeof stopWriterUnits>[0];
 const USERBOT = "iva-telegram-userbot.service";
@@ -614,4 +622,103 @@ test("a unit-write fault restores the captured legacy Brain owner", () => {
   assert.equal(fake.enabledUnits.has(legacyTimer), true);
   assert.equal(fake.activeUnits.has("iva-brain.timer"), false);
   assert.equal(fake.enabledUnits.has("iva-brain.timer"), false);
+});
+
+// ── Alert о выключенном плагине (ADR-0007 + ADR-0009) ────────────────────────────────────
+
+/** Установка с настроенным чатом: `.env` — единственный источник токена и чата. */
+function installationWithChat(
+  t: { after(fn: () => void): void },
+  env = "TELEGRAM_BOT_TOKEN=token\nTELEGRAM_DIGEST_CHAT_ID=42\nAGENT_LANGUAGE=en\n",
+): ReturnType<typeof layoutFor> {
+  const home = mkdtempSync(join(tmpdir(), "iva-plugin-alert-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, "data"), { recursive: true });
+  writeFileSync(join(home, ".env"), env);
+  return layoutFor(home);
+}
+
+const refused = (digest: string) => ({
+  name: "trace",
+  digest,
+  reason: "eve: extension build failed on extension/extension.ts",
+});
+
+test("the owner hears about a switched-off plugin once a week, sooner if it changed", async (t) => {
+  const layout = installationWithChat(t);
+  const sent: string[] = [];
+  const said: string[] = [];
+  const send = (text: string): Promise<boolean> => {
+    sent.push(text);
+    return Promise.resolve(true);
+  };
+  const say = (message: string): void => {
+    said.push(message);
+  };
+
+  await alertOwnerAboutPlugins(layout, [refused("aaa")], say, send);
+  await alertOwnerAboutPlugins(layout, [refused("aaa")], say, send);
+
+  // Один Alert на проблему: второй прогон с тем же плагином и тем же содержимым молчит.
+  assert.equal(sent.length, 1, sent.join("\n---\n"));
+  assert.match(sent[0], /trace/u);
+  assert.match(sent[0], /iva plugin update trace/u);
+  assert.match(sent[0], /iva plugin enable trace/u);
+  // Вывод самого апдейта — не Alert: его владелец и просил, и он печатается всегда.
+  assert.equal(said.length, 2);
+  assert.match(said[0], /switched off/u);
+  assert.match(said[0], /extension build failed/u);
+
+  // Плагин изменился — существо проблемы другое, и говорить надо сразу.
+  await alertOwnerAboutPlugins(layout, [refused("bbb")], say, send);
+  assert.equal(sent.length, 2);
+});
+
+test("one Alert names every plugin the build switched off", async (t) => {
+  const layout = installationWithChat(t);
+  const sent: string[] = [];
+  const send = (text: string): Promise<boolean> => {
+    sent.push(text);
+    return Promise.resolve(true);
+  };
+
+  await alertOwnerAboutPlugins(
+    layout,
+    [refused("aaa"), { name: "other", digest: "bbb", reason: "boom" }],
+    () => {},
+    send,
+  );
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /trace/u);
+  assert.match(sent[0], /other/u);
+});
+
+test("without a chat the reason stays in the update output and nothing is throttled", async (t) => {
+  const layout = installationWithChat(t, "AGENT_LANGUAGE=en\n");
+  const said: string[] = [];
+
+  await alertOwnerAboutPlugins(layout, [refused("aaa")], (message) =>
+    said.push(message),
+  );
+
+  assert.equal(said.length, 1);
+  assert.match(said[0], /trace/u);
+  // Ничего не отправлено — и дроссель не отмечен: настроят чат, Alert придёт сразу.
+  assert.equal(existsSync(join(layout.data, "alert-state.json")), false);
+});
+
+test("an Alert that could not be sent says so and is not remembered", async (t) => {
+  const layout = installationWithChat(t);
+  const said: string[] = [];
+
+  await alertOwnerAboutPlugins(
+    layout,
+    [refused("aaa")],
+    (message) => said.push(message),
+    () => Promise.resolve(false),
+  );
+
+  assert.match(said.join("\n"), /could not tell you in Telegram about trace/u);
+  assert.equal(existsSync(join(layout.data, "alert-state.json")), false);
 });
