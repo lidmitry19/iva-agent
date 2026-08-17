@@ -49,6 +49,23 @@ export function fixtureRunner(hook?: (step: string) => Promise<void>): Runner {
       mkdirSync(join(cwd, "node_modules"), { recursive: true });
       return { code: 0, output: "dependencies installed" };
     }
+    // `eve extension build` in a plugin's `sh.iva/`: the same rule as the build
+    // below, and its cwd is what names the plugin whose code did not compile.
+    if (args[0] === "extension" && args[1] === "build") {
+      await hook?.("extension");
+      const broken = brokenFiles(cwd);
+      if (broken.length > 0)
+        return {
+          code: 1,
+          output: `eve: extension build failed on ${broken.join(", ")}`,
+        };
+      mkdirSync(join(cwd, "dist/extension"), { recursive: true });
+      writeFileSync(
+        join(cwd, "dist/extension/extension.mjs"),
+        "export default {};\n",
+      );
+      return { code: 0, output: "extension built" };
+    }
     if (args[0] === "run" && args[1] === "build") {
       await hook?.("build");
       const broken = brokenFiles(cwd);

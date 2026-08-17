@@ -726,7 +726,13 @@ async function buildVersion({
     cpSync(join(customDir, path), join(dir, path));
   }
   if (files.length > 0) log(`applied ${files.length} customized file(s)`);
-  const carried = files.length > 0 ? "applied" : "none";
+  /**
+   * Whether the version carries anything of the owner's. A mounted plugin counts:
+   * it is code the release does not ship, so a version that will not start with it
+   * has to be rebuilt without it, exactly like a skill that will not start.
+   */
+  const carried = (withPlugins: number): Custom =>
+    files.length > 0 || withPlugins > 0 ? "applied" : "none";
 
   // One plugin at a time: a plugin whose own extension build fails is named by that
   // step, and its neighbours still get theirs.
@@ -754,7 +760,7 @@ async function buildVersion({
   }
 
   const built = await run("npm", BUILD, dir);
-  if (built.code === 0) return { custom: carried, failed };
+  if (built.code === 0) return { custom: carried(mounted.length), failed };
 
   // The tree will not compile with the plugins in it. Which one of them it is is not
   // worth a search: they are the only part of the tree that is neither upstream's nor
@@ -769,7 +775,7 @@ async function buildVersion({
       if (requirePlugins) throw new Error(reason);
       log(reason);
       return {
-        custom: carried,
+        custom: carried(0),
         failed: [
           ...failed,
           ...mounted.map((plugin) => ({

@@ -12,14 +12,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   fixtureProbe,
   fixtureRunner,
 } from "../fixtures/version-update-harness.ts";
 import { createVersionStore, layoutFor } from "./version-store.ts";
-import { runVersionUpdate, type UpdateOutcome } from "./version-update.ts";
+import {
+  runVersionUpdate,
+  versionOverlay,
+  type Runner,
+  type UpdateOutcome,
+} from "./version-update.ts";
 
 const HARNESS = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -1580,4 +1585,384 @@ test("the new version refuses to build on an invalid MODEL_PROVIDER", async (t) 
     // Ни замка, ни установки версии: до сборки дело не дошло.
     assert.equal(existsSync(join(home, "versions")), false, value);
   }
+});
+
+// ── Плагины с кодом в сборке версии (ADR-0009) ───────────────────────────────────────────
+// Плагин — eve Extension под `sh.iva/`, и собирается он ровно там, где собирается версия.
+// Тот же харнес: фейковый раннер вместо npm и eve, временный home, реальный стор.
+
+/** Запись о плагине в `plugins.json` — то, чем сборка узнаёт, что он включён. */
+function pluginsState(
+  home: string,
+  entries: readonly { name: string; enabled?: boolean }[],
+): void {
+  const file = join(layoutFor(home).data, "custom/plugins.json");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    JSON.stringify({
+      marketplaces: [],
+      plugins: entries.map((entry) => ({
+        name: entry.name,
+        source: `/tmp/${entry.name}`,
+        ref: "",
+        sha: "",
+        digest: "",
+        enabled: entry.enabled ?? true,
+        trusted: false,
+        installedAt: "2026-08-17T00:00:00.000Z",
+      })),
+    }),
+  );
+}
+
+/** Папка плагина в Custom layer: скилл всегда, код — по умолчанию. */
+function plantPlugin(
+  home: string,
+  name: string,
+  {
+    code = true,
+    body = "export default { name: 'x' };\n",
+    config,
+    files = {},
+  }: {
+    code?: boolean;
+    body?: string;
+    config?: string;
+    files?: Record<string, string>;
+  } = {},
+): void {
+  const store = join(layoutFor(home).data, "custom/plugins");
+  const root = join(store, name);
+  mkdirSync(join(root, "skills/demo"), { recursive: true });
+  writeFileSync(
+    join(root, "plugin.json"),
+    JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      name,
+      version: "1.0.0",
+    }),
+  );
+  writeFileSync(
+    join(root, "skills/demo/SKILL.md"),
+    "---\nname: demo\ndescription: Do the demo work.\n---\n\nBody.\n",
+  );
+  if (code) {
+    mkdirSync(join(root, "sh.iva/extension"), { recursive: true });
+    writeFileSync(
+      join(root, "sh.iva/package.json"),
+      JSON.stringify({
+        name,
+        version: "1.0.0",
+        eve: { extension: { source: "./extension", dist: "./dist/extension" } },
+      }),
+    );
+    writeFileSync(join(root, "sh.iva/extension/extension.ts"), body);
+  }
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  }
+  if (config !== undefined)
+    writeFileSync(join(store, `${name}.config.json`), config);
+}
+
+/** Тот же фейковый раннер, но со списком шагов: команда, аргументы и cwd. */
+function recorded(home: string): { runner: Runner; steps: string[] } {
+  const base = fixtureRunner();
+  const steps: string[] = [];
+  return {
+    steps,
+    runner: (command, args, cwd) => {
+      steps.push(
+        `${basename(command)} ${args.join(" ")} @ ${relative(home, cwd)}`,
+      );
+      return base(command, args, cwd);
+    },
+  };
+}
+
+function pluginEntries(home: string): Record<string, boolean> {
+  const state = JSON.parse(
+    readFileSync(join(layoutFor(home).data, "custom/plugins.json"), "utf8"),
+  ) as { plugins: { name: string; enabled: boolean }[] };
+  return Object.fromEntries(
+    state.plugins.map((entry) => [entry.name, entry.enabled]),
+  );
+}
+
+test("a plugin with code is copied into the version, built and mounted", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "trace", { config: '{"level":"debug"}\n' });
+  pluginsState(iva.home, [{ name: "trace" }]);
+  const { runner, steps } = recorded(iva.home);
+
+  const outcome = updated(await iva.update({ run: runner }));
+
+  const dir = join(iva.home, "versions", outcome.version);
+  assert.ok(existsSync(join(dir, "plugins/trace/plugin.json")));
+  assert.ok(existsSync(join(dir, "plugins/trace/sh.iva/dist/extension")));
+  // The mount is generated, names the plugin by a relative specifier eve resolves,
+  // and reads the owner's config at load time instead of baking it into the bundle.
+  const mount = readFileSync(join(dir, "agent/extensions/trace.ts"), "utf8");
+  assert.match(mount, /Generated by Iva/u);
+  assert.match(
+    mount,
+    /^import extension from "\.\.\/\.\.\/plugins\/trace\/sh\.iva";$/mu,
+  );
+  assert.match(
+    mount,
+    /export default extension\(readPluginConfig\("trace"\)\);/u,
+  );
+  // Its own dependencies and its own extension build, in that order, in its folder;
+  // the agent build comes after both.
+  const version = `versions/${outcome.version}`;
+  assert.deepEqual(
+    steps.filter((step) => step.includes("plugins/trace")),
+    [
+      `npm install --omit=dev --no-audit --no-fund @ ${version}/plugins/trace/sh.iva`,
+      `eve extension build @ ${version}/plugins/trace/sh.iva`,
+    ],
+  );
+  assert.ok(
+    steps.indexOf(`npm run build @ ${version}`) >
+      steps.indexOf(`eve extension build @ ${version}/plugins/trace/sh.iva`),
+    steps.join("\n"),
+  );
+  // The eve that builds the plugin is the version's own, never the machine's.
+  assert.ok(
+    steps.includes(`eve extension build @ ${version}/plugins/trace/sh.iva`),
+  );
+  // A plugin is part of what a version is named after, and part of what it carries.
+  assert.match(outcome.version, /\+[0-9a-f]{8}$/u);
+  assert.equal(outcome.custom, "applied");
+});
+
+test("a lockfile in the plugin pins its dependencies instead of resolving them", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "trace", {
+    files: { "sh.iva/package-lock.json": '{"lockfileVersion":3}\n' },
+  });
+  pluginsState(iva.home, [{ name: "trace" }]);
+  const { runner, steps } = recorded(iva.home);
+
+  const outcome = updated(await iva.update({ run: runner }));
+
+  assert.ok(
+    steps.includes(
+      `npm ci --omit=dev --no-audit --no-fund @ versions/${outcome.version}/plugins/trace/sh.iva`,
+    ),
+    steps.join("\n"),
+  );
+});
+
+test("the plugins with code are what a release is named after, their skills are not", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "skills-only", { code: false });
+  pluginsState(iva.home, [{ name: "skills-only" }]);
+  const bare = updated(await iva.update()).version;
+  // A plugin with skills alone changes no version: its skills are live already.
+  assert.equal(bare, `0.3.14-${iva.target.sha.slice(0, 12)}`);
+
+  const digests: string[] = [];
+  const digest = async (): Promise<string> => {
+    const overlay = await versionOverlay(layoutFor(iva.home).data);
+    return overlay.digest ?? "";
+  };
+
+  plantPlugin(iva.home, "trace");
+  pluginsState(iva.home, [{ name: "skills-only" }, { name: "trace" }]);
+  digests.push(await digest());
+  // The content of the plugin, not the digest recorded for it: an edit in place is a
+  // different version, and so is a change to the config beside it.
+  plantPlugin(iva.home, "trace", { body: "export default { name: 'y' };\n" });
+  digests.push(await digest());
+  plantPlugin(iva.home, "trace", {
+    body: "export default { name: 'y' };\n",
+    config: '{"level":"debug"}\n',
+  });
+  digests.push(await digest());
+  // Switched off, the plugin is out of the build and out of the name.
+  pluginsState(iva.home, [
+    { name: "skills-only" },
+    { name: "trace", enabled: false },
+  ]);
+  digests.push(await digest());
+
+  assert.equal(new Set(digests).size, 4, digests.join(" "));
+  assert.equal(digests[3], "");
+});
+
+test("a plugin whose own build fails is switched off and the release still installs", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "trace", { body: "export const BREAK = 1;\n" });
+  plantPlugin(iva.home, "good");
+  pluginsState(iva.home, [{ name: "good" }, { name: "trace" }]);
+  const alerted: string[][] = [];
+
+  const outcome = updated(
+    await iva.update({
+      alertPlugins: (failures) => {
+        alerted.push(failures.map((failure) => failure.name));
+        return Promise.resolve();
+      },
+    }),
+  );
+
+  const dir = join(iva.home, "versions", outcome.version);
+  // The box is installed, without the plugin that would not build.
+  assert.equal(existsSync(join(dir, "agent/extensions/trace.ts")), false);
+  assert.equal(existsSync(join(dir, "plugins/trace")), false);
+  assert.ok(existsSync(join(dir, "agent/extensions/good.ts")));
+  assert.deepEqual(pluginEntries(iva.home), { good: true, trace: false });
+  // One Alert for the build, naming what went off, and the failing step names itself.
+  assert.deepEqual(alerted, [["trace"]]);
+});
+
+test("a plugin the agent build refuses takes every plugin out with it, once", async (t) => {
+  const iva = world(t);
+  // The extension itself builds; what the agent build chokes on is beside it, so only
+  // the whole-tree build can tell - and then no plugin is above suspicion.
+  plantPlugin(iva.home, "trace", {
+    files: { "skills/demo/notes.md": "BREAK\n" },
+  });
+  plantPlugin(iva.home, "good");
+  pluginsState(iva.home, [{ name: "good" }, { name: "trace" }]);
+  const { runner, steps } = recorded(iva.home);
+  const alerted: string[][] = [];
+
+  const outcome = updated(
+    await iva.update({
+      run: runner,
+      alertPlugins: (failures) => {
+        alerted.push(failures.map((failure) => failure.name));
+        return Promise.resolve();
+      },
+    }),
+  );
+
+  const dir = join(iva.home, "versions", outcome.version);
+  assert.equal(existsSync(join(dir, "plugins/trace")), false);
+  assert.equal(existsSync(join(dir, "plugins/good")), false);
+  assert.deepEqual(pluginEntries(iva.home), { good: false, trace: false });
+  assert.deepEqual(alerted, [["good", "trace"]]);
+  // Exactly two agent builds: the one that failed and the one without any plugin.
+  assert.equal(
+    steps.filter(
+      (step) => step === `npm run build @ versions/${outcome.version}`,
+    ).length,
+    2,
+    steps.join("\n"),
+  );
+});
+
+test("with the plugins required, a plugin that will not build fails the whole update", async (t) => {
+  const iva = world(t);
+  const first = updated(await iva.update());
+  plantPlugin(iva.home, "trace", { body: "export const BREAK = 1;\n" });
+  pluginsState(iva.home, [{ name: "trace" }]);
+
+  // The throw is what the update's own second half turns into a failed outcome; here
+  // it is the seam itself, so the refusal arrives as the rejection.
+  await assert.rejects(
+    iva.update({ requirePlugins: true }),
+    /building the extension of trace/u,
+  );
+
+  // Nothing of the installation moved: the version that ran still runs, the plugin is
+  // still enabled, and the half-built candidate is gone.
+  const store = createVersionStore(iva.home);
+  assert.equal(store.currentName(), first.version);
+  assert.deepEqual(store.list(), [first.version]);
+  assert.deepEqual(pluginEntries(iva.home), { trace: true });
+});
+
+test("a plugin the agent build refuses fails a required build without disabling it", async (t) => {
+  const iva = world(t);
+  const first = updated(await iva.update());
+  plantPlugin(iva.home, "trace", {
+    files: { "skills/demo/notes.md": "BREAK\n" },
+  });
+  pluginsState(iva.home, [{ name: "trace" }]);
+
+  await assert.rejects(
+    iva.update({ requirePlugins: true }),
+    /does not build with trace/u,
+  );
+
+  assert.equal(createVersionStore(iva.home).currentName(), first.version);
+  assert.deepEqual(createVersionStore(iva.home).list(), [first.version]);
+  assert.deepEqual(pluginEntries(iva.home), { trace: true });
+});
+
+test("a plugin nothing can read is left out of the build and named", async (t) => {
+  const iva = world(t);
+  pluginsState(iva.home, [{ name: "ghost" }]);
+  const logged: string[] = [];
+
+  const outcome = updated(
+    await iva.update({ log: (line) => logged.push(line) }),
+  );
+
+  // No folder, no code, no build - and the digest of a version with nothing in it.
+  assert.equal(outcome.version, `0.3.14-${iva.target.sha.slice(0, 12)}`);
+  assert.ok(
+    logged.some((line) => /plugin ghost is left out of this build/u.test(line)),
+    logged.join("\n"),
+  );
+});
+
+test("two plugins that want one mount file are both left out and both named", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "my.tool");
+  plantPlugin(iva.home, "my-tool");
+  pluginsState(iva.home, [{ name: "my.tool" }, { name: "my-tool" }]);
+  const logged: string[] = [];
+
+  const outcome = updated(
+    await iva.update({ log: (line) => logged.push(line) }),
+  );
+
+  const dir = join(iva.home, "versions", outcome.version);
+  assert.equal(existsSync(join(dir, "agent/extensions/my_tool.ts")), false);
+  assert.ok(
+    logged.some((line) =>
+      /my-tool and my\.tool want the same extension mount my_tool\.ts/u.test(
+        line,
+      ),
+    ),
+    logged.join("\n"),
+  );
+});
+
+test("a plugin that builds but does not start leaves the service on the stock build", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "trace");
+  pluginsState(iva.home, [{ name: "trace" }]);
+  let attempt = 0;
+  const notices: string[] = [];
+
+  const outcome = updated(
+    await iva.update({
+      notify: (message) => notices.push(message),
+      // The build is green; the start is not, and only the first tree gets to fail.
+      probe: (dir, port) =>
+        existsSync(join(dir, "agent/extensions/trace.ts")) && attempt++ === 0
+          ? Promise.resolve({
+              ok: false,
+              log: "boom: the plugin took the server down",
+            })
+          : fixtureProbe()(dir, port),
+    }),
+  );
+
+  const dir = join(iva.home, "versions", outcome.version);
+  assert.equal(outcome.custom, "stock");
+  assert.equal(existsSync(join(dir, "agent/extensions/trace.ts")), false);
+  assert.ok(
+    notices.some((notice) =>
+      /does not start against this version/u.test(notice),
+    ),
+    notices.join("\n"),
+  );
 });

@@ -380,6 +380,36 @@ export function tombstoned(
 }
 
 /**
+ * One plain message to the owner's chat. A direct Bot API call, like the update offer
+ * this Alert stands beside (scripts/check-update.ts): the marked-up sender lives in the
+ * authored tree, and this process runs in a version directory that may not have a
+ * `node_modules` yet - a dependency reached on any path through it is a crash with no
+ * update (scripts/lib/version-update.test.ts pins that). The text is this file's own
+ * copy with plugin names in it, so there is nothing here for the outbound Gate to redact.
+ */
+function sendToChat(
+  token: string,
+  chat: string,
+): (text: string) => Promise<boolean> {
+  return async (text) => {
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${token}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chat, text }),
+        },
+      );
+      return response.ok;
+    } catch (error) {
+      console.error("[plugins] could not send the alert:", error);
+      return false;
+    }
+  };
+}
+
+/**
  * A plugin was switched off because its code will not build with this version. The
  * update output carries the reason for whoever is watching it; this is the half that
  * reaches an owner who ordered the update from Telegram and never sees a terminal.
@@ -388,15 +418,18 @@ export function tombstoned(
  * and it repeats at most once a week for the same plugin. The digest is the essence -
  * a plugin whose content changed is a new problem and speaks at once.
  */
-async function alertOwnerAboutPlugins(
+export async function alertOwnerAboutPlugins(
   layout: ReturnType<typeof layoutFor>,
   failures: readonly PluginFailure[],
   notify: Say,
+  /** The chat, or a stand-in for it in tests; absent means the installation's own. */
+  send?: (text: string) => Promise<boolean>,
 ): Promise<void> {
   notify(pluginsOffNotice(failures));
   const token = String(layout.values.TELEGRAM_BOT_TOKEN ?? "").trim();
   const chat = notificationChat(layout.values);
-  if (!token || !chat) return; // Nowhere to say it; the output above is all there is.
+  const deliver = send ?? (token && chat ? sendToChat(token, chat) : null);
+  if (!deliver) return; // Nowhere to say it; the output above is all there is.
   const tr = await noticeTranslator(layout.values);
   const names = failures.map((failure) => failure.name);
   const text = pluginBuildFailedAlert(tr, names);
@@ -406,17 +439,7 @@ async function alertOwnerAboutPlugins(
     // The essence is which content failed: a plugin the owner has since changed is a
     // different problem and speaks at once instead of waiting out the week.
     failures.map((failure) => `${failure.name}@${failure.digest}`).join(" "),
-    async () => {
-      try {
-        // Through the outbound Gate, like every other Notice; loaded here because the
-        // seam lives in the authored tree and this process must start without it.
-        const { sendTelegramHtml } = await import("./lib/telegram-send.ts");
-        return (await sendTelegramHtml(token, chat, text)).ok;
-      } catch (error) {
-        console.error("[plugins] could not send the alert:", error);
-        return false;
-      }
-    },
+    () => deliver(text),
   );
   if (outcome === "failed")
     notify(`could not tell you in Telegram about ${names.join(", ")}`);
