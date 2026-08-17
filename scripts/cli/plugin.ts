@@ -275,7 +275,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             `${formatPluginSource(source)} now calls itself ${JSON.stringify(name)}, not ${JSON.stringify(previous.name)} — remove the old one first`,
           );
         // Marketplace — непроверенный файл: он обещает имя, а имя объявляет манифест.
-        // Разошлись — ставится не то, что просили, поэтому отказ до переезда в стор.
+        // Разошлись — ставится не то, что просили: отказ до переезда в data/custom/plugins/.
         if (provenance && provenance.expect !== name)
           throw new Error(
             `${provenance.marketplace} offers ${provenance.expect}, but this plugin calls itself ${JSON.stringify(name)} — refusing to install it`,

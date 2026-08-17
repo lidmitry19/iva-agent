@@ -3,8 +3,9 @@
  *
  * The file is `.agents/plugins/marketplace.json` in the convention of Codex
  * (ADR-0009): one `name`, then `plugins[]` with `name`, `source` and an optional
- * `description`. We read it and nothing else - no central place, no moderation, no
- * registry. Ours by default is `smixs/iva-plugins`; the owner adds his own.
+ * `description`. A list in a repository is all it is: no central place, no
+ * moderation, nobody's approval to publish. Ours by default is `smixs/iva-plugins`;
+ * the owner adds his own next to it.
  *
  * Two rules shape everything here.
  *
