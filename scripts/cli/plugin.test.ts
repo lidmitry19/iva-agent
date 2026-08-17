@@ -37,7 +37,8 @@ import {
   marketplaceSlug,
 } from "../lib/marketplace.ts";
 import { createSystemdControl } from "../lib/systemd-control.ts";
-import { createPluginCommands, leftoverPluginDirs } from "./plugin.ts";
+import { leftoverPluginDirs } from "./plugin-cli-context.ts";
+import { createPluginCommands } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
 import type { PluginVersionBuild } from "./version-update-command.ts";
 

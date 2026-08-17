@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { leftoverPluginDirs } from "./plugin.ts";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
+import { leftoverPluginDirs } from "./plugin-cli-context.ts";
 import {
   installedPluginUnits,
   mcpUnitName,

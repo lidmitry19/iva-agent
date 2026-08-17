@@ -1,7 +1,7 @@
 /**
  * Getting a plugin folder onto the disk: git fetch, local copy, and the swap into
- * the store. Nothing here decides policy - `scripts/cli/plugin.ts` owns the order
- * of steps, the messages, and what is written to `plugins.json`.
+ * the store. Nothing here decides policy - `scripts/cli/plugin-cli-install.ts` owns
+ * the order of steps, the messages, and what is written to `plugins.json`.
  *
  * Every install stages first and swaps last. A plugin that fails validation must
  * leave the store exactly as it was (ADR-0003: the box stays sacred), and a
