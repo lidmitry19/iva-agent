@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import fc from "fast-check";
 import {
   MAX_RICH_MESSAGE_CHARS,
+  MAX_RICH_MESSAGE_DEPTH,
   MAX_RICH_MESSAGE_NODES,
   readRichMessage,
 } from "./telegram-rich-message.ts";
@@ -28,9 +29,28 @@ const SEEDS = [1, 424242, 20260817];
 
 // --- строгий сканер ссылок CommonMark ---------------------------------------
 // Ищет каждую живую `[метка](адрес)`: экранированная скобка ссылку не открывает.
+// Забор кода сканер проходит насквозь: в CommonMark код сильнее ссылки, поэтому
+// содержимое забора ссылкой не становится ни у одного renderer. Выйти из забора
+// содержимое не может — забор всегда длиннее любой цепочки кавычек внутри.
 interface Link {
   readonly label: string;
   readonly dest: string;
+}
+
+/** Конец забора кода, начатого в позиции `at`, или -1, если забор не закрыт. */
+function codeEnd(source: string, at: number): number {
+  const opened = /^`+/u.exec(source.slice(at));
+  if (opened === null) return -1;
+  const bar = opened[0];
+  for (let from = at + bar.length; from < source.length;) {
+    const found = source.indexOf(bar, from);
+    if (found === -1) return -1;
+    if (source[found - 1] !== "`" && source[found + bar.length] !== "`") {
+      return found + bar.length;
+    }
+    from = found + bar.length;
+  }
+  return -1;
 }
 
 function unescape(value: string): string {
@@ -44,6 +64,13 @@ function scanLinks(source: string): Link[] {
       i += 1;
       continue;
     }
+    if (source[i] === "`") {
+      const end = codeEnd(source, i);
+      if (end !== -1) {
+        i = end - 1;
+        continue;
+      }
+    }
     if (source[i] !== "[") continue;
     let label = "";
     let closed = -1;
@@ -53,6 +80,14 @@ function scanLinks(source: string): Link[] {
         label += source[j] + (source[j + 1] ?? "");
         j += 1;
         continue;
+      }
+      if (source[j] === "`") {
+        const end = codeEnd(source, j);
+        if (end !== -1) {
+          label += source.slice(j, end);
+          j = end - 1;
+          continue;
+        }
       }
       if (source[j] === "]") {
         closed = j;
@@ -889,7 +924,7 @@ test("markdown shape: list, quote, table and code", () => {
         },
       ],
     }).text,
-    "- 1. one\n- [x] two",
+    "1. one\n- [x] two",
   );
   assert.equal(
     readRichMessage({
@@ -1081,14 +1116,17 @@ test("a mention keeps the text the user sees and adds the username", () => {
   );
 });
 
-// Осознанная политика, а не дефект: простой текст идёт насквозь. Если отправитель
-// написал markdown руками, он таким и остаётся; вход чистит inbound-Gate.
-test("a plain-text leaf is passed through byte for byte", () => {
-  const written = "see [Anthropic docs](https://evil.example/steal) and \\ [ ]";
-  assert.equal(
-    readRichMessage({ blocks: [{ type: "paragraph", text: written }] }).text,
-    written,
-  );
+// Написанный руками markdown не имеет права стать ссылкой: лист экранируется, а
+// байты возвращаются снятием `\`. Раньше такой текст проходил насквозь и подделывал
+// адрес на чужой схеме.
+test("a plain-text leaf cannot forge a link and unescapes back to itself", () => {
+  const written =
+    "see [Anthropic docs](javascript:alert(1)) and \\ [ ] <b> <javascript:x>";
+  const reading = readRichMessage({
+    blocks: [{ type: "paragraph", text: written }],
+  });
+  assert.deepEqual(scanLinks(reading.text), [], reading.text);
+  assert.equal(unescape(reading.text), written);
 });
 
 // --- якоря: неизвестные типы ------------------------------------------------
@@ -1126,15 +1164,17 @@ test("an unknown block type keeps whatever text it carries", () => {
 });
 
 test("an unknown text type keeps whatever text it carries", () => {
-  for (const node of [
-    { type: "quantum_text", text: "TXT" },
-    { type: "quantum_text", alternative_text: "TXT" },
-    { type: "quantum_text", expression: "TXT" },
-  ]) {
+  const cases: ReadonlyArray<readonly [unknown, string]> = [
+    [{ type: "quantum_text", text: "TXT" }, "TXT"],
+    [{ type: "quantum_text", alternative_text: "TXT" }, "TXT"],
+    // Формула идёт кодом: LaTeX остаётся байт в байт и markdown внутри не живёт.
+    [{ type: "quantum_text", expression: "TXT" }, "`TXT`"],
+  ];
+  for (const [node, expected] of cases) {
     const reading = readRichMessage({
       blocks: [{ type: "paragraph", text: node }],
     });
-    assert.equal(reading.text, "TXT");
+    assert.equal(reading.text, expected);
   }
 });
 
@@ -1285,6 +1325,140 @@ test("hostile shapes are read without a throw and without losing the siblings", 
   assert.equal(
     (Object.prototype as unknown as Record<string, unknown>).polluted,
     undefined,
+  );
+});
+
+// Дыра в массиве — это дыра, а не конец обхода: `map` сохранял бы её и клал в стек
+// `undefined`, после которого остаток сообщения пропадал молча.
+test("a hole in an array never ends the walk", () => {
+  const blocks: unknown[] = [];
+  blocks[0] = { type: "paragraph", text: "FIRST" };
+  blocks[2] = { type: "paragraph", text: "SECOND" };
+  blocks[3] = { type: "photo", photo: PHOTO };
+  const reading = readRichMessage({ blocks });
+  assert.deepEqual(
+    missingLeaves(reading.text, ["FIRST", "SECOND"]),
+    [],
+    reading.text,
+  );
+  assert.deepEqual(
+    reading.media.map((item) => item.fileId),
+    ["PH_L"],
+  );
+  assert.equal(reading.truncated, false);
+
+  const leading: unknown[] = new Array(3);
+  leading[1] = { type: "paragraph", text: "ONLY" };
+  assert.equal(readRichMessage({ blocks: leading }).text, "ONLY");
+
+  const nested: unknown[] = new Array(2);
+  nested[1] = { type: "paragraph", text: "NESTED" };
+  assert.equal(
+    readRichMessage({ blocks: [{ type: "collage", blocks: nested }] }).text,
+    "NESTED",
+  );
+
+  const holes: unknown[] = ["a"];
+  holes[3] = "b";
+  assert.equal(
+    readRichMessage({ blocks: [{ type: "paragraph", text: holes }] }).text,
+    "ab",
+  );
+});
+
+// Вход опаснее середины: до раунда 2 верхний уровень читался вне try, и Proxy на
+// корне выходил наружу исключением.
+test("a hostile array at the entrance is caught, not thrown", () => {
+  const boom = new Proxy([] as unknown[], {
+    get(): never {
+      throw new Error("boom");
+    },
+  });
+  for (const value of [boom, { blocks: boom }]) {
+    const reading = readRichMessage(value);
+    assert.equal(reading.text, "");
+    assert.equal(reading.truncated, true);
+  }
+
+  const lengthOnly = new Proxy([] as unknown[], {
+    get(target, prop, receiver): unknown {
+      if (prop === "length") throw new Error("length");
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.equal(readRichMessage(lengthOnly).truncated, true);
+
+  const trap: unknown[] = [];
+  Object.defineProperty(trap, "0", {
+    get(): never {
+      throw new Error("index");
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(trap, "length", { value: 1, writable: true });
+  const trapped = readRichMessage(trap);
+  assert.equal(trapped.text, "");
+  assert.equal(trapped.truncated, true);
+});
+
+// Одинокий блок и голая строка вместо `{ blocks }` — тоже сообщение, терять его не за что.
+test("a message that is not a blocks array is still read", () => {
+  assert.equal(readRichMessage("BARE").text, "BARE");
+  assert.equal(
+    readRichMessage({ type: "paragraph", text: "LONE" }).text,
+    "LONE",
+  );
+  assert.equal(
+    readRichMessage({ blocks: { type: "paragraph", text: "ONE" } }).text,
+    "ONE",
+  );
+  assert.equal(
+    readRichMessage([{ type: "paragraph", text: "TOP" }]).text,
+    "TOP",
+  );
+});
+
+// Потолок глубины стоит ради цены склейки, а не ради безопасности: за ним беднеет
+// оформление, но адрес ссылки, @username и метка пункта остаются в тексте.
+test("past the depth ceiling the wrapper is gone and the data is not", () => {
+  const quoted = (depth: number, leaf: unknown): unknown => {
+    let node: unknown = { type: "paragraph", text: leaf };
+    for (let i = 0; i < depth; i += 1) {
+      node = { type: "blockquote", blocks: [node] };
+    }
+    return node;
+  };
+  for (const depth of [2, MAX_RICH_MESSAGE_DEPTH + 2, 1_000]) {
+    const link = readRichMessage({
+      blocks: [
+        quoted(depth, { type: "url", text: "", url: "https://kept.example" }),
+      ],
+    });
+    assert.ok(
+      link.text.includes("https://kept.example"),
+      `depth=${depth} text=${JSON.stringify(link.text)}`,
+    );
+    const mention = readRichMessage({
+      blocks: [quoted(depth, { type: "mention", text: "", username: "durov" })],
+    });
+    assert.ok(
+      mention.text.includes("@durov"),
+      `depth=${depth} text=${JSON.stringify(mention.text)}`,
+    );
+  }
+
+  let list: unknown = {
+    type: "list",
+    items: [{ label: "1.", blocks: [{ type: "paragraph", text: "ITEM" }] }],
+  };
+  for (let i = 0; i < MAX_RICH_MESSAGE_DEPTH + 2; i += 1) {
+    list = { type: "blockquote", blocks: [list] };
+  }
+  assert.deepEqual(
+    missingLeaves(readRichMessage({ blocks: [list] }).text, ["1.", "ITEM"]),
+    [],
+    "метка пункта потерялась или встала после своего текста",
   );
 });
 
@@ -1471,10 +1645,24 @@ const hostileUrl = fc.constantFrom(
   "",
 );
 
+// Лист простого текста враждебен ровно так же, как поле `url`: markdown в нём написан
+// руками отправителя.
+const rawLeaf = fc.oneof(
+  benignLeaf,
+  fc.constantFrom(
+    "[click](javascript:alert(1))",
+    "](javascript:alert(1))",
+    "<javascript:alert(1)>",
+    "[a]: javascript:alert(1)",
+    "\\](data:text/html,x)",
+    "<script>alert(1)</script>",
+  ),
+);
+
 const hostileText: fc.Arbitrary<unknown> = fc.letrec((tie) => ({
   node: fc.oneof(
     { depthSize: "small", withCrossShrink: true },
-    benignLeaf,
+    rawLeaf,
     fc.record({ type: fc.constant("bold"), text: tie("node") }),
     fc.record({ type: fc.constant("italic"), text: tie("node") }),
     fc.record({ type: fc.constant("code"), text: tie("node") }),
@@ -1561,6 +1749,23 @@ describe("PROPERTY: the emitted link round-trips to the intended address", () =>
               `label ${JSON.stringify(text)} forged ${JSON.stringify(reading.text)}`,
             );
           }
+        }),
+        { seed, numRuns: 2000 },
+      );
+    });
+  }
+});
+
+describe("PROPERTY: escaping a leaf is reversible", () => {
+  for (const seed of SEEDS) {
+    it(`unescape returns the original bytes and no link appears (seed=${seed})`, () => {
+      fc.assert(
+        fc.property(fc.string({ maxLength: 60 }), (leaf) => {
+          const reading = readRichMessage({
+            blocks: [{ type: "paragraph", text: leaf }],
+          });
+          assert.equal(unescape(reading.text), leaf);
+          assert.deepEqual(scanLinks(reading.text), [], reading.text);
         }),
         { seed, numRuns: 2000 },
       );
