@@ -53,12 +53,7 @@ type Task =
   | { readonly kind: "emit"; readonly value: string }
   | { readonly kind: "open"; readonly sep: string; readonly wrap: Wrap }
   | { readonly kind: "close" }
-  | {
-      readonly kind: "each";
-      readonly list: object;
-      readonly make: Make;
-      at: number;
-    };
+  | { kind: "each"; list: object; make: Make; at: number };
 
 const CLOSE: Task = { kind: "close" };
 const blockOf: Make = (node) => [{ kind: "block", node }];
@@ -152,10 +147,8 @@ function fenced(inner: string, tag: string): string {
 type Rank = readonly [number, number, string];
 
 function outranks(a: Rank, b: Rank | null): boolean {
-  if (b === null) return true;
-  if (a[0] !== b[0]) return a[0] > b[0];
-  if (a[1] !== b[1]) return a[1] > b[1];
-  return a[2] < b[2];
+  if (b === null || a[0] !== b[0]) return b === null || a[0] > b[0];
+  return a[1] !== b[1] ? a[1] > b[1] : a[2] < b[2];
 }
 
 // Нечисло и бесконечность становятся -1 и никогда не выигрывают у настоящего размера.
@@ -166,9 +159,8 @@ function finite(value: unknown): number {
 function largestPhoto(value: unknown): TelegramRawMedia | null {
   let best: Rank | null = null;
   let uniqueId: unknown;
-  for (const size of Array.isArray(value)
-    ? (value as readonly unknown[])
-    : []) {
+  const sizes = Array.isArray(value) ? (value as readonly unknown[]) : [];
+  for (const size of sizes) {
     if (!isRecord(size)) continue;
     const fileId = field(size, "file_id");
     if (typeof fileId !== "string" || fileId === "") continue;
@@ -270,14 +262,13 @@ function preWrap(language: unknown): Wrap {
 function itemWrap(marker: string, label: string): Wrap {
   const head =
     label === "" ? marker : `${marker === "- " ? "" : marker}${label} `;
-  return (inner) => {
-    if (inner === "") return label === "" ? "" : head.trimEnd();
-    const lines = inner.split("\n");
-    for (let i = 1; i < lines.length; i += 1) {
-      if (lines[i] !== "") lines[i] = `  ${lines[i]}`;
-    }
-    return head + lines.join("\n");
-  };
+  // Продолжение пункта живёт под его меткой: строка за переводом получает отступ.
+  return (inner) =>
+    inner === ""
+      ? label === ""
+        ? ""
+        : head.trimEnd()
+      : head + inner.replace(/\n(?=.)/gu, "\n  ");
 }
 
 // Живой ссылкой хвост становится только у http/https и только когда метка не пуста и
@@ -361,10 +352,8 @@ export function readRichMessage(value: unknown): RichMessageReading {
     if (value === undefined || value === null) return [];
     if (!isRecord(value) || typeof field(value, "type") === "string")
       return lineSeq(value);
-    return [
-      ...fieldSeq(field(value, "text")),
-      ...fieldSeq(field(value, "credit")),
-    ];
+    const credit = field(value, "credit");
+    return [...fieldSeq(field(value, "text")), ...fieldSeq(credit)];
   }
 
   // Общая форма блока: текст, summary, формула, имя якоря, вложенные блоки, credit,
