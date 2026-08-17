@@ -36,10 +36,14 @@ non-interactive shell without `--trust` answers no.
 What happens next depends on what the plugin carries:
 
 - 📋 **Skills only** — they work from the next turn. No build, no restart.
-- ⚙️ **Code under `sh.iva/`, or MCP servers** — Iva builds a new version with the plugin in
-  it and restarts the agent, on the same rails as `iva update`. A build that fails takes the
-  install back and leaves the running version alone: installing a plugin cannot break the box
+- ⚙️ **An eve Extension in `sh.iva/`, or MCP servers you trust** — their code and their
+  connections live inside a version, so Iva builds a new one with the plugin in it and
+  restarts the agent, on the same rails as `iva update`. A build that fails takes the install
+  back and leaves the running version alone: installing a plugin cannot break the box
   (ADR-0003).
+- 🔌 **Services only** — a `sh.iva/` with `services/` and no `package.json` never enters a
+  version. Nothing is rebuilt and nothing restarts: `trust` writes the units and starts them,
+  and that is the whole installation.
 
 ## The commands
 
@@ -122,6 +126,10 @@ prints `old → new`. It refuses to touch a folder you edited in place (the `dig
 overwritten in silence. An entry a Marketplace pinned to a commit has nothing to follow: to
 move it, `remove` and `add` it again.
 
+When an update changes a plugin's content, its units — services and MCP proxies — are
+restarted onto the new code right there, so a plugin that only carries services never needs
+`iva update` to run its new version.
+
 ## Marketplace
 
 A Marketplace is a list of plugins in a git repository — `name` to source, nothing more. No
@@ -187,8 +195,12 @@ a folder.
 
 ### Code: an eve Extension under `sh.iva/`
 
-`sh.iva` is Iva's namespace. Declare it in the manifest and put a real eve Extension package
-in the folder of the same name:
+`sh.iva` is Iva's namespace, and it holds two different things: an eve Extension, which is
+`sh.iva/package.json`, and services, which are `sh.iva/services/<svc>/service.json`. Either
+alone is fine. The manifest has to declare the namespace in both cases — a `sh.iva/` no
+manifest claims is ignored, with a diagnostic in `iva plugin list`.
+
+For code, declare the key and put a real eve Extension package in the folder:
 
 ```json
 { "extensions": { "sh.iva": {} } }
@@ -247,9 +259,13 @@ eve refuses them.
 
 Both transports work, and both need `trusted`:
 
-- **`streamable-http` and `sse`** become a generated connection, `<ns>__<server>`. The model
-  finds its tools through `connection_search` like any other connection. `${VAR}` in a header
-  is filled at run time from `data/custom/plugins/<name>.env`, so no token is baked into a
+- **`streamable-http` and `sse`** become a generated connection named
+  `mcp-<name>--<server>` — the file `agent/connections/mcp-<name>--<server>.ts` inside the
+  version. eve accepts lowercase letters, digits and dashes in a connection name, so both
+  halves are folded into that alphabet: a server called `Trace.Viewer` becomes
+  `trace-viewer`. The model finds its tools through `connection_search` like any other
+  connection and calls them `connection__mcp-trace--viewer__<tool>`. `${VAR}` in a header is
+  filled at run time from `data/custom/plugins/<name>.env`, so no token is baked into a
   build. The URL must be absolute `https://` (plain `http://` only for loopback), with no user
   information and no fragment.
 - **`stdio`** runs as a systemd unit, `iva-mcp-<name>-<server>.service`, with the **MCP
@@ -273,7 +289,8 @@ plugin is removed.
 ### A long-running service
 
 A plugin that needs its own process — a viewer, a worker, anything that must outlive a restart
-of the agent — declares it under `sh.iva/`:
+of the agent — declares it under `sh.iva/`, next to the same `extensions` key and with no
+`package.json` needed:
 
 ```
 my-plugin/
@@ -302,7 +319,7 @@ folder, and the environment is exactly four variables:
 `port` in `service.json` is a preference: Iva uses it when free and hands out the next free
 port otherwise, which is why the number arrives through `IVA_SERVICE_PORT` rather than a
 constant in your code. A plugin with services but no extension needs no version build — only
-its units.
+its units, and `iva plugin update` restarts them onto the code it just brought.
 
 Units are Linux-only. On a machine without systemd the commands print `no systemd` and carry
 on: state is still recorded, so the same installation on a server brings the processes up.
