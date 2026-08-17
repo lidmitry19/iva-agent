@@ -161,7 +161,15 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.3.24 · 16.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.3.25 · 17.08.2026 — expand the latest releases</b></summary>
+
+### 17.08.2026
+
+#### v0.3.25
+
+- Iva reads rich Telegram posts: longreads from the new editor (`rich_message` — headings, lists, tables, quotes, collages, media captions) used to arrive empty because their `text` field is empty and the content lives in blocks. Now the text is read whole and in order, photos and videos from any block go through the usual media pipeline (10 per message, the rest announced in one line), truncation is visible. Works everywhere text is read: single message, album, forward, quoted message, media caption. Ordinary messages are untouched. The gap was shown by contributor PR #189.
+- Plugins install from the terminal: `iva plugin add <folder | owner/repo[/subdir][@ref] | git URL>` puts an Agent Plugins 1.0.0 folder under `data/custom/plugins/`, records it in `data/custom/plugins.json`, and its skills work from the next turn — no build, no restart. `iva plugin list | remove | update | enable | disable | sync` manage them; `iva doctor` gains a Plugins section. Only the owner, only the terminal: no Telegram command and no model tool by design (ADR-0009). Plugin code and MCP servers are read and reported but not built yet — that lands in the next patch.
+- A turn journal: `data/trace/YYYY-MM-DD.jsonl` records every turn from the Bridge to the Outbox — allowlist, Gate verdicts, context parts, model steps, tool calls, subagents, delivery — one JSON line per event, kept 14 days, content capped and switchable off with `captureContent` in `data/settings.json`. The format is documented in `docs/trace.md` (ADR-0010); a terminal reader (`iva trace`) and a viewer plugin follow in the next patch.
 
 ### 16.08.2026
 
@@ -193,14 +201,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - A typo in `MODEL_PROVIDER` no longer borrows another provider's config silently: the agent refuses with the four accepted names, and every repair path leads to the fix. Shipped as a port of contributor PR #171.
 - Re-running the installer is cheap: finished stages are skipped, any failure rolls back on every exit path, secrets never land in /tmp, your edits are never lost.
 - The description of an incoming photo now passes the injection screen — text on an image no longer reaches the agent as an instruction.
-
-### 14.08.2026
-
-#### v0.3.20
-
-- Morning memory reports no longer arrive unasked: the nightly pass writes the vault silently. The report switch lives in `/menu` → 🔔 Notices, next to the morning digest switch, and applies the same night. An installation that used to get the report hears once where to turn it back on.
-- Every message Iva sends on her own now speaks one language — the one you picked. The report became a human note: 3-5 lines about what she remembered, no internal jargon.
-- Alerts now say what broke, what it costs and what to do. The same problem repeats at most once a week; a problem that changed or came back speaks at once.
 
 </details>
 
