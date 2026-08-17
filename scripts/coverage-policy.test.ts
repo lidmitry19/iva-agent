@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 210;
+const EXPECTED_PRODUCTION_COUNT = 215;
 const EXPECTED_INVENTORY_SHA256 =
-  "2770f8fb55f967727d9cc2fad728be7b51ab604acef4d75e5272b3372ed2ca71";
+  "aa3eec3ca7f0db76690bd124a5fef5ee40b2711b594ff4764944683f6dc506a9";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -56,6 +56,11 @@ const EXPECTED_INVENTORY_SHA256 =
 // `scripts/lib/data-dir.ts`, and `scripts/memory/read-core.ts`. Their scoped seam tests
 // report all four at 100% lines. The shared context-window package implementation also
 // reports 100% lines, so moving the resolver does not add a blind spot; the snapshot stays 26.
+// The plugin rails came next: `agent/lib/plugin-reader.ts`, `agent/lib/plugin-store.ts`,
+// `scripts/cli/plugin.ts`, `scripts/lib/plugin-install.ts` and `scripts/lib/plugin-source.ts`.
+// Their scoped suite (the reader anchors and properties, the store, the source parser, the
+// install seam, and the `iva plugin` and doctor CLI tests) reports all five - 96.29%, 100%,
+// 94.22%, 94.74% and 100% lines - so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

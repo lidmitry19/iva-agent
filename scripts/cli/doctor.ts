@@ -1,13 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { readPlugin } from "#lib/plugin-reader.ts";
-import {
-  pluginRoot,
-  pluginsDir,
-  pluginsStateFile,
-  readPluginsState,
-  type PluginsState,
-} from "#lib/plugin-store.ts";
+import type { PluginsState } from "#lib/plugin-store.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
 import { readMemoryMaintenanceReport } from "../lib/memory-maintenance.ts";
@@ -464,6 +457,24 @@ export function createDoctorCommand(
     return finish();
 
     async function checkPlugins(): Promise<void> {
+      // Плагины читает authored tree, а доктор обязан работать и на установке, где
+      // его нет (ADR-0003) — отсюда импорт по требованию и честная строка вместо
+      // падения, когда импортировать нечего.
+      let reader: typeof import("#lib/plugin-reader.ts");
+      let plugins: typeof import("#lib/plugin-store.ts");
+      try {
+        reader = await import("#lib/plugin-reader.ts");
+        plugins = await import("#lib/plugin-store.ts");
+      } catch {
+        warn(
+          "plugins not checked: the agent tree is missing — run: iva update",
+        );
+        warnN++;
+        return;
+      }
+      const { readPlugin } = reader;
+      const { pluginRoot, pluginsDir, pluginsStateFile, readPluginsState } =
+        plugins;
       const store = pluginsDir(dataDirectory);
       const stateFile = pluginsStateFile(dataDirectory);
       let state: PluginsState | null = null;
