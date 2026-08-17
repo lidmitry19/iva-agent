@@ -1459,3 +1459,52 @@ test("a marketplace naming file:// gets nothing: not offered, not fetched, not i
   assert.deepEqual((await readPluginsState(data)).plugins, []);
   assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
 });
+
+test("the git of plugins never stops to ask for a password", async () => {
+  const root = home();
+  // Фейковый git на PATH: пишет своё окружение в файл и отказывает. Настоящий
+  // runtime.cap здесь не подменён — проверяется то, что реально доедет до процесса.
+  const bin = world("fake-git");
+  const dumped = join(bin, "env.txt");
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/sh\nprintf 'GIT_TERMINAL_PROMPT=%s\\n' "$GIT_TERMINAL_PROMPT" >> ${dumped}\nexit 128\n`,
+  );
+  chmodSync(join(bin, "git"), 0o755);
+
+  const previousPath = process.env.PATH;
+  // Переменную снимаем с процесса теста: иначе она приехала бы из окружения машины,
+  // и тест был бы зелёным даже без правки.
+  const previousPrompt = process.env.GIT_TERMINAL_PROMPT;
+  delete process.env.GIT_TERMINAL_PROMPT;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  try {
+    const base = createCliRuntime(root);
+    const { cmdPlugin } = createPluginCommands(
+      {
+        ...base,
+        C: NO_COLOR,
+        ok: () => undefined,
+        warn: () => undefined,
+        bad: () => undefined,
+        step: () => undefined,
+      },
+      { translate: (en) => en, log: () => undefined, cwd: () => root },
+    );
+    // Кэш дефолтного Marketplace: команда обязана вернуться, а не ждать ввода.
+    await cmdPlugin(["list", "--available"]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousPrompt !== undefined)
+      process.env.GIT_TERMINAL_PROMPT = previousPrompt;
+  }
+
+  const seen = readFileSync(dumped, "utf8").trim().split("\n");
+  assert.ok(seen.length > 0, "the fake git was actually called");
+  assert.deepEqual(
+    [...new Set(seen)],
+    ["GIT_TERMINAL_PROMPT=0"],
+    "every git call of the plugin rails carries the switch",
+  );
+});

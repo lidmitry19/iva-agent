@@ -103,13 +103,21 @@ export function createPluginCommands(
   runtime: CliRuntime,
   dependencies: PluginDependencies = {},
 ) {
-  const { C, ok, warn, bad, step, cap, dataDirAbs } = runtime;
+  const { C, ok, warn, bad, step, cap, childEnv, dataDirAbs } = runtime;
   const now = dependencies.now ?? (() => new Date());
   const cwd = dependencies.cwd ?? (() => process.cwd());
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
+  // `GIT_TERMINAL_PROMPT=0` только здесь, для плагинов и Marketplace: приватный или
+  // отсутствующий репозиторий (а дефолтного `smixs/iva-plugins` ещё нет) иначе
+  // спросит логин в терминале и будет ждать — держа при этом лок апдейта. Ответ
+  // «репозиторий недоступен» приходит сразу, и команда объясняет его фразой.
+  // `iva update` этой правкой не тронут: там приглашение как раз уместно.
   const git = (args: readonly string[], dir?: string) =>
-    cap("git", args, dir ? { cwd: dir } : {});
+    cap("git", args, {
+      ...(dir ? { cwd: dir } : {}),
+      env: { ...childEnv, GIT_TERMINAL_PROMPT: "0" },
+    });
 
   // Английский, пока язык не спрошен: таблица переводов тоже живёт в authored tree,
   // а помощь команда обязана печатать и без него.
