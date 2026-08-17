@@ -39,7 +39,7 @@ import {
 } from "./lib/version-update.ts";
 import type { PluginFailure } from "./lib/plugin-build.ts";
 import { tryLoadPluginCore } from "./lib/plugin-core.ts";
-import { mcpUnitName, serviceUnitName } from "./lib/plugin-units.ts";
+import { pluginUnitNames, runningPluginUnits } from "./lib/plugin-units.ts";
 import type { createCliRuntime } from "./cli/runtime.ts";
 
 type Say = (message: string) => void;
@@ -469,16 +469,13 @@ export async function restartPluginUnits(
   const units: string[] = [];
   for (const entry of state.plugins) {
     if (!entry.enabled || !entry.trusted) continue;
-    for (const server of Object.keys(entry.mcp ?? {}))
-      units.push(mcpUnitName(entry.name, server));
-    for (const service of Object.keys(entry.services ?? {}))
-      units.push(serviceUnitName(entry.name, service));
+    units.push(...pluginUnitNames(entry));
   }
-  const live = units.filter(
-    (unit) =>
-      existsSync(join(runtime.UNIT_DIR, unit)) &&
-      runtime.systemd.isActive(unit),
-  );
+  const live = runningPluginUnits({
+    units,
+    unitDir: runtime.UNIT_DIR,
+    isActive: (unit) => runtime.systemd.isActive(unit),
+  });
   if (live.length === 0) return;
   try {
     runtime.systemd.restart(live);

@@ -2097,7 +2097,7 @@ test("trust hands out ports and tokens, writes the units and starts them", async
       "mu",
     ),
   );
-  assert.match(service, /^Environment=IVA_SERVICE_PORT=8726$/mu);
+  assert.match(service, /^Environment="IVA_SERVICE_PORT=8726"$/mu);
   // Плагин с MCP пересобирает версию: connection-файлы живут в ней.
   assert.deepEqual(build.calls, [{ requirePlugins: true }]);
   assert.match(messages(events, "ok"), /trace trusted/u);
@@ -2346,5 +2346,75 @@ test("a plugin whose MCP is all remote is not trusted by a question nobody asked
   assert.equal(
     (await readPluginsState(explicit.data)).plugins[0].trusted,
     true,
+  );
+});
+
+test("an update that changes only the plugin's code still restarts its unit", async () => {
+  // Плагин с одним сервисом и без кода: в версию он не попадает вовсе, поэтому рестарт
+  // юнита — единственное, что переводит его на новый код.
+  const service = JSON.stringify({
+    command: "node",
+    args: ["server.mjs"],
+    port: 8726,
+  });
+  const source = bareRemote((work) => {
+    plantPlugin(work, "svc");
+    write(
+      work,
+      "plugin.json",
+      manifest("svc", "1.0.0", { extensions: { "sh.iva": {} } }),
+    );
+    write(work, "sh.iva/services/web/service.json", service);
+    write(work, "sh.iva/services/web/server.mjs", "// v1\n");
+  });
+  const root = home();
+  const units = unitWorld();
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    buildStub(),
+    { units },
+  );
+
+  await cmdPlugin(["add", source.url, "--trust"]);
+  assert.deepEqual(units.units(), ["iva-plugin-svc-web.service"]);
+  assert.deepEqual(units.active(), ["iva-plugin-svc-web.service"]);
+
+  // Автор выпустил новую версию сервера. `service.json` не менялся: тело юнита будет
+  // байт в байт тем же, а код за ним — другим.
+  write(source.work, "sh.iva/services/web/server.mjs", "// v2\n");
+  git(["add", "-A"], source.work);
+  git(["commit", "-qm", "v2"], source.work);
+  git(["push", "-q", source.url, "HEAD:refs/heads/main"], source.work);
+  units.calls.length = 0;
+  events.length = 0;
+
+  await cmdPlugin(["update", "svc"]);
+
+  assert.equal(
+    readFileSync(
+      join(pluginRoot(data, "svc"), "sh.iva/services/web/server.mjs"),
+      "utf8",
+    ),
+    "// v2\n",
+  );
+  assert.ok(
+    units.calls.includes("restart iva-plugin-svc-web.service"),
+    units.calls.join("\n"),
+  );
+  assert.match(
+    messages(events, "ok"),
+    /restarted: iva-plugin-svc-web\.service/u,
+  );
+
+  // Второй `update` без нового коммита ничего не перезапускает: содержимое то же.
+  units.calls.length = 0;
+  await cmdPlugin(["update", "svc"]);
+  assert.equal(
+    units.calls.includes("restart iva-plugin-svc-web.service"),
+    false,
+    units.calls.join("\n"),
   );
 });

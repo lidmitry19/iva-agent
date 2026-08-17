@@ -39,8 +39,10 @@ import {
   pluginNamespace,
 } from "../lib/plugin-build.ts";
 import {
+  pluginUnitNames,
   pluginUnitPlan,
   reconcilePluginUnits,
+  runningPluginUnits,
   unitPartProblem,
   type PluginUnitSource,
 } from "../lib/plugin-units.ts";
@@ -723,7 +725,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     async function reconcileUnits(
       data: string,
       state: PluginsState,
-    ): Promise<void> {
+    ): Promise<readonly string[]> {
       const plan = pluginUnitPlan({
         plugins: await unitSources(data, state),
         root: ROOT,
@@ -741,7 +743,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
               "systemd здесь нет: юниты плагина не пишутся (они работают только на Linux-сервере)",
             ),
           );
-        return;
+        return [];
       }
       // Отказ systemd не отменяет уже записанное состояние: он называется и остаётся
       // задачей владельца (её же повторит `iva doctor`).
@@ -759,10 +761,48 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         bad(
           `the plugin units were not brought up to date: ${error instanceof Error ? error.message : String(error)}`,
         );
-        return;
+        return [];
       }
       if (done.started.length) ok(`running: ${done.started.join(", ")}`);
+      if (done.restarted.length) ok(`restarted: ${done.restarted.join(", ")}`);
       for (const failure of done.failures) bad(failure);
+      return done.restarted;
+    }
+
+    /**
+     * Перезапустить юниты плагинов, чьё содержимое только что сменилось. `enable --now`
+     * работающий юнит не трогает, а рестарт — единственное, что переводит его на новый
+     * код: у плагина с одними сервисами версия вообще не пересобирается, и другого
+     * момента подхватить обновление у него нет.
+     */
+    function restartMoved(
+      data: string,
+      state: PluginsState,
+      names: readonly string[],
+      already: readonly string[],
+    ): void {
+      if (names.length === 0 || !hasSystemd()) return;
+      const units = state.plugins
+        .filter(
+          (entry) =>
+            entry.enabled && entry.trusted && names.includes(entry.name),
+        )
+        .flatMap((entry) => pluginUnitNames(entry))
+        .filter((unit) => !already.includes(unit));
+      const live = runningPluginUnits({
+        units,
+        unitDir: UNIT_DIR,
+        isActive: (unit) => systemd.isActive(unit),
+      });
+      if (live.length === 0) return;
+      try {
+        systemd.restart(live);
+        ok(`restarted: ${live.join(", ")}`);
+      } catch (error) {
+        bad(
+          `${live.join(", ")} did not restart onto the new code: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     /**
@@ -891,7 +931,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
       // Состояние читается и пишется ВНУТРИ лока: прочитать до лока значило бы
       // записать поверх чужого `disable`, который случился, пока шла установка.
-      const { entry, report, undo } = await locked(data, async () => {
+      const installed = await locked(data, async () => {
         const state = await readPluginsState(data);
         if (!state.riskNoticeShownAt) {
           warn(translate(RISK_EN, RISK_RU));
@@ -905,10 +945,19 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             ? `Installing ${provenance.expect} from ${provenance.marketplace} (${formatPluginSource(source)})`
             : `Installing ${formatPluginSource(source)}`,
         );
-        const installed = await install(data, state, source, null, provenance);
-        // Вопрос доверия — здесь, до сборки версии: connection-файлы плагина зависят
-        // от ответа, и спросить после сборки значило бы собирать версию дважды.
-        const trusted = await askTrust(installed.report);
+        return install(data, state, source, null, provenance);
+      });
+
+      // Вопрос доверия — БЕЗ лока: он ждёт человека, а лок один на `iva update` и на
+      // таймер проверки обновлений, и держать их, пока владелец читает список команд,
+      // значит отказывать им столько же, сколько он думает. Ответ нужен до сборки:
+      // connection-файлы зависят от него, и спросить после значило бы собрать версию
+      // дважды. Прерванный на вопросе `add` оставляет папку без записи — её принимает
+      // обратно `iva plugin sync`.
+      const trusted = await askTrust(installed.report);
+      const { entry, report, undo } = await locked(data, async () => {
+        // Состояние перечитывается: пока шёл вопрос, его могла сменить другая команда.
+        const state = await readPluginsState(data);
         let next = upsertPlugin(state, { ...installed.entry, trusted });
         if (trusted)
           next = grantPorts(data, next, installed.entry.name, installed.report);
@@ -1174,6 +1223,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       /** Чем откатить установку, если версия с новым кодом не соберётся. */
       readonly undo: Undo | null;
       readonly code: boolean;
+      /**
+       * Приехало ли другое содержимое. Юниты этого плагина держат СТАРЫЙ процесс: тело
+       * юнита могло не измениться вовсе (та же команда, тот же порт), а код за ним —
+       * измениться целиком.
+       */
+      readonly moved: boolean;
     };
 
     async function updateOne(
@@ -1181,7 +1236,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       state: PluginsState,
       entry: PluginEntry,
     ): Promise<Updated> {
-      const untouched: Updated = { state, undo: null, code: false };
+      const untouched: Updated = {
+        state,
+        undo: null,
+        code: false,
+        moved: false,
+      };
       if (!entry.source) {
         warn(
           `${entry.name} has no source recorded — reinstall it: iva plugin add <source>`,
@@ -1237,6 +1297,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         // Доверенный плагин с MCP пересобирается и без кода: его connection-файлы
         // описывают тот `mcp.json`, который только что приехал.
         code: inVersion(report, installed.trusted) && installed.enabled,
+        moved: installed.sha !== entry.sha || installed.digest !== entry.digest,
       };
     }
 
@@ -1245,6 +1306,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       const failed: string[] = [];
       const undone: Undo[] = [];
       const rebuilt: string[] = [];
+      const moved: string[] = [];
       await locked(data, async () => {
         const state = await readPluginsState(data);
         const targets = args[0]
@@ -1261,6 +1323,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             next = done.state;
             if (done.undo) undone.push(done.undo);
             if (done.code) rebuilt.push(entry.name);
+            if (done.moved) moved.push(entry.name);
           } catch (error) {
             failed.push(entry.name);
             bad(`${entry.name}: ${(error as Error).message}`);
@@ -1276,7 +1339,11 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             next = grantPorts(data, next, entry.name, report);
         }
         await writePluginsState(data, next);
-        await reconcileUnits(data, next);
+        const cycled = await reconcileUnits(data, next);
+        // Новое содержимое плагина — старый процесс за неизменившимся юнитом: тело
+        // юнита могло совпасть байт в байт (та же команда, тот же порт), а сервер за ним
+        // приехал другой. Рестарт делают только те, кого не перезапустил reconcile.
+        restartMoved(data, next, moved, cycled);
       });
       // Одна сборка на весь прогон: версия собирается со всеми плагинами сразу, и
       // отдельная сборка на каждый стоила бы столько же рестартов, сколько плагинов.

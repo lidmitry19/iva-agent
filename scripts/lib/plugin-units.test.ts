@@ -21,17 +21,17 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
-import { expandPluginPlaceholders as expandInReader } from "#lib/plugin-reader.ts";
 import { SAFE_PLUGIN_PART } from "#lib/plugin-store.ts";
 import { createSystemdControl } from "./systemd-control.ts";
 import {
-  expandPluginPlaceholders,
   installedPluginUnits,
   mcpProxyUnitBody,
   mcpUnitName,
   pluginServiceUnitBody,
+  pluginUnitNames,
   pluginUnitPlan,
   reconcilePluginUnits,
+  runningPluginUnits,
   serviceUnitName,
   UNIT_PART,
   unitPartProblem,
@@ -100,7 +100,7 @@ const NODE_BIN = "/home/iva/.nvm/versions/node/v24.5.0/bin";
 const ROOT = "/home/iva/iva/current";
 const DATA = "/home/iva/iva/data";
 
-function source(overrides: Partial<PluginUnitSource> = {}): PluginUnitSource {
+function source0(overrides: Partial<PluginUnitSource> = {}): PluginUnitSource {
   return {
     name: "trace",
     enabled: true,
@@ -166,7 +166,7 @@ test("the MCP proxy unit runs the proxy of the running version, with no secrets"
   assert.match(body, /^UMask=0077$/mu);
   assert.match(body, /^After=network-online\.target$/mu);
   assert.match(body, /^WantedBy=default\.target$/mu);
-  assert.match(body, new RegExp(`^Environment=PATH=${NODE_BIN}:`, "mu"));
+  assert.match(body, new RegExp(`^Environment="PATH=${NODE_BIN}:`, "mu"));
   // Ни одного секрета инсталляции: EnvironmentFile у прокси нет.
   assert.doesNotMatch(body, /EnvironmentFile/u);
   assert.doesNotMatch(body, /TELEGRAM|OPENAI|ASSISTANT_BEARER/u);
@@ -202,11 +202,11 @@ test("a plugin service gets its port, its paths, and nothing of the agent's", ()
   assert.deepEqual(
     body.split("\n").filter((line) => line.startsWith("Environment=")),
     [
-      "Environment=IVA_SERVICE_PORT=8726",
-      `Environment=IVA_DATA_DIR=${DATA}`,
-      `Environment=PLUGIN_ROOT=${DATA}/custom/plugins/trace`,
-      `Environment=PLUGIN_DATA=${DATA}/plugin-data/trace`,
-      `Environment=PATH=${NODE_BIN}:%h/.local/bin:/usr/local/bin:/usr/bin:/bin`,
+      'Environment="IVA_SERVICE_PORT=8726"',
+      `Environment="IVA_DATA_DIR=${DATA}"`,
+      `Environment="PLUGIN_ROOT=${DATA}/custom/plugins/trace"`,
+      `Environment="PLUGIN_DATA=${DATA}/plugin-data/trace"`,
+      `Environment="PATH=${NODE_BIN}:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`,
     ],
   );
   assert.doesNotMatch(body, /EnvironmentFile/u);
@@ -243,16 +243,16 @@ test("only an enabled and trusted plugin has units at all", () => {
     },
   ];
   assert.deepEqual(
-    plan([source({ mcp })]).units.map((unit) => unit.unit),
+    plan([source0({ mcp })]).units.map((unit) => unit.unit),
     ["iva-mcp-trace-viewer.service"],
   );
-  assert.deepEqual(plan([source({ mcp, trusted: false })]).units, []);
-  assert.deepEqual(plan([source({ mcp, enabled: false })]).units, []);
+  assert.deepEqual(plan([source0({ mcp, trusted: false })]).units, []);
+  assert.deepEqual(plan([source0({ mcp, enabled: false })]).units, []);
 });
 
 test("a name or a port that cannot make a unit is named instead of guessed", () => {
   const planned = plan([
-    source({
+    source0({
       mcp: [
         { server: "a b", port: 8731, tokenFile: "/t" },
         { server: "viewer", port: undefined, tokenFile: "/t" },
@@ -287,7 +287,7 @@ test("reconcile writes what belongs, starts it, and takes away what does not", (
   const { control, calls } = fakeSystemctl();
   const created: string[] = [];
   const planned = plan([
-    source({
+    source0({
       mcp: [{ server: "viewer", port: 8731, tokenFile: "/t/mcp-viewer.token" }],
       services: [
         { service: "web", command: "node", args: ["server.mjs"], port: 8726 },
@@ -357,7 +357,7 @@ test("a unit that will not come up is reported and its neighbour still starts", 
   const { control } = fakeSystemctl({ broken: "iva-mcp-trace-viewer.service" });
   const done = reconcilePluginUnits({
     plan: plan([
-      source({
+      source0({
         mcp: [{ server: "viewer", port: 8731, tokenFile: "/t" }],
         services: [{ service: "web", command: "node", args: [], port: 8726 }],
       }),
@@ -372,7 +372,7 @@ test("a unit that will not come up is reported and its neighbour still starts", 
   assert.ok(existsSync(join(unitDir, "iva-mcp-trace-viewer.service")));
 });
 
-test("the two copies of the plugin-part rule and the expander agree", () => {
+test("the two copies of the plugin-part rule agree", () => {
   // Правило имени живёт в двух местах (юниты не грузят authored tree) — они обязаны
   // совпадать байт в байт, иначе `trust` примет имя, которое юнит потом отвергнет.
   assert.equal(UNIT_PART.source, SAFE_PLUGIN_PART.source);
@@ -382,38 +382,208 @@ test("the two copies of the plugin-part rule and the expander agree", () => {
       return true;
     }),
   );
-  fc.assert(
-    fc.property(
-      fc.oneof(
-        fc.string(),
-        fc.stringMatching(
-          /^(\$\{PLUGIN_ROOT\}|\$\{PLUGIN_DATA\}|[a-z/ ]){0,8}$/u,
-        ),
-      ),
-      fc.string(),
-      fc.string(),
-      (value, root, data) => {
-        const paths = { root, data };
-        assert.equal(
-          expandPluginPlaceholders(value, paths),
-          expandInReader(value, paths),
-        );
-        return true;
-      },
-    ),
+});
+
+test("a data directory with a space or a percent survives into Environment=", () => {
+  const odd = "/home/my box/100% iva/data";
+  const body = pluginServiceUnitBody({
+    plugin: "trace",
+    service: "web",
+    command: "node",
+    args: ["server.mjs"],
+    port: 8726,
+    pluginRoot: `${odd}/custom/plugins/trace`,
+    pluginData: `${odd}/plugin-data/trace`,
+    dataDir: odd,
+    nodeBinDir: "/opt/node bin",
+  });
+  // Кавычки — весь смысл: без них сервис получил бы `/home/my`, а `%` systemd съел бы
+  // как спецификатор. `$` в `Environment=` не раскрывается, поэтому не трогается.
+  assert.deepEqual(
+    body.split("\n").filter((line) => line.startsWith("Environment=")),
+    [
+      'Environment="IVA_SERVICE_PORT=8726"',
+      'Environment="IVA_DATA_DIR=/home/my box/100%% iva/data"',
+      'Environment="PLUGIN_ROOT=/home/my box/100%% iva/data/custom/plugins/trace"',
+      'Environment="PLUGIN_DATA=/home/my box/100%% iva/data/plugin-data/trace"',
+      'Environment="PATH=/opt/node bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"',
+    ],
+  );
+  // `%h` в нашей части PATH остаётся спецификатором: удваивается только чужое значение.
+  const dollar = pluginServiceUnitBody({
+    plugin: "trace",
+    service: "web",
+    command: "node",
+    args: [],
+    port: 8726,
+    pluginRoot: "/r",
+    pluginData: '/d/$HOME/"quoted"\\back',
+    dataDir: "/d",
+    nodeBinDir: "/n",
+  });
+  assert.match(
+    dollar,
+    /^Environment="PLUGIN_DATA=\/d\/\$HOME\/\\"quoted\\"\\\\back"$/mu,
+  );
+  assert.throws(
+    () =>
+      pluginServiceUnitBody({
+        plugin: "trace",
+        service: "web",
+        command: "node",
+        args: [],
+        port: 8726,
+        pluginRoot: "/r",
+        pluginData: "/d/line\nbreak",
+        dataDir: "/d",
+        nodeBinDir: "/n",
+      }),
+    /NUL or a newline/u,
   );
 });
 
-test("expansion is one pass, so a substituted value is not read again", () => {
-  const paths = { root: "/r", data: "${PLUGIN_ROOT}" };
-  // `${PLUGIN_DATA}` даёт литеральный `${PLUGIN_ROOT}`: второго прохода нет.
+test("a rewritten unit is restarted, an unchanged one is left running", () => {
+  const unitDir = join(world(), "systemd");
+  const { control, calls } = fakeSystemctl();
+  const planned = () =>
+    plan([
+      source0({
+        services: [{ service: "web", command: "node", args: [], port: 8726 }],
+      }),
+    ]);
+
+  const first = reconcilePluginUnits({
+    plan: planned(),
+    unitDir,
+    systemd: control,
+  });
+  // Первый прогон только поднимает: рестартовать нечего.
+  assert.deepEqual(first.started, ["iva-plugin-trace-web.service"]);
+  assert.deepEqual(first.restarted, []);
+
+  // Тот же план — тот же файл: работающий юнит не трогаем.
+  calls.length = 0;
+  const again = reconcilePluginUnits({
+    plan: planned(),
+    unitDir,
+    systemd: control,
+  });
+  assert.deepEqual(again.restarted, []);
   assert.equal(
-    expandPluginPlaceholders("${PLUGIN_DATA}/x", paths),
-    "${PLUGIN_ROOT}/x",
+    calls.includes("restart iva-plugin-trace-web.service"),
+    false,
+    calls.join("\n"),
   );
-  assert.equal(
-    expandPluginPlaceholders("${PLUGIN_ROOT}/${PLUGIN_ROOT}", paths),
-    "/r//r",
+
+  // Автор поменял `service.json`: тело юнита другое, и `enable --now` работающий
+  // процесс не заменит — нужен рестарт.
+  calls.length = 0;
+  const changed = reconcilePluginUnits({
+    plan: plan([
+      source0({
+        services: [
+          { service: "web", command: "node", args: ["--quiet"], port: 8726 },
+        ],
+      }),
+    ]),
+    unitDir,
+    systemd: control,
+  });
+  assert.deepEqual(changed.restarted, ["iva-plugin-trace-web.service"]);
+  assert.ok(
+    calls.indexOf("enable --now iva-plugin-trace-web.service") <
+      calls.indexOf("restart iva-plugin-trace-web.service"),
+    calls.join("\n"),
   );
-  assert.equal(expandPluginPlaceholders("${OTHER}", paths), "${OTHER}");
+  assert.match(
+    readFileSync(join(unitDir, "iva-plugin-trace-web.service"), "utf8"),
+    /--quiet/u,
+  );
+});
+
+test("one unit name for two plugins installs neither and names both", () => {
+  // `a-b` с сервером `c` и `a` с сервером `b-c` дают одно имя юнита.
+  const planned = pluginUnitPlan({
+    plugins: [
+      source0({
+        name: "a-b",
+        root: `${DATA}/custom/plugins/a-b`,
+        data: `${DATA}/plugin-data/a-b`,
+        mcp: [{ server: "c", port: 8730, tokenFile: "/t1" }],
+      }),
+      source0({
+        name: "a",
+        root: `${DATA}/custom/plugins/a`,
+        data: `${DATA}/plugin-data/a`,
+        mcp: [{ server: "b-c", port: 8731, tokenFile: "/t2" }],
+      }),
+      // Сервисы — то же правило и то же имя.
+      source0({
+        name: "x-y",
+        root: `${DATA}/custom/plugins/x-y`,
+        data: `${DATA}/plugin-data/x-y`,
+        services: [{ service: "z", command: "node", args: [], port: 8732 }],
+      }),
+      source0({
+        name: "x",
+        root: `${DATA}/custom/plugins/x`,
+        data: `${DATA}/plugin-data/x`,
+        services: [{ service: "y-z", command: "node", args: [], port: 8733 }],
+      }),
+      // Сосед без коллизии остаётся.
+      source0({
+        mcp: [{ server: "viewer", port: 8734, tokenFile: "/t3" }],
+      }),
+    ],
+    root: ROOT,
+    node: NODE,
+    nodeBinDir: NODE_BIN,
+    dataDir: DATA,
+    dataDirEnvironment: `"ASSISTANT_DATA_DIR=${DATA}"`,
+  });
+
+  assert.deepEqual(
+    planned.units.map((unit) => unit.unit),
+    ["iva-mcp-trace-viewer.service"],
+  );
+  assert.deepEqual(planned.diagnostics, [
+    "plugins a and a-b both want the unit iva-mcp-a-b-c.service; neither is installed - remove one: iva plugin remove <name>",
+    "plugins x and x-y both want the unit iva-plugin-x-y-z.service; neither is installed - remove one: iva plugin remove <name>",
+  ]);
+});
+
+test("the units of one plugin are its ports, and only the running ones restart", () => {
+  const unitDir = join(world(), "systemd");
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(join(unitDir, "iva-mcp-trace-viewer.service"), "[Service]\n");
+  writeFileSync(join(unitDir, "iva-plugin-trace-web.service"), "[Service]\n");
+
+  assert.deepEqual(
+    pluginUnitNames({
+      name: "trace",
+      mcp: { viewer: { port: 8730 } },
+      services: { web: { port: 8726 }, gone: { port: 8727 } },
+    }),
+    [
+      "iva-mcp-trace-viewer.service",
+      "iva-plugin-trace-web.service",
+      "iva-plugin-trace-gone.service",
+    ],
+  );
+  assert.deepEqual(pluginUnitNames({ name: "bare" }), []);
+
+  assert.deepEqual(
+    runningPluginUnits({
+      units: [
+        "iva-mcp-trace-viewer.service",
+        // Файла нет: не наш рестарт, а работа для `sync`.
+        "iva-plugin-trace-gone.service",
+        // Файл есть, но юнит стоит: его кто-то остановил.
+        "iva-plugin-trace-web.service",
+      ],
+      unitDir,
+      isActive: (unit) => unit !== "iva-plugin-trace-web.service",
+    }),
+    ["iva-mcp-trace-viewer.service"],
+  );
 });

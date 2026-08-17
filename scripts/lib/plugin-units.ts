@@ -15,6 +15,7 @@
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -51,21 +52,6 @@ export type PluginUnitPlan = {
   readonly units: readonly PluginUnit[];
   readonly diagnostics: readonly string[];
 };
-
-/**
- * Раскрыть `${PLUGIN_ROOT}` и `${PLUGIN_DATA}` — один проход, без рекурсии. Копия
- * `expandPluginPlaceholders` из `agent/lib/plugin-reader.ts`: юниты пишутся командой,
- * которая обязана грузиться без authored tree, а правило подстановки у обеих сторон
- * одно. Равенство копий пинует `plugin-units.test.ts`.
- */
-export function expandPluginPlaceholders(
-  value: string,
-  paths: { readonly root: string; readonly data: string },
-): string {
-  return value.replaceAll(/\$\{(PLUGIN_ROOT|PLUGIN_DATA)\}/gu, (_, key) =>
-    key === "PLUGIN_ROOT" ? paths.root : paths.data,
-  );
-}
 
 /** The unit of the MCP proxy for one server of one plugin. */
 export function mcpUnitName(plugin: string, server: string): string {
@@ -127,7 +113,7 @@ export function mcpProxyUnitBody({
     )} --plugin ${argument(plugin)} --server ${argument(server)} --port ${port} --token-file ${argument(tokenFile)}`,
     // No EnvironmentFile: the proxy must not have the installation's secrets to pass on.
     // node comes first on PATH so an MCP server started as `npx …` finds the same one.
-    `Environment=PATH=${nodeBinDir}:${UNIT_PATH}`,
+    `Environment="PATH=${systemdEnvironmentSegment(nodeBinDir)}:${UNIT_PATH}"`,
     "Restart=on-failure",
     "RestartSec=5",
     "",
@@ -180,11 +166,12 @@ export function pluginServiceUnitBody({
     `WorkingDirectory=${workingDirectory}`,
     `ExecStart=${executable}${args.length ? ` ${args.map(argument).join(" ")}` : ""}`,
     // The whole environment a service gets, and nothing of the agent's (ADR-0009).
-    `Environment=IVA_SERVICE_PORT=${port}`,
-    `Environment=IVA_DATA_DIR=${systemdEnvironmentValue(dataDir)}`,
-    `Environment=PLUGIN_ROOT=${systemdEnvironmentValue(pluginRoot)}`,
-    `Environment=PLUGIN_DATA=${systemdEnvironmentValue(pluginData)}`,
-    `Environment=PATH=${nodeBinDir}:${UNIT_PATH}`,
+    systemdEnvironment("IVA_SERVICE_PORT", String(port)),
+    systemdEnvironment("IVA_DATA_DIR", dataDir),
+    systemdEnvironment("PLUGIN_ROOT", pluginRoot),
+    systemdEnvironment("PLUGIN_DATA", pluginData),
+    // `%h` is ours and stays a specifier; only the node directory is escaped.
+    `Environment="PATH=${systemdEnvironmentSegment(nodeBinDir)}:${UNIT_PATH}"`,
     "Restart=on-failure",
     "RestartSec=5",
     "",
@@ -195,13 +182,30 @@ export function pluginServiceUnitBody({
 }
 
 /**
- * One `Environment=` value. systemd expands `$` and `%` here too, and a newline would
- * end the directive - the same rule as an `ExecStart` argument, minus the quotes, which
- * systemd does not want on this side.
+ * One untrusted segment of an `Environment=` value. `Environment=` is not `ExecStart=`:
+ * systemd does no `$` expansion here (that happens where the command runs), so a `$` is
+ * left alone, while `%` is still a specifier and a literal one has to be doubled.
+ * Backslash and quote are escaped because the value ends up inside quotes, and NUL or a
+ * newline is refused outright - the unit file is line-based, and a value that breaks the
+ * line writes a directive nobody authored.
  */
-function systemdEnvironmentValue(value: string): string {
-  const quoted = systemdExecArgument(value);
-  return quoted.slice(1, -1);
+function systemdEnvironmentSegment(value: string): string {
+  if (/[\0\r\n]/u.test(value))
+    throw new Error("systemd environment value contains NUL or a newline");
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%");
+}
+
+/**
+ * One whole `Environment=` directive, quoted. The quotes are the point: without them a
+ * data directory with a space in it reaches the service cut at the space
+ * (`/home/my box/iva/data` → `/home/my`), which is how a plugin service silently reads
+ * the wrong directory.
+ */
+function systemdEnvironment(key: string, value: string): string {
+  return `Environment="${key}=${systemdEnvironmentSegment(value)}"`;
 }
 
 /** What the caller already read about one plugin: enough to plan its units. */
@@ -313,13 +317,37 @@ export function pluginUnitPlan({
       });
     }
   }
-  return { units, diagnostics };
+  // One unit name for two plugins: `a-b` with the server `c` and `a` with the server
+  // `b-c` both want `iva-mcp-a-b-c.service`. Writing it twice would give one plugin the
+  // other's process under its own name, so neither is written and both are named - the
+  // same answer as two plugins on one connection file (scripts/lib/plugin-build.ts).
+  const owner = new Map<string, string>();
+  for (const unit of units) {
+    const first = owner.get(unit.unit);
+    owner.set(unit.unit, first === undefined ? unit.plugin : "");
+  }
+  const kept = units.filter((unit) => {
+    if (owner.get(unit.unit) !== "") return true;
+    const both = [
+      ...new Set(
+        units
+          .filter((other) => other.unit === unit.unit)
+          .map((other) => other.plugin),
+      ),
+    ].sort();
+    const said = `plugins ${both.join(" and ")} both want the unit ${unit.unit}; neither is installed - remove one: iva plugin remove <name>`;
+    if (!diagnostics.includes(said)) diagnostics.push(said);
+    return false;
+  });
+  return { units: kept, diagnostics };
 }
 
 /** What one reconcile did, so the command that asked can say it in one line. */
 export type PluginUnitReconcile = {
   readonly written: readonly string[];
   readonly started: readonly string[];
+  /** Units whose body changed, so the running process had to be replaced. */
+  readonly restarted: readonly string[];
   readonly removed: readonly string[];
   readonly failures: readonly string[];
 };
@@ -344,6 +372,7 @@ export function reconcilePluginUnits({
   readonly unitDir: string;
   readonly systemd: {
     readonly activate: (units: readonly string[]) => void;
+    readonly restart: (units: readonly string[]) => void;
     readonly disableNow: (units: readonly string[]) => void;
     readonly daemonReload: () => unknown;
     readonly resetFailed: (units?: readonly string[]) => unknown;
@@ -361,10 +390,23 @@ export function reconcilePluginUnits({
   const written: string[] = [];
 
   mkdirSync(unitDir, { recursive: true });
+  /**
+   * Units whose body on disk is not the body they should have. `enable --now` starts a
+   * unit that is stopped and does NOTHING to one that is already running, so a rewritten
+   * unit file without a restart leaves the old process serving the old code - the port,
+   * the token file or the command it was started with. Reading the old body first is the
+   * only way to know which ones that is.
+   */
+  const changed: string[] = [];
   for (const unit of plan.units) {
     const file = join(unitDir, unit.unit);
-    // Rewritten every time: a unit whose port or path changed must not keep the old one,
-    // and comparing bodies would only save a write nobody notices.
+    let before = "";
+    try {
+      before = readFileSync(file, "utf8");
+    } catch {
+      // No unit yet: `enable --now` below starts it, and there is nothing to restart.
+    }
+    if (before !== "" && before !== unit.body) changed.push(unit.unit);
     writeFileSync(file, unit.body);
     written.push(unit.unit);
   }
@@ -394,6 +436,7 @@ export function reconcilePluginUnits({
   }
 
   const started: string[] = [];
+  const restarted: string[] = [];
   for (const unit of plan.units) {
     try {
       ensureDataDir(unit.plugin);
@@ -411,13 +454,60 @@ export function reconcilePluginUnits({
     try {
       systemd.activate([unit.unit]);
       started.push(unit.unit);
+      // Enabled and running is not enough when the file changed under it.
+      if (changed.includes(unit.unit)) {
+        systemd.restart([unit.unit]);
+        restarted.push(unit.unit);
+      }
     } catch (error) {
       failures.push(
         `${unit.unit}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
-  return { written, started, removed: stale, failures };
+  return { written, started, restarted, removed: stale, failures };
+}
+
+/** The port maps of one entry in `plugins.json`: what got a port has a unit. */
+export type PluginUnitOwner = {
+  readonly name: string;
+  readonly mcp?: Readonly<Record<string, { readonly port: number }>>;
+  readonly services?: Readonly<Record<string, { readonly port: number }>>;
+};
+
+/**
+ * Every unit name one plugin claims. Read from `plugins.json` rather than from the
+ * plugin folder, because this is the list of units that EXIST - a port was handed out
+ * and a unit was written for it.
+ */
+export function pluginUnitNames(entry: PluginUnitOwner): string[] {
+  return [
+    ...Object.keys(entry.mcp ?? {}).map((server) =>
+      mcpUnitName(entry.name, server),
+    ),
+    ...Object.keys(entry.services ?? {}).map((service) =>
+      serviceUnitName(entry.name, service),
+    ),
+  ];
+}
+
+/**
+ * Of these units, the ones that are installed and running. Anything else is not ours to
+ * restart: a unit that is stopped was stopped by somebody, and a unit that is not there
+ * belongs to a `sync`, not to a restart.
+ */
+export function runningPluginUnits({
+  units,
+  unitDir,
+  isActive,
+}: {
+  readonly units: readonly string[];
+  readonly unitDir: string;
+  readonly isActive: (unit: string) => boolean;
+}): string[] {
+  return units.filter(
+    (unit) => existsSync(join(unitDir, unit)) && isActive(unit),
+  );
 }
 
 /** Every plugin unit on disk, in name order: what `iva doctor` inspects. */

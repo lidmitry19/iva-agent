@@ -388,9 +388,8 @@ function executableProblem(root: string, command: unknown): string | null {
  * (ADR-0009). Значение, приехавшее из подстановки, дальше не разбирается: иначе
  * содержимое `<name>.env` решало бы, какие пути видит чужой процесс.
  *
- * Копия этой функции живёт в `scripts/lib/plugin-units.ts` (генерация юнитов не
- * может грузить authored tree, ADR-0003); их равенство пинует
- * `scripts/lib/plugin-units.test.ts`.
+ * Единственное место правила: подставляют и прокси (`services/mcp-proxy/proxy.ts`), и
+ * команда, которая пишет юниты (она читает плагин через `loadPluginCore()`).
  */
 export function expandPluginPlaceholders(
   value: string,
