@@ -17,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
+import { readLiveSkills } from "#lib/custom-skills.ts";
 import { PLUGIN_SCHEMA_URL } from "#lib/plugin-reader.ts";
 import {
   pluginDataDir,
@@ -441,4 +442,36 @@ test("an unknown subcommand names the ones that exist", async () => {
   );
   await cmdPlugin([]);
   assert.match(printed.join("\n"), /iva plugin add/u);
+});
+
+/** Читает скиллы так, как их прочитает следующий ход агента. */
+async function nextTurnSkills(data: string): Promise<string[]> {
+  const previous = process.env.ASSISTANT_DATA_DIR;
+  process.env.ASSISTANT_DATA_DIR = data;
+  try {
+    return Object.keys(await readLiveSkills(() => undefined)).sort();
+  } finally {
+    if (previous === undefined) delete process.env.ASSISTANT_DATA_DIR;
+    else process.env.ASSISTANT_DATA_DIR = previous;
+  }
+}
+
+test("what add installs is what the next turn sees, with no build and no restart", async () => {
+  const source = remote("demo", "viewer");
+  const root = home();
+  const { cmdPlugin, data } = commands(root);
+
+  assert.deepEqual(await nextTurnSkills(data), []);
+
+  await cmdPlugin(["add", source.url]);
+  assert.deepEqual(await nextTurnSkills(data), ["viewer"]);
+
+  await cmdPlugin(["disable", "demo"]);
+  assert.deepEqual(await nextTurnSkills(data), []);
+
+  await cmdPlugin(["enable", "demo"]);
+  assert.deepEqual(await nextTurnSkills(data), ["viewer"]);
+
+  await cmdPlugin(["remove", "demo"]);
+  assert.deepEqual(await nextTurnSkills(data), []);
 });
