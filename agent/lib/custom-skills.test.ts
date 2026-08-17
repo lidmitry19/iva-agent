@@ -13,7 +13,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { readCustomSkills, customSkillsDir } from "./custom-skills.ts";
+import {
+  customSkillsDir,
+  readCustomSkills,
+  readLiveSkills,
+} from "./custom-skills.ts";
+import { writePluginsState, type PluginEntry } from "./plugin-store.ts";
 
 const worlds: string[] = [];
 
@@ -296,4 +301,176 @@ test("customSkillsDir follows ASSISTANT_DATA_DIR", () => {
     if (previous === undefined) delete process.env.ASSISTANT_DATA_DIR;
     else process.env.ASSISTANT_DATA_DIR = previous;
   }
+});
+
+// --- Живые скиллы: свой Custom layer плюс включённые плагины (ADR-0009) ---------
+
+function pluginEntry(name: string, enabled = true): PluginEntry {
+  return {
+    name,
+    source: `./${name}`,
+    ref: "",
+    sha: "",
+    enabled,
+    trusted: false,
+    installedAt: "2026-08-17T10:00:00.000Z",
+  };
+}
+
+/** Временный data-каталог: плагины в сторе, состояние в plugins.json. */
+async function liveWorld(
+  plugins: readonly PluginEntry[],
+  plant: (data: string) => void,
+): Promise<string> {
+  const data = world();
+  plant(data);
+  if (plugins.length)
+    await writePluginsState(data, { marketplaces: [], plugins });
+  return data;
+}
+
+/** Читает живые скиллы так, как их прочитает ход: через ASSISTANT_DATA_DIR. */
+async function live(data: string) {
+  const previous = process.env.ASSISTANT_DATA_DIR;
+  process.env.ASSISTANT_DATA_DIR = data;
+  const log: string[] = [];
+  try {
+    return { skills: await readLiveSkills((line) => log.push(line)), log };
+  } finally {
+    if (previous === undefined) delete process.env.ASSISTANT_DATA_DIR;
+    else process.env.ASSISTANT_DATA_DIR = previous;
+  }
+}
+
+test("a skill of an enabled plugin is visible on the next turn, with no build", async () => {
+  const data = await liveWorld([pluginEntry("trace")], (dir) => {
+    write(
+      dir,
+      "custom/plugins/trace/skills/viewer/SKILL.md",
+      "---\nname: viewer\ndescription: Show one turn.\n---\n\nOpen the trace.\n",
+    );
+    write(
+      dir,
+      "custom/plugins/trace/skills/viewer/references/format.md",
+      "# format\n",
+    );
+    write(
+      dir,
+      "custom/agent/skills/own.md",
+      "---\ndescription: Mine.\n---\n\nBody.\n",
+    );
+  });
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills).sort(), ["own", "viewer"]);
+  assert.equal(skills.viewer.description, "Show one turn.");
+  assert.deepEqual(Object.keys(skills.viewer.files ?? {}), [
+    "references/format.md",
+  ]);
+  assert.deepEqual(log, []);
+});
+
+test("a disabled plugin contributes nothing", async () => {
+  const data = await liveWorld([pluginEntry("trace", false)], (dir) => {
+    write(
+      dir,
+      "custom/plugins/trace/skills/viewer/SKILL.md",
+      "---\nname: viewer\ndescription: Show one turn.\n---\n\nBody.\n",
+    );
+  });
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), []);
+  assert.deepEqual(log, []);
+});
+
+test("two plugins claiming one skill name: the first keeps it, the loss is logged", async () => {
+  const data = await liveWorld(
+    [pluginEntry("alpha"), pluginEntry("beta")],
+    (dir) => {
+      for (const plugin of ["alpha", "beta"])
+        write(
+          dir,
+          `custom/plugins/${plugin}/skills/viewer/SKILL.md`,
+          `---\nname: viewer\ndescription: From ${plugin}.\n---\n\nBody.\n`,
+        );
+    },
+  );
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), ["viewer"]);
+  assert.equal(skills.viewer.description, "From alpha.");
+  assert.deepEqual(log, [
+    "[skills] plugin skill viewer from beta skipped: alpha already provides it",
+  ]);
+});
+
+test("the owner's own skill wins over a plugin skill of the same name", async () => {
+  const data = await liveWorld([pluginEntry("trace")], (dir) => {
+    write(
+      dir,
+      "custom/plugins/trace/skills/viewer/SKILL.md",
+      "---\nname: viewer\ndescription: From the plugin.\n---\n\nBody.\n",
+    );
+    write(
+      dir,
+      "custom/agent/skills/viewer/SKILL.md",
+      "---\ndescription: Mine.\n---\n\nBody.\n",
+    );
+  });
+
+  const { skills, log } = await live(data);
+  assert.equal(skills.viewer.description, "Mine.");
+  assert.deepEqual(log, [
+    "[skills] plugin skill viewer from trace shadowed by data/custom/agent/skills",
+  ]);
+});
+
+test("a plugin skills directory keeps the package form only", async () => {
+  const data = await liveWorld([pluginEntry("trace")], (dir) => {
+    write(
+      dir,
+      "custom/plugins/trace/skills/good/SKILL.md",
+      "---\nname: good\ndescription: Good.\n---\n\nBody.\n",
+    );
+    write(
+      dir,
+      "custom/plugins/trace/skills/flat.md",
+      "---\ndescription: Flat.\n---\n",
+    );
+    write(dir, "custom/plugins/trace/skills/empty/notes.md", "no skill here\n");
+  });
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), ["good"]);
+  assert.deepEqual(log, ["[skills] plugin skill empty skipped: no SKILL.md"]);
+});
+
+test("no plugins.json at all leaves the own custom layer untouched", async () => {
+  const data = await liveWorld([], (dir) => {
+    write(
+      dir,
+      "custom/agent/skills/own.md",
+      "---\ndescription: Mine.\n---\n\nBody.\n",
+    );
+  });
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), ["own"]);
+  assert.deepEqual(log, []);
+});
+
+test("a damaged plugins.json costs the turn no skills and says so once", async () => {
+  const data = world();
+  write(data, "custom/plugins.json", "{ broken");
+  write(
+    data,
+    "custom/agent/skills/own.md",
+    "---\ndescription: Mine.\n---\n\nBody.\n",
+  );
+
+  const { skills, log } = await live(data);
+  assert.deepEqual(Object.keys(skills), ["own"]);
+  assert.equal(log.length, 1);
+  assert.match(log[0], /plugins\.json unusable/u);
 });

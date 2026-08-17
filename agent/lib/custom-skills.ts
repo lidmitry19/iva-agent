@@ -1,12 +1,14 @@
-// Скиллы пользователя из data/custom/agent/skills/ — прочитанные с диска, а не собранные.
+// Скиллы, прочитанные с диска на ходу, а не собранные: свой Custom layer
+// (data/custom/agent/skills/) и `skills/` включённых плагинов (data/custom/plugins/).
 //
 // Зачем: скилл, созданный ивой во время разговора, должен работать сразу. Встроенные
 // скиллы вкомпилированы в бандл при сборке, поэтому новый файл рядом с ними виден только
 // после `iva update`. Здесь тот же каталог читается на ходу, а eve отдаёт результат
 // модели как динамический скилл (agent/skills/custom.ts).
 //
-// Формы каталога — те же две, что понимает eve: пакет `<name>/SKILL.md` с соседними
-// файлами и плоский `<name>.md`. Имя скилла = имя папки или файла без `.md`.
+// Формы каталога своего слоя — те же две, что понимает eve: пакет `<name>/SKILL.md`
+// с соседними файлами и плоский `<name>.md`. Имя скилла = имя папки или файла без
+// `.md`. У плагина форма одна, пакетная: так велит спека Agent Plugins.
 //
 // Функция чистая и не знает про eve: на вход путь, на выход карта скиллов. Она НИКОГДА
 // не кидает наружу — резолвер, бросивший исключение, лишает ход всех динамических
@@ -17,6 +19,12 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { dataDir } from "./data-dir.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
+import {
+  EMPTY_PLUGINS_STATE,
+  enabledPlugins,
+  pluginRoot,
+  readPluginsState,
+} from "./plugin-store.ts";
 
 export type CustomSkill = {
   readonly description: string;
@@ -156,6 +164,7 @@ async function readOne(
   kind: Kind,
   name: string,
   log: (line: string) => void,
+  label = "custom skill",
 ): Promise<CustomSkill | null> {
   const markdownPath =
     kind === "package"
@@ -166,7 +175,7 @@ async function readOne(
     markdown = await readFile(markdownPath, "utf8");
   } catch (error) {
     log(
-      `[skills] custom skill ${name} skipped: ${
+      `[skills] ${label} ${name} skipped: ${
         code(error) === "ENOENT" && kind === "package"
           ? "no SKILL.md"
           : reason(error)
@@ -230,6 +239,104 @@ export async function readCustomSkills(
   )) {
     const skill = await readOne(dir, entryName, kind, name, log);
     if (skill) skills[name] = skill;
+  }
+  return skills;
+}
+
+/**
+ * Скиллы одного плагина: `plugins/<name>/skills/<skill>/SKILL.md`. Только
+ * непосредственные дети-папки, без рекурсии и без плоских `.md` — так велит спека
+ * Agent Plugins (§7.1). Симлинки пропускаются: их не должно быть в сторе, и
+ * следовать за ними на каждом ходу мы не станем.
+ */
+export async function readPluginSkills(
+  skillsDir: string,
+  log: (line: string) => void = console.error,
+): Promise<Record<string, CustomSkill>> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(skillsDir, { withFileTypes: true });
+  } catch (error) {
+    if (code(error) !== "ENOENT")
+      log(`[skills] plugin skills unreadable (${skillsDir}): ${reason(error)}`);
+    return {};
+  }
+  const skills: Record<string, CustomSkill> = {};
+  for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (!SAFE_NAME.test(entry.name)) {
+      log(
+        `[skills] plugin skill ${entry.name} skipped: name must match ${SAFE_NAME.source}`,
+      );
+      continue;
+    }
+    const skill = await readOne(
+      skillsDir,
+      entry.name,
+      "package",
+      entry.name,
+      log,
+      "plugin skill",
+    );
+    if (skill) skills[entry.name] = skill;
+  }
+  return skills;
+}
+
+/**
+ * Все скиллы, которые агент видит с диска на этом ходу: свой Custom layer плюс
+ * `skills/` ВКЛЮЧЁННЫХ плагинов. Сборка и рестарт не нужны — поставил плагин,
+ * со следующего хода его скиллы работают (ADR-0009).
+ *
+ * Порядок при совпадении имён: свой Custom layer ближе плагина и побеждает его,
+ * плагин побеждает ядровой скилл (это делает сам eve: динамический скилл
+ * перекрывает встроенный). Одно имя у ДВУХ плагинов `iva plugin add` не пускает;
+ * если такое состояние всё же сложилось, выигрывает первый по алфавиту, а второй
+ * уходит в лог — тихо терять скилл нельзя.
+ *
+ * Как и readCustomSkills, наружу НИКОГДА не кидает: исключение здесь стоило бы
+ * ходу всех динамических скиллов сразу.
+ */
+export async function readLiveSkills(
+  log: (line: string) => void = console.error,
+): Promise<Record<string, CustomSkill>> {
+  const data = dataDir();
+  let state = EMPTY_PLUGINS_STATE;
+  try {
+    state = await readPluginsState(data);
+  } catch (error) {
+    log(`[skills] plugins.json unusable: ${reason(error)}`);
+  }
+
+  const skills: Record<string, CustomSkill> = {};
+  const owner = new Map<string, string>();
+  for (const plugin of enabledPlugins(state)) {
+    const fromPlugin = await readPluginSkills(
+      join(pluginRoot(data, plugin.name), "skills"),
+      log,
+    );
+    for (const [name, skill] of Object.entries(fromPlugin)) {
+      const previous = owner.get(name);
+      if (previous !== undefined) {
+        log(
+          `[skills] plugin skill ${name} from ${plugin.name} skipped: ${previous} already provides it`,
+        );
+        continue;
+      }
+      owner.set(name, plugin.name);
+      skills[name] = skill;
+    }
+  }
+
+  for (const [name, skill] of Object.entries(
+    await readCustomSkills(customSkillsDir(), log),
+  )) {
+    const previous = owner.get(name);
+    if (previous !== undefined)
+      log(
+        `[skills] plugin skill ${name} from ${previous} shadowed by data/custom/agent/skills`,
+      );
+    skills[name] = skill;
   }
   return skills;
 }
