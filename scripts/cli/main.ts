@@ -8,6 +8,7 @@ import { createRemindCommand } from "./remind.ts";
 import { createCliRuntime } from "./runtime.ts";
 import { createServiceCommands } from "./services.ts";
 import { createCliSystemd } from "./systemd.ts";
+import { createTraceCommands } from "./trace.ts";
 import { createTreeRenderer } from "./tree.ts";
 import { createUpdateCommand } from "./update.ts";
 import { createUserbotCommands } from "./userbot.ts";
@@ -57,6 +58,7 @@ export function createCliMain(root: string) {
   const services = createServiceCommands(runtime, systemdLifecycle);
   const cmdConfig = createConfigCommand(runtime, systemdLifecycle);
   const cmdDoctor = createDoctorCommand(runtime, systemdLifecycle);
+  const trace = createTraceCommands(runtime);
   const cmdNotify = createNotifyCommand(runtime);
   const cmdRemind = createRemindCommand(runtime);
   const cmdPost = createPostCommand(runtime);
@@ -101,6 +103,7 @@ ${C.b}Commands:${C.x}
   ${C.c}iva reset${C.x}          full reset: clear stuck workflows and restart
   ${C.c}iva start${C.x} / ${C.c}stop${C.x}    start / stop
   ${C.c}iva usage${C.x} [win]      token usage (last|today|week|month|by-model|by-source|tail)
+  ${C.c}iva trace${C.x} <cmd>      the turn journal: tail|show [turn]|open
   ${C.c}iva notify${C.x} <text>    send one Telegram message verbatim
   ${C.c}iva remind${C.x} <text>    let the agent judge one Reminder, then send it to Telegram
   ${C.c}iva post${C.x} --md-file <p>  rich Telegram post to the digest chat or an allowlisted --chat
@@ -121,6 +124,7 @@ ${C.b}Commands:${C.x}
     login: account.cmdLogin,
     doctor: cmdDoctor,
     plugin: plugin.cmdPlugin,
+    trace: trace.cmdTrace,
     status: services.cmdStatus,
     restart: services.cmdRestart,
     reset: services.cmdReset,

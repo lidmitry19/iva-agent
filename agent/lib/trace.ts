@@ -103,9 +103,17 @@ export function traceFilePath(day: string, dir: string = dataDir()): string {
 
 // День в часовом поясе установки — тот же, что у дневных файлов Vault
 // (agent/lib/vault-daily.ts): один ход не должен попадать в два разных «сегодня».
-export function traceDay(now: Date = new Date()): string {
+//
+// Пояс можно передать явно, и второму читателю журнала это обязательно: `iva` запускается
+// БЕЗ --env-file, поэтому ASSISTANT_TIMEZONE в его process.env не приходит вовсе — CLI
+// читает .env сам (scripts/cli/runtime.ts) и передаёт пояс сюда. Иначе `iva trace tail`
+// следил бы за файлом чужого дня.
+export function traceDay(
+  now: Date = new Date(),
+  timeZone: string | undefined = process.env.ASSISTANT_TIMEZONE,
+): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: resolveTimeZone(process.env.ASSISTANT_TIMEZONE),
+    timeZone: resolveTimeZone(timeZone),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
