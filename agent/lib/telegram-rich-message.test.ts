@@ -1080,6 +1080,32 @@ test("a hostile label cannot close the link or add a destination", () => {
   }
 });
 
+// Забор кода внутри метки — единственное место, где код экранируется: иначе чужая
+// скобка закрыла бы метку, и адрес зависел бы от старшинства разметки у renderer.
+test("code inside a label cannot close the label", () => {
+  const reading = readRichMessage({
+    blocks: [
+      {
+        type: "paragraph",
+        text: {
+          type: "url",
+          url: "https://ok.example",
+          text: [{ type: "code", text: "](javascript:evil)" }],
+        },
+      },
+    ],
+  });
+  assert.ok(
+    reading.text.includes("\\](javascript:evil)"),
+    `скобка кода не экранирована: ${reading.text}`,
+  );
+  assert.deepEqual(
+    scanLinks(reading.text).map((link) => link.dest),
+    ["https://ok.example"],
+    reading.text,
+  );
+});
+
 test("a blank line inside a label degrades to plain text, never to a broken link", () => {
   const reading = readRichMessage({
     blocks: [

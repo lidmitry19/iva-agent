@@ -24,7 +24,9 @@
 // живой ссылки нет. Чтобы чужой текст не подделал ссылку, в каждом листе экранируются
 // `\`, `[`, `]`, `` ` `` и `<`: без скобок метка не открывается, без кавычки чужой
 // текст не сцепится с нашим забором кода, без `<` не собирается автоссылка и не
-// проходит сырой HTML. Экранирование снимается удалением `\`, поэтому данные целы. Внутри забора кода байты не трогаются — там markdown не разбирается.
+// проходит сырой HTML. Экранирование снимается удалением `\`, поэтому данные целы.
+// Внутри забора кода байты не трогаются — там markdown не разбирается; исключение
+// одно: забор внутри метки ссылки, где чужая скобка закрыла бы нашу метку.
 // Заголовки, ячейки таблицы и summary сводят перевод строки к пробелу: иначе разметка
 // блока рвётся.
 import { mediaFromRaw, type TelegramRawMedia } from "./telegram-parts.ts";
@@ -508,7 +510,10 @@ export function readRichMessage(value: unknown): RichMessageReading {
     if (!isRecord(node)) return;
     const type = field(node, "type");
     if (type === "code") {
-      return run(lineSeq(field(node, "text"), codeWrap, "code"));
+      // Внутри метки ссылки экранируется даже код: метка целиком наша, чужая скобка
+      // в неё не попадает, и структура ссылки не зависит от старшинства разметки.
+      const inner: Mode = mode === "label" ? "label" : "code";
+      return run(lineSeq(field(node, "text"), codeWrap, inner));
     }
     const url = type === "url" ? asText(field(node, "url")) : "";
     const username = type === "mention" ? asText(field(node, "username")) : "";
