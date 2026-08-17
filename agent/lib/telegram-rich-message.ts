@@ -7,33 +7,28 @@
 //     порядке, каждое медиа любой вложенности — в `media`.
 //  2. Никогда не бросаем: годится любое значение — мусор, циклы, дыры в массивах,
 //     ловушки в геттерах, Proxy. Обход итеративный, стек вызовов не переполняется.
-//  3. Ограничены: потолки на узлы, символы и глубину. Потолок сработал — `text` и
-//     `media` держат прочитанное, `truncated` становится true. Пустой ответ из-за
-//     потолка сам по себе потеря данных, поэтому его не бывает.
+//  3. Ограничены: потолок узлов считает всю работу — и разобранный узел, и шаг по
+//     детям. Дети читаются курсором, а не копируются в стек задач, поэтому общий или
+//     зацикленный массив стоит линейной памяти, а не квадрата от потолка.
 //
 // Политика листьев (написана явно, чтобы свойство было опровержимым): строка → сама
 // строка; RichText с полем `text` → листья вложенного `text`; custom_emoji →
 // `alternative_text`; mathematical_expression → `expression`; mention → листья `text`
-// и следом `@username`; anchor → ничего, это невидимая цель ссылки; divider → текста
+// и следом `@username`; anchor, anchor_link, reference и reference_link → листья
+// `text` и следом `#имя` (`name`, `anchor_name`, `reference_name`); divider → текста
 // нет, рисуется как `---`; RichBlockCaption → листья `text`, затем `credit`; map →
 // только подпись, координаты не текст.
 //
-// Разметка одна — лёгкий markdown, который читается и в daily-файле, и моделью. Живой
-// ссылкой становится только `http`/`https`; любая другая схема (`tg:`, `javascript:`,
-// `data:`, `file:`, `mailto:`) печатается текстом `метка (адрес)`: адрес сохранён,
-// живой ссылки нет. Чтобы чужой текст не подделал ссылку, в каждом листе экранируются
-// `\`, `[`, `]`, `` ` `` и `<`: без скобок метка не открывается, без кавычки чужой
-// текст не сцепится с нашим забором кода, без `<` не собирается автоссылка и не
-// проходит сырой HTML. Экранирование снимается удалением `\`, поэтому данные целы.
-// Внутри забора кода байты не трогаются — там markdown не разбирается; исключение
-// одно: забор внутри метки ссылки, где чужая скобка закрыла бы нашу метку.
-// Заголовки, ячейки таблицы и summary сводят перевод строки к пробелу: иначе разметка
-// блока рвётся.
+// Разметка одна — лёгкий markdown для daily-файла и для модели. Живой ссылкой
+// становится только `http`/`https`; другая схема (`tg:`, `javascript:`, `data:`,
+// `file:`, `mailto:`) печатается текстом `метка (адрес)`: адрес цел, ссылки нет.
+// Экран листа снимается удалением `\`. Внутри забора кода байты не трогаются —
+// там markdown не разбирается; исключение одно: забор внутри метки ссылки, где чужая
+// скобка закрыла бы нашу метку.
 import { mediaFromRaw, type TelegramRawMedia } from "./telegram-parts.ts";
 
 export interface RichMessageReading {
-  /** Markdown в исходном порядке; пустая строка, когда текста в сообщении нет.
-   *  Листья экранированы (`\`, `[`, `]`, `` ` ``, `<`), обратно — удалением `\`. */
+  /** Markdown в исходном порядке; пусто, когда текста нет. Листья экранированы. */
   readonly text: string;
   /** Медиа любой вложенности в исходном порядке; фото — самый крупный размер. */
   readonly media: readonly TelegramRawMedia[];
@@ -41,11 +36,11 @@ export interface RichMessageReading {
   readonly truncated: boolean;
 }
 
-// Узлы ограничивают и работу, и память: список детей режется до постановки в стек.
-// Символы считаются по листьям — это примерно сто длинных статей. Глубина ограничивает
-// кадры, которые собирают текст целиком: без неё сто тысяч вложенных цитат стоили бы
-// квадрат от длины текста. За потолком глубины теряется оформление, но не данные,
-// поэтому `truncated` он не поднимает.
+// Узлы ограничивают всю работу: и разбор узла, и шаг курсора. Символы считаются по
+// листьям. Глубина ограничивает кадры, которые собирают текст целиком: без неё сто
+// тысяч вложенных цитат стоили бы квадрат от длины текста. За потолком глубины
+// теряется оформление, но не данные, поэтому `truncated` он не поднимает. Пустой
+// ответ из-за потолка сам по себе потеря, поэтому его не бывает.
 export const MAX_RICH_MESSAGE_NODES = 50_000;
 export const MAX_RICH_MESSAGE_CHARS = 400_000;
 export const MAX_RICH_MESSAGE_DEPTH = 64;
@@ -59,89 +54,94 @@ type Wrap = (inner: string) => string;
  *  `code` — содержимое забора, где байты не трогаются. */
 type Mode = "text" | "label" | "code";
 
+/** Разворачивает одного ребёнка курсора в задачи. */
+type Make = (node: unknown) => Task[];
+
 type Task =
   | { readonly kind: "block"; readonly node: unknown }
   | { readonly kind: "text"; readonly node: unknown; readonly mode: Mode }
   | { readonly kind: "emit"; readonly value: string }
   | { readonly kind: "open"; readonly sep: string; readonly wrap: Wrap }
-  | { readonly kind: "close" };
-
-interface Frame {
-  readonly parts: string[];
-  readonly sep: string;
-  readonly wrap: Wrap;
-}
+  | { readonly kind: "close" }
+  | {
+      readonly kind: "each";
+      readonly list: object;
+      readonly make: Make;
+      at: number;
+    };
 
 const CLOSE: Task = { kind: "close" };
+const blockOf: Make = (node) => [{ kind: "block", node }];
 
 function textTask(node: unknown, mode: Mode): Task {
   return { kind: "text", node, mode };
-}
-
-function blockTask(node: unknown): Task {
-  return { kind: "block", node };
-}
-
-// `for..of`, а не `map`: `map` сохраняет дыры разреженного массива, и в стек попал бы
-// `undefined` — обход принял бы его за конец работы и молча бросил остаток.
-function tasks(
-  items: readonly unknown[],
-  make: (node: unknown) => Task,
-): Task[] {
-  const seq: Task[] = [];
-  for (const item of items) seq.push(make(item));
-  return seq;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Ловушка в геттере или Proxy — это потерянное поле, а не повод бросить. Счётчик
+// общий на модуль, но обход синхронный и не вложенный: один проход читает только свою
+// разницу и по ней честно поднимает `truncated`.
+let traps = 0;
+
 // Чтение поля не имеет права уронить обход: геттер и Proxy вправе бросить.
-function field(node: Record<string, unknown>, name: string): unknown {
+function field(node: object, name: string | number): unknown {
   try {
-    return node[name];
+    return (node as Record<string, unknown>)[name];
   } catch {
+    traps += 1;
     return undefined;
   }
+}
+
+function width(value: unknown): number {
+  const size = Array.isArray(value) ? field(value, "length") : 0;
+  return typeof size === "number" ? size : 0;
+}
+
+// Курсор по детям: массив не копируется в стек задач, а его шаг стоит один узел
+// потолка. Поэтому общий или зацикленный массив стоит линейной памяти, а разреженный
+// массив с миллиардной длиной обрывается потолком, а не съедает её.
+function each(value: unknown, make: Make): Task[] {
+  if (width(value) === 0) return [];
+  return [{ kind: "each", list: value as object, make, at: 0 }];
 }
 
 function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** Лист в том виде, в каком он ложится в markdown: код — байт в байт, прочее — с экраном. */
-function leafText(value: string, mode: Mode): string {
-  return mode === "code" ? value : escapeLeaf(value);
-}
-
 function flatten(value: string): string {
   return value.replace(/[\r\n]+/gu, " ");
 }
 
-// Открыть ссылку, закрыть метку, открыть забор кода или пронести сырой HTML умеют
-// ровно эти символы. Обратная кавычка в чужом тексте опаснее всего: она сцепилась бы
-// с нашим забором и выпустила код наружу разметкой.
-function escapeLeaf(value: string): string {
-  return value.replace(/[\\[\]<`]/gu, "\\$&");
+// Чужой лист не имеет права стать разметкой. Внутри строки экранируются `\`, `[`, `]`,
+// `` ` `` и `<`: без скобок метка ссылки не открывается, без кавычки чужой текст не
+// сцепится с нашим забором кода, без `<` не собирается автоссылка и не проходит сырой
+// HTML. В начале строки экранируется знак блока — заголовок, цитата, список, черта,
+// таблица, подчёркнутый заголовок. `!` вплотную к нашей ссылке экранируется на стыке,
+// см. `append`. `ordered` оставляет `1.` живым маркером: у метки пункта открыть
+// нумерованный список — её работа, у обычного листа это подделка. Экранируется точка,
+// а не цифра: слэш перед цифрой markdown оставил бы видимым.
+function escapeLeaf(value: string, ordered = false): string {
+  const safe = value
+    .replace(/[\\[\]<`]/gu, "\\$&")
+    .replace(/(^|\n)([ \t]*)([#>\-+*=_~|])/gu, "$1$2\\$3");
+  return ordered
+    ? safe
+    : safe.replace(/(^|\n)([ \t]*)(\d{1,9})([.)])/gu, "$1$2$3\\$4");
 }
 
-// Адрес внутри `(...)`: скобки и обратный слэш экранируются, пробелы, управляющие
-// символы и обратная кавычка кодируются процентами — иначе CommonMark обрывает адрес
-// на первом пробеле, а кавычка утаскивает половину абзаца в забор кода. Кодирование
-// процентами адрес не меняет: `%60` и `` ` `` — один и тот же байт.
+// Адрес внутри `(...)`: скобки и слэш экранируются, пробелы, управляющие символы и
+// обратная кавычка кодируются процентами — иначе CommonMark обрывает адрес на первом
+// пробеле, а кавычка утаскивает половину абзаца в забор кода. Проценты адрес не
+// меняют: `%60` и `` ` `` — один и тот же байт.
 function escapeUrl(value: string): string {
-  let out = "";
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    out +=
-      char === "\\" || char === "(" || char === ")"
-        ? `\\${char}`
-        : code < 0x20 || code === 0x7f || char === "`" || /\s/u.test(char)
-          ? encodeURIComponent(char)
-          : char;
-  }
-  return out;
+  return value
+    .replace(/[\\()]/gu, "\\$&")
+    .replace(/[\s`\p{Cc}]/gu, (char) => encodeURIComponent(char));
 }
 
 function isWebUrl(value: string): boolean {
@@ -161,34 +161,23 @@ function fenced(inner: string, tag: string): string {
   return `${bar}${tag}\n${inner}\n${bar}`;
 }
 
-type PhotoRank = readonly [number, number, string];
+/** Площадь, file_size, file_id: полный порядок, не зависящий от порядка размеров. */
+type Rank = readonly [number, number, string];
 
-// Порядок размеров фото полный — площадь, file_size, file_id, — поэтому выбор не
-// зависит от того, в каком порядке Telegram прислал размеры, а нечисло и бесконечность
-// становятся -1 и никогда не выигрывают у настоящего размера.
-function photoRank(size: Record<string, unknown>, fileId: string): PhotoRank {
-  const width = field(size, "width");
-  const height = field(size, "height");
-  const area =
-    typeof width === "number" && typeof height === "number"
-      ? width * height
-      : Number.NaN;
-  const bytes = field(size, "file_size");
-  return [
-    Number.isFinite(area) ? area : -1,
-    typeof bytes === "number" && Number.isFinite(bytes) ? bytes : -1,
-    fileId,
-  ];
-}
-
-function outranks(a: PhotoRank, b: PhotoRank): boolean {
+function outranks(a: Rank, b: Rank | null): boolean {
+  if (b === null) return true;
   if (a[0] !== b[0]) return a[0] > b[0];
   if (a[1] !== b[1]) return a[1] > b[1];
   return a[2] < b[2];
 }
 
+// Нечисло и бесконечность становятся -1 и никогда не выигрывают у настоящего размера.
+function finite(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : -1;
+}
+
 function largestPhoto(value: unknown): TelegramRawMedia | null {
-  let best: PhotoRank | null = null;
+  let best: Rank | null = null;
   let uniqueId: unknown;
   for (const size of Array.isArray(value)
     ? (value as readonly unknown[])
@@ -196,8 +185,11 @@ function largestPhoto(value: unknown): TelegramRawMedia | null {
     if (!isRecord(size)) continue;
     const fileId = field(size, "file_id");
     if (typeof fileId !== "string" || fileId === "") continue;
-    const rank = photoRank(size, fileId);
-    if (best !== null && !outranks(rank, best)) continue;
+    const w = field(size, "width");
+    const h = field(size, "height");
+    const area = typeof w === "number" && typeof h === "number" ? w * h : -1;
+    const rank: Rank = [finite(area), finite(field(size, "file_size")), fileId];
+    if (!outranks(rank, best)) continue;
     best = rank;
     uniqueId = field(size, "file_unique_id");
   }
@@ -224,28 +216,36 @@ function blockMedia(node: Record<string, unknown>): TelegramRawMedia | null {
   }
 }
 
+// Хвост: адрес у url, `@username` у mention, `#имя` у якоря и сноски. Он виден даже
+// тогда, когда метка пуста, поэтому цель не теряется. Свой `#` тоже экранируется:
+// в начале строки он стал бы заголовком.
+function tailText(node: Record<string, unknown>, url: string): string {
+  if (url !== "") return escapeLeaf(url);
+  const user = asText(field(node, "username"));
+  if (user !== "") return escapeLeaf(user.startsWith("@") ? user : `@${user}`);
+  const name =
+    asText(field(node, "name")) ||
+    asText(field(node, "anchor_name")) ||
+    asText(field(node, "reference_name"));
+  return name === "" ? "" : `\\#${escapeLeaf(name)}`;
+}
+
 const plainWrap: Wrap = (inner) => inner;
 
 const quoteWrap: Wrap = (inner) =>
   inner === ""
     ? ""
-    : inner
-        .split("\n")
-        .map((line) => (line === "" ? ">" : `> ${line}`))
-        .join("\n");
+    : inner.replace(/^.*$/gmu, (line) => (line === "" ? ">" : `> ${line}`));
 
 const summaryWrap: Wrap = (inner) =>
   inner === "" ? "" : `**${flatten(inner)}**`;
 
 const rowWrap: Wrap = (inner) => (inner === "" ? "" : `| ${inner} |`);
 
-// Пустая ячейка обязана занять место, иначе колонки съезжают.
-const cellWrap: Wrap = (inner) => {
-  const value = flatten(inner).replaceAll("|", "\\|");
-  return value === "" ? " " : value;
-};
+/** Пустая ячейка обязана занять место, иначе колонки съезжают. */
+const cellWrap: Wrap = (inner) => flatten(inner).replaceAll("|", "\\|") || " ";
 
-// Перевод строки в короткий забор не поместится, поэтому берётся длинный.
+/** Перевод строки в короткий забор не поместится, поэтому берётся длинный. */
 const codeWrap: Wrap = (inner) => {
   if (inner === "") return "";
   if (inner.includes("\n")) return fenced(inner, "");
@@ -272,7 +272,7 @@ function preWrap(language: unknown): Wrap {
   return (inner) => (inner === "" ? "" : fenced(inner, tag));
 }
 
-// Своя метка пункта (`1.`, `a)`) заменяет дефис: два маркера подряд — уже не список.
+/** Своя метка пункта (`1.`, `a)`) заменяет дефис: два маркера подряд — не список. */
 function itemWrap(marker: string, label: string): Wrap {
   const head =
     label === ""
@@ -290,10 +290,8 @@ function itemWrap(marker: string, label: string): Wrap {
   };
 }
 
-// url и mention устроены одинаково: хвост держит адрес или @username и виден даже
-// тогда, когда метка пуста. Живой ссылкой хвост становится только у http/https и
-// только когда метка не пуста и не разорвана пустой строкой: такую метку CommonMark
-// обратно в ссылку не собирает.
+// Живой ссылкой хвост становится только у http/https и только когда метка не пуста и
+// не разорвана пустой строкой: такую метку CommonMark обратно в ссылку не собирает.
 function tailWrap(tail: string, live: string): Wrap {
   return (inner) =>
     live !== "" && inner !== "" && !/\n[ \t]*\n/u.test(inner)
@@ -303,8 +301,7 @@ function tailWrap(tail: string, live: string): Wrap {
         : `${inner} (${tail})`;
 }
 
-// Разметка одного текста внутри строки. Остальные подтипы RichText аналога в markdown
-// не имеют и печатаются как есть.
+/** Разметка одного текста внутри строки; прочие подтипы аналога не имеют. */
 const INLINE_MARKS: Record<string, string> = {
   bold: "**",
   italic: "*",
@@ -313,48 +310,34 @@ const INLINE_MARKS: Record<string, string> = {
 
 export function readRichMessage(value: unknown): RichMessageReading {
   const media: TelegramRawMedia[] = [];
-  const frames: Frame[] = [{ parts: [], sep: BLOCK_SEP, wrap: plainWrap }];
+  const frames: { parts: string[]; sep: string; wrap: Wrap }[] = [
+    { parts: [], sep: BLOCK_SEP, wrap: plainWrap },
+  ];
   const stack: Task[] = [];
+  const seenTraps = traps;
   let nodes = 0;
   let chars = 0;
   let truncated = false;
 
   function append(value: string): void {
     if (value === "") return;
-    const frame = frames[frames.length - 1];
-    const last = frame.parts[frame.parts.length - 1];
-    if (frame.parts.length > 0 && frame.sep !== "") {
-      frame.parts.push(frame.sep);
-    } else if (
-      last !== undefined &&
-      last.endsWith("`") &&
-      value.startsWith("`")
-    ) {
+    const { parts, sep } = frames[frames.length - 1];
+    const last = parts[parts.length - 1];
+    if (parts.length > 0 && sep !== "") parts.push(sep);
+    else if (last !== undefined) {
       // Два забора кода не имеют права слипнуться: цепочка кавычек на стыке закрыла
-      // бы не тот забор, и содержимое вылезло бы наружу разметкой.
-      frame.parts.push(" ");
+      // бы не тот забор. `!` вплотную к нашей ссылке превратил бы её в картинку, и
+      // markdown полез бы за чужим адресом; знак экранируется, текст цел.
+      if (last.endsWith("`") && value.startsWith("`")) parts.push(" ");
+      else if (last.endsWith("!") && value.startsWith("["))
+        parts[parts.length - 1] = `${last.slice(0, -1)}\\!`;
     }
-    frame.parts.push(value);
+    parts.push(value);
   }
 
   function emit(value: string): void {
     chars += value.length;
     append(value);
-  }
-
-  // Дети читаются один раз и с запасом по узлам: срез ограничивает и память, и работу,
-  // а ловушка в Proxy или геттере стоит одного поля, а не всего обхода. Режется хвост,
-  // поэтому начало текста сохраняется всегда.
-  function take(value: unknown): readonly unknown[] {
-    if (!Array.isArray(value)) return [];
-    try {
-      const limit = Math.max(0, MAX_RICH_MESSAGE_NODES - nodes);
-      if (value.length > limit) truncated = true;
-      return value.slice(0, limit);
-    } catch {
-      truncated = true;
-      return [];
-    }
   }
 
   function run(seq: readonly Task[]): void {
@@ -364,20 +347,12 @@ export function readRichMessage(value: unknown): RichMessageReading {
   // Кадр с оформлением. За потолком глубины оформление уступает место запасному тексту
   // `head`/`tail`: адрес ссылки, @username и метка пункта остаются на своих местах, а
   // кадры не растут — иначе склейка стоила бы квадрат от длины текста.
-  function framed(
-    wrap: Wrap,
-    sep: string,
-    inner: Task[],
-    head = "",
-    tail = "",
-  ): Task[] {
-    if (frames.length <= MAX_RICH_MESSAGE_DEPTH) {
-      return [{ kind: "open", sep, wrap }, ...inner, CLOSE];
-    }
-    const seq: Task[] =
-      head === "" ? [...inner] : [{ kind: "emit", value: head }, ...inner];
-    if (tail !== "") seq.push({ kind: "emit", value: tail });
-    return seq;
+  function framed(wrap: Wrap, sep: string, kids: Task[], head = "", tail = "") {
+    if (frames.length <= MAX_RICH_MESSAGE_DEPTH)
+      return [{ kind: "open", sep, wrap } as Task, ...kids, CLOSE];
+    const open: Task[] = head === "" ? [] : [{ kind: "emit", value: head }];
+    const shut: Task[] = tail === "" ? [] : [{ kind: "emit", value: tail }];
+    return [...open, ...kids, ...shut];
   }
 
   /** Один текст как отдельный кусок блока. */
@@ -385,85 +360,93 @@ export function readRichMessage(value: unknown): RichMessageReading {
     return framed(wrap, "", [textTask(node, mode)]);
   }
 
+  /** Поле-текст, которого может не быть: отсутствие не стоит узла. */
+  function fieldSeq(value: unknown, wrap?: Wrap): Task[] {
+    return value === undefined ? [] : lineSeq(value, wrap);
+  }
+
   // RichBlockCaption — это `{ text, credit }`, а не RichText: у RichText всегда есть
   // строковый `type`, у подписи его нет. Обе формы читаются одним местом.
   function captionSeq(value: unknown): Task[] {
     if (value === undefined || value === null) return [];
-    if (!isRecord(value) || typeof field(value, "type") === "string") {
+    if (!isRecord(value) || typeof field(value, "type") === "string")
       return lineSeq(value);
-    }
-    const body = field(value, "text");
-    const credit = field(value, "credit");
     return [
-      ...(body === undefined ? [] : lineSeq(body)),
-      ...(credit === undefined ? [] : lineSeq(credit)),
+      ...fieldSeq(field(value, "text")),
+      ...fieldSeq(field(value, "credit")),
     ];
   }
 
-  // Общая форма блока: текст, summary, формула, вложенные блоки, credit, подпись. Так
-  // читаются и paragraph, footer, thinking, math, anchor, details, collage, slideshow,
-  // map и все медиа-блоки, и любой тип, которого мы ещё не знаем: новый тип из будущей
-  // версии Bot API теряет разметку, но не содержание.
+  // Общая форма блока: текст, summary, формула, имя якоря, вложенные блоки, credit,
+  // подпись. Так читаются paragraph, footer, thinking, math, anchor, details, collage,
+  // slideshow, map и все медиа-блоки — и любой тип, которого мы ещё не знаем: новый
+  // тип из будущей версии Bot API теряет разметку, но не содержание. Формула идёт как
+  // код: LaTeX остаётся байт в байт, markdown внутри не живёт.
   function blockSeq(node: Record<string, unknown>): Task[] {
-    const seq: Task[] = [];
-    const body = field(node, "text");
-    if (body !== undefined) seq.push(...lineSeq(body));
-    const summary = field(node, "summary");
-    if (summary !== undefined) seq.push(...lineSeq(summary, summaryWrap));
-    // Формула идёт как код: LaTeX остаётся байт в байт, markdown внутри не живёт.
-    const expression = field(node, "expression");
-    if (typeof expression === "string") {
-      seq.push({ kind: "emit", value: codeWrap(expression) });
-    }
-    for (const child of take(field(node, "blocks"))) seq.push(blockTask(child));
-    const credit = field(node, "credit");
-    if (credit !== undefined) seq.push(...lineSeq(credit));
-    seq.push(...captionSeq(field(node, "caption")));
-    return seq;
+    const expression = asText(field(node, "expression"));
+    const name = asText(field(node, "name"));
+    const mark = (value: string): Task[] =>
+      value === "" ? [] : [{ kind: "emit", value }];
+    return [
+      ...fieldSeq(field(node, "text")),
+      ...fieldSeq(field(node, "summary"), summaryWrap),
+      ...mark(codeWrap(expression)),
+      ...mark(name === "" ? "" : `\\#${escapeLeaf(name)}`),
+      ...each(field(node, "blocks"), blockOf),
+      ...fieldSeq(field(node, "credit")),
+      ...captionSeq(field(node, "caption")),
+    ];
   }
 
-  function listSeq(node: Record<string, unknown>): Task[] {
-    const items: Task[] = [];
-    for (const item of take(field(node, "items"))) {
-      const record = isRecord(item) ? item : null;
-      const label = escapeLeaf(
-        record === null ? "" : asText(field(record, "label")),
-      );
-      const marker =
-        record !== null && field(record, "has_checkbox") === true
-          ? field(record, "is_checked") === true
-            ? "- [x] "
-            : "- [ ] "
-          : "- ";
-      chars += label.length;
-      const body =
-        record === null
-          ? [textTask(item, "text")]
-          : tasks(take(field(record, "blocks")), blockTask);
-      items.push(...framed(itemWrap(marker, label), BLOCK_SEP, body, label));
-    }
-    return framed(plainWrap, "\n", items);
-  }
+  const itemOf: Make = (node) => {
+    const item = isRecord(node) ? node : null;
+    const raw = item === null ? "" : asText(field(item, "label"));
+    const label = escapeLeaf(raw, true);
+    const box = item !== null && field(item, "has_checkbox") === true;
+    const checked = item !== null && field(item, "is_checked") === true;
+    const marker = !box ? "- " : checked ? "- [x] " : "- [ ] ";
+    chars += label.length;
+    const kids =
+      item === null
+        ? [textTask(node, "text")]
+        : each(field(item, "blocks"), blockOf);
+    return framed(itemWrap(marker, label), BLOCK_SEP, kids, label);
+  };
+
+  const cellOf: Make = (cell) =>
+    lineSeq(isRecord(cell) ? field(cell, "text") : cell, cellWrap);
 
   function tableSeq(node: Record<string, unknown>): Task[] {
-    const rows = take(field(node, "cells"));
-    const body: Task[] = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      const cells = take(rows[i]);
-      const row: Task[] = [];
-      for (const cell of cells) {
-        const text = isRecord(cell) ? field(cell, "text") : cell;
-        row.push(...lineSeq(text, cellWrap));
-      }
-      body.push(...framed(rowWrap, " | ", row));
+    const rows = field(node, "cells");
+    // Линейка меряется по самой широкой строке: с шириной первой у рваной таблицы
+    // пропали бы лишние ячейки. Осмотр строк стоит узлов, поэтому разреженный массив
+    // с миллиардной длиной обрывается потолком, а не съедает память.
+    const budget = Math.max(0, MAX_RICH_MESSAGE_NODES - nodes);
+    const seen = Math.min(width(rows), budget);
+    let cols = 0;
+    for (let i = 0; i < seen; i += 1)
+      cols = Math.max(cols, width(field(rows as object, i)));
+    cols = Math.min(cols, budget);
+    nodes += seen;
+    let first = true;
+    const rowOf: Make = (row) => {
+      if (!first || cols === 0)
+        return framed(rowWrap, " | ", each(row, cellOf));
       // Линейка после первой строки: без неё markdown не считает таблицу таблицей.
-      if (i === 0 && cells.length > 0) {
-        const ruler = new Array(cells.length).fill("---").join(" | ");
-        body.push({ kind: "emit", value: `| ${ruler} |` });
-      }
-    }
+      // Шапка добивается до ширины линейки: с разным числом ячеек renderer не видит
+      // таблицу вовсе, а лишние ячейки нижних строк он и так показывает.
+      first = false;
+      const pad: Task[] = [];
+      for (let i = width(row); i < cols; i += 1)
+        pad.push({ kind: "emit", value: " " });
+      const ruler = new Array(cols).fill("---").join(" | ");
+      return [
+        ...framed(rowWrap, " | ", [...each(row, cellOf), ...pad]),
+        { kind: "emit", value: `| ${ruler} |` },
+      ];
+    };
     return [
-      ...framed(plainWrap, "\n", body),
+      ...framed(plainWrap, "\n", each(rows, rowOf)),
       ...captionSeq(field(node, "caption")),
     ];
   }
@@ -472,44 +455,33 @@ export function readRichMessage(value: unknown): RichMessageReading {
     if (typeof node === "string") return run(lineSeq(node));
     // Массив вместо блока схемой не предусмотрен, но разворачивается как список
     // блоков: терять текст из-за лишней пары скобок не за что.
-    if (Array.isArray(node)) return run(tasks(take(node), blockTask));
+    if (Array.isArray(node)) return run(each(node, blockOf));
     if (!isRecord(node)) return;
     const found = blockMedia(node);
     if (found !== null) media.push(found);
-    switch (field(node, "type")) {
-      case "heading":
-        return run(
-          lineSeq(field(node, "text"), headingWrap(field(node, "size"))),
-        );
-      case "pre":
-        return run(
-          lineSeq(
-            field(node, "text"),
-            preWrap(field(node, "language")),
-            "code",
-          ),
-        );
-      case "divider":
-        return emit("---");
-      case "list":
-        return run(listSeq(node));
-      case "table":
-        return run(tableSeq(node));
-      case "blockquote":
-      case "pullquote":
-        return run(framed(quoteWrap, BLOCK_SEP, blockSeq(node)));
-      default:
-        return run(blockSeq(node));
+    const type = field(node, "type");
+    if (type === "divider") return emit("---");
+    if (type === "heading")
+      return run(
+        lineSeq(field(node, "text"), headingWrap(field(node, "size"))),
+      );
+    if (type === "pre") {
+      const wrap = preWrap(field(node, "language"));
+      return run(lineSeq(field(node, "text"), wrap, "code"));
     }
+    if (type === "list")
+      return run(framed(plainWrap, "\n", each(field(node, "items"), itemOf)));
+    if (type === "table") return run(tableSeq(node));
+    if (type === "blockquote" || type === "pullquote")
+      return run(framed(quoteWrap, BLOCK_SEP, blockSeq(node)));
+    return run(blockSeq(node));
   }
 
   function handleText(node: unknown, mode: Mode): void {
-    if (typeof node === "string") {
-      return emit(leafText(node, mode));
-    }
-    if (Array.isArray(node)) {
-      return run(tasks(take(node), (child) => textTask(child, mode)));
-    }
+    if (typeof node === "string")
+      return emit(mode === "code" ? node : escapeLeaf(node));
+    if (Array.isArray(node))
+      return run(each(node, (child) => [textTask(child, mode)]));
     if (!isRecord(node)) return;
     const type = field(node, "type");
     if (type === "code") {
@@ -519,43 +491,27 @@ export function readRichMessage(value: unknown): RichMessageReading {
       return run(lineSeq(field(node, "text"), codeWrap, inner));
     }
     const url = type === "url" ? asText(field(node, "url")) : "";
-    const username = type === "mention" ? asText(field(node, "username")) : "";
-    const tail =
-      url !== ""
-        ? escapeLeaf(url)
-        : username === ""
-          ? ""
-          : escapeLeaf(username.startsWith("@") ? username : `@${username}`);
+    const tail = tailText(node, url);
     if (tail !== "") {
       const live = mode === "text" && isWebUrl(url) ? url : "";
       chars += tail.length;
-      return run(
-        framed(
-          tailWrap(tail, live),
-          "",
-          [textTask(field(node, "text"), live === "" ? mode : "label")],
-          "",
-          ` (${tail})`,
-        ),
-      );
+      const label = textTask(field(node, "text"), live === "" ? mode : "label");
+      return run(framed(tailWrap(tail, live), "", [label], "", ` (${tail})`));
     }
     const mark = typeof type === "string" ? INLINE_MARKS[type] : undefined;
-    if (mark !== undefined) {
+    if (mark !== undefined)
       return run(lineSeq(field(node, "text"), markWrap(mark), mode));
-    }
-    // Всё остальное, включая незнакомые типы: берём текст, каким бы полем он ни пришёл.
-    // `text` у двадцати подтипов, `alternative_text` у custom_emoji, `expression` у
-    // формулы; у anchor нет ничего, и это правильно.
+    // Всё остальное, включая незнакомые типы: берём текст, каким бы полем он ни
+    // пришёл. `text` у двадцати подтипов, `alternative_text` у custom_emoji,
+    // `expression` — у формулы.
     const body = field(node, "text");
     if (body !== undefined) return run([textTask(body, mode)]);
     const alternative = field(node, "alternative_text");
-    if (typeof alternative === "string") {
-      return emit(leafText(alternative, mode));
-    }
+    if (typeof alternative === "string")
+      return emit(mode === "code" ? alternative : escapeLeaf(alternative));
     const expression = field(node, "expression");
-    if (typeof expression === "string") {
+    if (typeof expression === "string")
       return emit(mode === "code" ? expression : codeWrap(expression));
-    }
   }
 
   function closeFrame(): void {
@@ -571,12 +527,8 @@ export function readRichMessage(value: unknown): RichMessageReading {
     // или геттере на входе не имеет права выйти наружу исключением.
     const inner = isRecord(value) ? field(value, "blocks") : undefined;
     const source = inner === undefined ? value : inner;
-    const blocks = Array.isArray(source)
-      ? take(source)
-      : source === undefined || source === null
-        ? []
-        : [source];
-    run(tasks(blocks, blockTask));
+    if (Array.isArray(source)) run(each(source, blockOf));
+    else if (source !== undefined && source !== null) run(blockOf(source));
 
     while (stack.length > 0) {
       const task = stack.pop();
@@ -605,7 +557,15 @@ export function readRichMessage(value: unknown): RichMessageReading {
       }
       nodes += 1;
       if (task.kind === "block") handleBlock(task.node);
-      else handleText(task.node, task.mode);
+      else if (task.kind === "text") handleText(task.node, task.mode);
+      else {
+        // Курсор возвращается в стек под своих детей: следующий ребёнок читается
+        // после того, как текущий дочитан до конца.
+        const child = field(task.list, task.at);
+        task.at += 1;
+        if (task.at < width(task.list)) stack.push(task);
+        run(task.make(child));
+      }
     }
   } catch {
     // Ловушка последней надежды: прочитанное уже лежит в кадрах и в media.
@@ -613,5 +573,7 @@ export function readRichMessage(value: unknown): RichMessageReading {
   }
 
   while (frames.length > 1) closeFrame();
-  return { text: frames[0].parts.join(""), media, truncated };
+  // Ловушка съела поле — прочитанное неполно, и `truncated` обязан это сказать.
+  const text = frames[0].parts.join("");
+  return { text, media, truncated: truncated || traps !== seenTraps };
 }
