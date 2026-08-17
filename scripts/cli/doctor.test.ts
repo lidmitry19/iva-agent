@@ -9,6 +9,8 @@ import {
   MODEL_PROVIDER_NAMES,
   invalidModelProviderMessage,
 } from "#lib/model-provider.ts";
+import { PLUGIN_SCHEMA_URL } from "#lib/plugin-reader.ts";
+import { pluginRoot, writePluginsState } from "#lib/plugin-store.ts";
 import { createSystemdControl } from "../lib/systemd-control.ts";
 import { createVersionStore } from "../lib/version-store.ts";
 import { createDoctorCommand } from "./doctor.ts";
@@ -437,4 +439,141 @@ test("doctor accepts exactly the provider names the runtime accepts", async (t) 
       JSON.stringify(value),
     );
   }
+});
+
+// --- Раздел «Plugins» (ADR-0009) -----------------------------------------------
+
+function plantStorePlugin(
+  data: string,
+  name: string,
+  manifest: string = JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name }),
+): void {
+  const root = pluginRoot(data, name);
+  mkdirSync(join(root, "skills/alpha"), { recursive: true });
+  writeFileSync(join(root, "plugin.json"), manifest);
+  writeFileSync(
+    join(root, "skills/alpha/SKILL.md"),
+    "---\nname: alpha\ndescription: Do the alpha work.\n---\n\nBody.\n",
+  );
+}
+
+/** Прогоняет доктора без systemd и отдаёт только строки про плагины. */
+async function pluginEvents(root: string): Promise<Array<[string, string]>> {
+  const events: Array<[string, string]> = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    hasSystemd: () => false,
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+  return events.filter(([, message]) => message.startsWith("plugin"));
+}
+
+test("doctor stays silent about plugins on an installation that has none", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+
+  assert.deepEqual(await pluginEvents(root), []);
+});
+
+test("doctor reports each installed plugin and what it carries", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  plantStorePlugin(data, "demo");
+  plantStorePlugin(data, "quiet");
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [
+      {
+        name: "demo",
+        source: "./demo",
+        ref: "",
+        sha: "",
+        enabled: true,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+      {
+        name: "quiet",
+        source: "./quiet",
+        ref: "",
+        sha: "",
+        enabled: false,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+    ],
+  });
+
+  assert.deepEqual(await pluginEvents(root), [
+    ["ok", "plugin demo: 1 skills"],
+    ["ok", "plugin quiet (disabled): 1 skills"],
+  ]);
+});
+
+test("doctor names a plugin missing from the store and points at sync", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [
+      {
+        name: "gone",
+        source: "./gone",
+        ref: "",
+        sha: "",
+        enabled: true,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+    ],
+  });
+
+  assert.deepEqual(await pluginEvents(root), [
+    ["bad", "plugin gone is missing from the store — run: iva plugin sync"],
+  ]);
+});
+
+test("doctor reports an unreadable manifest and a folder nobody recorded", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  plantStorePlugin(data, "broken", JSON.stringify({ name: "broken" }));
+  plantStorePlugin(data, "stray");
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [
+      {
+        name: "broken",
+        source: "./broken",
+        ref: "",
+        sha: "",
+        enabled: true,
+        trusted: false,
+        installedAt: "2026-08-17T12:00:00.000Z",
+      },
+    ],
+  });
+
+  const events = await pluginEvents(root);
+  assert.equal(events.length, 2);
+  assert.equal(events[0][0], "bad");
+  assert.match(
+    events[0][1],
+    /plugin broken is unreadable: .*\$schema must be/u,
+  );
+  assert.deepEqual(events[1], [
+    "warn",
+    "plugin folder stray is not in plugins.json — reinstall it with iva plugin add, or delete the folder",
+  ]);
 });

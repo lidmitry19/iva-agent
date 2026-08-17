@@ -1,5 +1,13 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readPlugin } from "#lib/plugin-reader.ts";
+import {
+  pluginRoot,
+  pluginsDir,
+  pluginsStateFile,
+  readPluginsState,
+  type PluginsState,
+} from "#lib/plugin-store.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
 import { readMemoryMaintenanceReport } from "../lib/memory-maintenance.ts";
@@ -78,6 +86,9 @@ export function createDoctorCommand(
     const bearerChanged = ensureAssistantBearer();
     if (bearerChanged) fixN++;
     const env = readEnv();
+    // Одна выкладка данных на весь прогон: каталог не меняется под ногами, а
+    // каждый лишний вызов — это ещё одно чтение .env ради того же ответа.
+    const dataDirectory = dataDirAbs(env);
 
     // 1. Node ≥24
     const major = parseInt(nodeVersion.split(".")[0], 10);
@@ -117,7 +128,7 @@ export function createDoctorCommand(
         const missing = required.filter((key) => !(env[key] || "").trim());
         if (
           provider.auth === "oauth" &&
-          !existsSync(join(dataDirAbs(env), "codex-auth.json"))
+          !existsSync(join(dataDirectory, "codex-auth.json"))
         )
           missing.push("OpenAI sign-in (iva login)");
         if (!missing.length) {
@@ -195,7 +206,7 @@ export function createDoctorCommand(
       warn(
         "systemd unavailable (not Linux) — skipping service and timer checks",
       );
-      return summary();
+      return finish();
     }
 
     // 4. Units installed
@@ -351,7 +362,7 @@ export function createDoctorCommand(
     let rollupStatus: unknown = null;
     try {
       rollupStatus = JSON.parse(
-        readFileSync(join(dataDirAbs(env), "rollup-status.json"), "utf8"),
+        readFileSync(join(dataDirectory, "rollup-status.json"), "utf8"),
       );
     } catch {
       // No rollup-status.json yet (fresh install, or nothing has fired yet) — not an error.
@@ -450,9 +461,76 @@ export function createDoctorCommand(
       warnN++;
     }
 
-    return summary();
+    return finish();
 
-    function summary(): void {
+    async function checkPlugins(): Promise<void> {
+      const store = pluginsDir(dataDirectory);
+      const stateFile = pluginsStateFile(dataDirectory);
+      let state: PluginsState | null = null;
+      if (existsSync(stateFile)) {
+        try {
+          state = await readPluginsState(dataDirectory);
+        } catch (error) {
+          bad(`plugins.json unusable: ${(error as Error).message}`);
+          badN++;
+          return;
+        }
+      }
+      const folders = existsSync(store)
+        ? readdirSync(store, { withFileTypes: true })
+            .filter(
+              (entry) => entry.isDirectory() && !entry.name.startsWith("."),
+            )
+            .map((entry) => entry.name)
+        : [];
+      // Плагинов нет вообще — доктору сказать нечего, и молчание здесь честнее
+      // строки «0 плагинов» в отчёте установки, которая их никогда не видела.
+      if (!state && folders.length === 0) return;
+
+      for (const entry of state?.plugins ?? []) {
+        const root = pluginRoot(dataDirectory, entry.name);
+        if (!existsSync(root)) {
+          bad(
+            `plugin ${entry.name} is missing from the store — run: iva plugin sync`,
+          );
+          badN++;
+          continue;
+        }
+        const report = await readPlugin(root);
+        if (!report.manifest) {
+          bad(
+            `plugin ${entry.name} is unreadable: ${report.diagnostics.at(-1) ?? "no reason given"}`,
+          );
+          badN++;
+          continue;
+        }
+        for (const line of report.diagnostics) {
+          warn(`plugin ${entry.name}: ${line}`);
+          warnN++;
+        }
+        const parts = [`${report.skills.length} skills`];
+        if (report.code) parts.push("code");
+        const servers = Object.keys(report.mcp).length;
+        if (servers) parts.push(`${servers} mcp`);
+        ok(
+          `plugin ${entry.name}${entry.enabled ? "" : " (disabled)"}: ${parts.join(", ")}`,
+        );
+        okN++;
+      }
+
+      for (const name of folders) {
+        if (state?.plugins.some((entry) => entry.name === name)) continue;
+        warn(
+          `plugin folder ${name} is not in plugins.json — reinstall it with iva plugin add, or delete the folder`,
+        );
+        warnN++;
+      }
+    }
+
+    // Plugins (ADR-0009) идут последними и в обоих выходах доктора: манифесты и
+    // plugins.json. Сборка кода плагина и юниты MCP proxy добавятся вместе с ними.
+    async function finish(): Promise<void> {
+      await checkPlugins();
       log();
       log(
         `${C.b}Summary:${C.x} ${C.g}${okN} ok${C.x} · ${C.y}${warnN} warn${C.x} · ${C.c}${fixN} fixed${C.x} · ${C.r}${badN} fail${C.x}`,
