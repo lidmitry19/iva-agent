@@ -9,7 +9,9 @@
 // Что проверяется на живом eve:
 //   • `eve extension build` собирает `sh.iva/` внутри версии;
 //   • сгенерированный mount резолвится И у discovery, И у бандлера;
-//   • тул плагина доезжает до агента под префиксом namespace (`demo__x`).
+//   • тул плагина доезжает до агента под префиксом namespace (`demo__x`);
+//   • сгенерированные connection-файлы MCP-серверов плагина eve действительно
+//     регистрирует под теми именами, которые мы им дали (ADR-0009).
 //
 // Медленный (реальная сборка nitro, единицы секунд) и пропускается там, где eve нет:
 // `iva` обязан ставиться и без node_modules, а тесты — идти на такой машине тоже.
@@ -93,6 +95,21 @@ function plantPlugin(data: string, name: string): void {
   );
   write(
     data,
+    `${root}/mcp.json`,
+    `${JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: {
+        viewer: { type: "stdio", command: "node", args: ["serve.mjs"] },
+        api: {
+          type: "streamable-http",
+          url: "https://api.test/mcp",
+          headers: { Authorization: "Bearer ${API_KEY}" },
+        },
+      },
+    })}\n`,
+  );
+  write(
+    data,
     `${root}/sh.iva/package.json`,
     `${JSON.stringify(
       {
@@ -154,7 +171,9 @@ function plantPlugin(data: string, name: string): void {
           sha: "",
           digest: "",
           enabled: true,
-          trusted: false,
+          // Доверен: именно доверие включает connection-файлы (ADR-0009).
+          trusted: true,
+          mcp: { viewer: { port: 8730 } },
           installedAt: "2026-08-17T00:00:00.000Z",
         },
       ],
@@ -212,6 +231,14 @@ test(
     // Тул плагина доехал до агента под префиксом namespace.
     const summary = readFileSync(join(dir, ".eve/agent-summary.json"), "utf8");
     assert.match(summary, /demo__x/u);
+    // И connection-файлы: eve приняла их имена и собрала их содержимое. Форма
+    // `<ns>__<server>` здесь бы не прошла — eve не принимает `_` в имени connection.
+    assert.match(summary, /mcp-demo--viewer/u);
+    assert.match(summary, /mcp-demo--api/u);
+    assert.ok(
+      existsSync(join(dir, "agent/connections/mcp-demo--viewer.ts")),
+      "the proxied server has a connection file",
+    );
 
     // Пакет собран, и у него есть `main` — без него бандлер не резолвит относительный
     // спецификатор mount'а, хотя discovery резолвит.
