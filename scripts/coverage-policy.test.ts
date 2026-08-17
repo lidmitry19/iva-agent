@@ -57,7 +57,7 @@ const EXPECTED_INVENTORY_SHA256 =
 // report all four at 100% lines. The shared context-window package implementation also
 // reports 100% lines, so moving the resolver does not add a blind spot; the snapshot stays 26.
 // The rich-message reader `agent/lib/telegram-rich-message.ts` came last. Its own test
-// reports it at 99.20% lines, 92.31% branches and 100% functions, so the blind spot
+// reports it at 99.53% lines, 92.69% branches and 100% functions, so the blind spot
 // stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [

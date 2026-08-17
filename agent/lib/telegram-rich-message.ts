@@ -119,13 +119,12 @@ function escapeUrl(value: string): string {
   let out = "";
   for (const char of value) {
     const code = char.codePointAt(0) ?? 0;
-    if (char === "\\" || char === "(" || char === ")") {
-      out += `\\${char}`;
-    } else if (code < 0x20 || code === 0x7f || /\s/u.test(char)) {
-      out += encodeURIComponent(char);
-    } else {
-      out += char;
-    }
+    out +=
+      char === "\\" || char === "(" || char === ")"
+        ? `\\${char}`
+        : code < 0x20 || code === 0x7f || /\s/u.test(char)
+          ? encodeURIComponent(char)
+          : char;
   }
   return out;
 }
@@ -148,9 +147,45 @@ function longestBacktickRun(value: string): number {
   return best;
 }
 
-// Ранг размера фото: сначала площадь, потом file_size. Нечисло и бесконечность
-// становятся -1, поэтому мусорный размер никогда не выигрывает у настоящего.
-function photoRank(size: Record<string, unknown>): readonly [number, number] {
+// Самый крупный размер фото. Порядок полный — площадь, file_size, file_id, — поэтому
+// выбор не зависит от того, в каком порядке Telegram прислал размеры, а нечисло и
+// бесконечность становятся -1 и никогда не выигрывают у настоящего размера.
+function largestPhoto(value: unknown): TelegramRawMedia | null {
+  if (!Array.isArray(value)) return null;
+  let best: Record<string, unknown> | null = null;
+  let bestId = "";
+  let bestRank: readonly [number, number] = [-1, -1];
+  for (const size of value as readonly unknown[]) {
+    if (!isRecord(size)) continue;
+    const fileId = field(size, "file_id");
+    if (typeof fileId !== "string" || fileId === "") continue;
+    const rank = measure(size);
+    if (
+      best !== null &&
+      !(
+        rank[0] > bestRank[0] ||
+        (rank[0] === bestRank[0] &&
+          (rank[1] > bestRank[1] ||
+            (rank[1] === bestRank[1] && fileId < bestId)))
+      )
+    ) {
+      continue;
+    }
+    best = size;
+    bestId = fileId;
+    bestRank = rank;
+  }
+  if (best === null) return null;
+  const uniqueId = field(best, "file_unique_id");
+  return {
+    fileId: bestId,
+    ...(typeof uniqueId === "string" ? { fileUniqueId: uniqueId } : {}),
+    tag: "photo",
+    transcribe: false,
+  };
+}
+
+function measure(size: Record<string, unknown>): readonly [number, number] {
   const width = field(size, "width");
   const height = field(size, "height");
   const area =
@@ -164,64 +199,15 @@ function photoRank(size: Record<string, unknown>): readonly [number, number] {
   ];
 }
 
-// Самый крупный размер фото. Порядок полный — площадь, file_size, file_id, — поэтому
-// выбор не зависит от того, в каком порядке Telegram прислал размеры.
-function largestPhoto(value: unknown): TelegramRawMedia | null {
-  if (!Array.isArray(value)) return null;
-  let bestId = "";
-  let bestUniqueId: unknown;
-  let bestArea = -1;
-  let bestBytes = -1;
-  let found = false;
-  for (const size of value as readonly unknown[]) {
-    if (!isRecord(size)) continue;
-    const fileId = field(size, "file_id");
-    if (typeof fileId !== "string" || fileId === "") continue;
-    const [area, bytes] = photoRank(size);
-    const better =
-      !found ||
-      area > bestArea ||
-      (area === bestArea &&
-        (bytes > bestBytes || (bytes === bestBytes && fileId < bestId)));
-    if (!better) continue;
-    found = true;
-    bestId = fileId;
-    bestUniqueId = field(size, "file_unique_id");
-    bestArea = area;
-    bestBytes = bytes;
-  }
-  if (!found) return null;
-  return {
-    fileId: bestId,
-    ...(typeof bestUniqueId === "string" ? { fileUniqueId: bestUniqueId } : {}),
-    tag: "photo",
-    transcribe: false,
-  };
-}
-
 // Медиа ищется по полям, а не по типу блока: новый тип из будущей версии Bot API
-// всё равно отдаст свой файл. Порядок такой же, как у обычного сообщения:
-// фото, затем voice_note, затем остальные ключи из telegram-parts.
+// всё равно отдаст свой файл. Порядок такой же, как у обычного сообщения — фото,
+// затем ключи из telegram-parts, куда voice_note подставляется под именем voice.
 function blockMedia(node: Record<string, unknown>): TelegramRawMedia | null {
   const photo = largestPhoto(field(node, "photo"));
   if (photo !== null) return photo;
-  const voice = field(node, "voice_note");
-  if (isRecord(voice)) {
-    const fileId = field(voice, "file_id");
-    if (typeof fileId === "string" && fileId !== "") {
-      const uniqueId = field(voice, "file_unique_id");
-      const mimeType = field(voice, "mime_type");
-      return {
-        fileId,
-        ...(typeof uniqueId === "string" ? { fileUniqueId: uniqueId } : {}),
-        tag: "voice",
-        transcribe: true,
-        ...(typeof mimeType === "string" ? { mimeType } : {}),
-      };
-    }
-  }
   try {
-    return mediaFromRaw(node);
+    const voice = field(node, "voice_note");
+    return mediaFromRaw(isRecord(voice) ? { ...node, voice } : node);
   } catch {
     return null;
   }
@@ -266,16 +252,10 @@ const cellWrap: Wrap = (inner) => {
 };
 
 const codeWrap: Wrap = (inner) => {
-  if (inner === "") return "";
-  if (inner.includes("\n")) return inner;
+  // Перевод строки в короткий забор не поместится, поэтому текст остаётся как есть.
+  if (inner === "" || inner.includes("\n")) return inner;
   const fence = "`".repeat(longestBacktickRun(inner) + 1);
-  const pad =
-    inner.startsWith("`") ||
-    inner.endsWith("`") ||
-    inner.startsWith(" ") ||
-    inner.endsWith(" ")
-      ? " "
-      : "";
+  const pad = /^[` ]|[` ]$/u.test(inner) ? " " : "";
   return `${fence}${pad}${inner}${pad}${fence}`;
 };
 
@@ -330,6 +310,14 @@ function mentionWrap(handle: string): Wrap {
   return (inner) => (inner === "" ? handle : `${inner} (${handle})`);
 }
 
+// Разметка одного текста внутри строки: жирный, курсив, зачёркнутый. Остальные
+// подтипы RichText разметки в markdown не имеют и печатаются как есть.
+const INLINE_MARKS: Record<string, string> = {
+  bold: "**",
+  italic: "*",
+  strikethrough: "~~",
+};
+
 export function readRichMessage(value: unknown): RichMessageReading {
   const media: TelegramRawMedia[] = [];
   const frames: Frame[] = [
@@ -358,14 +346,10 @@ export function readRichMessage(value: unknown): RichMessageReading {
     append(value);
   }
 
-  function room(): number {
-    return Math.max(0, MAX_RICH_MESSAGE_NODES - nodes);
-  }
-
   // Список детей режется до постановки в стек: так потолок ограничивает и память,
   // а не только работу. Режется хвост, поэтому начало текста всегда сохраняется.
   function take(items: readonly unknown[]): readonly unknown[] {
-    const limit = room();
+    const limit = Math.max(0, MAX_RICH_MESSAGE_NODES - nodes);
     if (items.length <= limit) return items;
     truncated = true;
     return items.slice(0, limit);
@@ -383,6 +367,15 @@ export function readRichMessage(value: unknown): RichMessageReading {
     return { kind: "text", node, label };
   }
 
+  /** Один текст как отдельный кусок блока. */
+  function lineSeq(node: unknown, wrap: Wrap | null = null): Task[] {
+    return [
+      wrap === null ? OPEN_LINE : group(wrap, ""),
+      textTask(node, false),
+      CLOSE,
+    ];
+  }
+
   function wrapped(open: Task, node: unknown, label: boolean): void {
     run([open, textTask(node, label), CLOSE]);
   }
@@ -391,17 +384,38 @@ export function readRichMessage(value: unknown): RichMessageReading {
   // строковый `type`, у подписи его нет. Обе формы читаются одним местом.
   function captionSeq(value: unknown): Task[] {
     if (value === undefined || value === null) return [];
-    if (isRecord(value) && typeof field(value, "type") !== "string") {
-      const seq: Task[] = [];
-      const body = field(value, "text");
-      if (body !== undefined) seq.push(OPEN_LINE, textTask(body, false), CLOSE);
-      const credit = field(value, "credit");
-      if (credit !== undefined) {
-        seq.push(OPEN_LINE, textTask(credit, false), CLOSE);
-      }
-      return seq;
+    if (!isRecord(value) || typeof field(value, "type") === "string") {
+      return lineSeq(value);
     }
-    return [OPEN_LINE, textTask(value, false), CLOSE];
+    const body = field(value, "text");
+    const credit = field(value, "credit");
+    return [
+      ...(body === undefined ? [] : lineSeq(body)),
+      ...(credit === undefined ? [] : lineSeq(credit)),
+    ];
+  }
+
+  // Общая форма блока: текст, summary, формула, вложенные блоки, credit, подпись.
+  // Так читаются и paragraph, footer, thinking, math, anchor, details, collage,
+  // slideshow, map и все медиа-блоки, и любой тип, которого мы ещё не знаем: новый
+  // тип из будущей версии Bot API теряет разметку, но не содержание.
+  function blockSeq(node: Record<string, unknown>): Task[] {
+    const seq: Task[] = [];
+    const body = field(node, "text");
+    if (body !== undefined) seq.push(...lineSeq(body));
+    const summary = field(node, "summary");
+    if (summary !== undefined) seq.push(...lineSeq(summary, summaryWrap));
+    const expression = field(node, "expression");
+    if (typeof expression === "string") {
+      seq.push({ kind: "emit", value: expression });
+    }
+    for (const child of take(asArray(field(node, "blocks")))) {
+      seq.push(blockTask(child));
+    }
+    const credit = field(node, "credit");
+    if (credit !== undefined) seq.push(...lineSeq(credit));
+    seq.push(...captionSeq(field(node, "caption")));
+    return seq;
   }
 
   function listSeq(node: Record<string, unknown>): Task[] {
@@ -418,11 +432,10 @@ export function readRichMessage(value: unknown): RichMessageReading {
       chars += label.length;
       seq.push(group(itemWrap(marker, label), BLOCK_SEP));
       if (record === null) seq.push(textTask(item, false));
-      else {
+      else
         for (const child of take(asArray(field(record, "blocks")))) {
           seq.push(blockTask(child));
         }
-      }
       seq.push(CLOSE);
     }
     seq.push(CLOSE);
@@ -451,228 +464,93 @@ export function readRichMessage(value: unknown): RichMessageReading {
     return seq;
   }
 
-  // Незнакомый тип блока: забираем всё, что несёт текст, и вложенные блоки. Так
-  // новый тип из будущей версии Bot API теряет разметку, но не содержание.
-  function unknownBlockSeq(node: Record<string, unknown>): Task[] {
-    const seq: Task[] = [];
-    const body = field(node, "text");
-    if (body !== undefined) seq.push(OPEN_LINE, textTask(body, false), CLOSE);
-    const summary = field(node, "summary");
-    if (summary !== undefined) {
-      seq.push(OPEN_LINE, textTask(summary, false), CLOSE);
-    }
-    const expression = field(node, "expression");
-    if (typeof expression === "string") {
-      seq.push({ kind: "emit", value: expression });
-    }
-    for (const child of take(asArray(field(node, "blocks")))) {
-      seq.push(blockTask(child));
-    }
-    const credit = field(node, "credit");
-    if (credit !== undefined) {
-      seq.push(OPEN_LINE, textTask(credit, false), CLOSE);
-    }
-    seq.push(...captionSeq(field(node, "caption")));
-    return seq;
-  }
-
   function handleBlock(node: unknown): void {
-    if (typeof node === "string") {
-      run([OPEN_LINE, textTask(node, false), CLOSE]);
-      return;
-    }
+    if (typeof node === "string") return run(lineSeq(node));
     if (!isRecord(node)) return;
     const found = blockMedia(node);
     if (found !== null) media.push(found);
     switch (field(node, "type")) {
-      case "paragraph":
-      case "footer":
-      case "thinking":
-        run([OPEN_LINE, textTask(field(node, "text"), false), CLOSE]);
-        return;
       case "heading":
-        wrapped(
-          group(headingWrap(field(node, "size")), ""),
-          field(node, "text"),
-          false,
+        return run(
+          lineSeq(field(node, "text"), headingWrap(field(node, "size"))),
         );
-        return;
       case "pre":
-        wrapped(
-          group(preWrap(field(node, "language")), ""),
-          field(node, "text"),
-          false,
+        return run(
+          lineSeq(field(node, "text"), preWrap(field(node, "language"))),
         );
-        return;
       case "divider":
-        emit("---");
-        return;
-      case "mathematical_expression":
-        emit(asText(field(node, "expression")));
-        return;
-      case "anchor":
-        return;
+        return emit("---");
       case "list":
-        run(listSeq(node));
-        return;
-      case "blockquote": {
-        const seq: Task[] = [group(quoteWrap, BLOCK_SEP)];
-        for (const child of take(asArray(field(node, "blocks")))) {
-          seq.push(blockTask(child));
-        }
-        const credit = field(node, "credit");
-        if (credit !== undefined) {
-          seq.push(OPEN_LINE, textTask(credit, false), CLOSE);
-        }
-        seq.push(CLOSE);
-        run(seq);
-        return;
-      }
-      case "pullquote": {
-        const seq: Task[] = [
-          group(quoteWrap, BLOCK_SEP),
-          OPEN_LINE,
-          textTask(field(node, "text"), false),
-          CLOSE,
-        ];
-        const credit = field(node, "credit");
-        if (credit !== undefined) {
-          seq.push(OPEN_LINE, textTask(credit, false), CLOSE);
-        }
-        seq.push(CLOSE);
-        run(seq);
-        return;
-      }
-      case "collage":
-      case "slideshow": {
-        const seq: Task[] = [];
-        for (const child of take(asArray(field(node, "blocks")))) {
-          seq.push(blockTask(child));
-        }
-        seq.push(...captionSeq(field(node, "caption")));
-        run(seq);
-        return;
-      }
+        return run(listSeq(node));
       case "table":
-        run(tableSeq(node));
-        return;
-      case "details": {
-        const seq: Task[] = [
-          group(summaryWrap, ""),
-          textTask(field(node, "summary"), false),
-          CLOSE,
-        ];
-        for (const child of take(asArray(field(node, "blocks")))) {
-          seq.push(blockTask(child));
-        }
-        run(seq);
-        return;
-      }
-      case "map":
-      case "animation":
-      case "audio":
-      case "photo":
-      case "video":
-      case "voice_note":
-        run(captionSeq(field(node, "caption")));
-        return;
+        return run(tableSeq(node));
+      case "blockquote":
+      case "pullquote":
+        return run([group(quoteWrap, BLOCK_SEP), ...blockSeq(node), CLOSE]);
       default:
-        run(unknownBlockSeq(node));
+        return run(blockSeq(node));
     }
   }
 
   function handleText(node: unknown, label: boolean): void {
-    if (typeof node === "string") {
-      emit(label ? escapeLabel(node) : node);
-      return;
-    }
+    if (typeof node === "string") return emit(label ? escapeLabel(node) : node);
     if (Array.isArray(node)) {
       const seq: Task[] = [];
       for (const child of take(node as readonly unknown[])) {
         seq.push(textTask(child, label));
       }
-      run(seq);
-      return;
+      return run(seq);
     }
     if (!isRecord(node)) return;
-    switch (field(node, "type")) {
-      case "bold":
-        wrapped(markWrap("**"), field(node, "text"), label);
-        return;
-      case "italic":
-        wrapped(markWrap("*"), field(node, "text"), label);
-        return;
-      case "strikethrough":
-        wrapped(markWrap("~~"), field(node, "text"), label);
-        return;
-      case "code":
-        wrapped(group(codeWrap, ""), field(node, "text"), label);
-        return;
-      case "custom_emoji": {
-        const alternative = field(node, "alternative_text");
-        if (typeof alternative === "string") {
-          emit(label ? escapeLabel(alternative) : alternative);
-        }
-        return;
+    const type = field(node, "type");
+    if (type === "code") {
+      return wrapped(group(codeWrap, ""), field(node, "text"), label);
+    }
+    if (type === "url") {
+      const url = field(node, "url");
+      if (typeof url !== "string" || url === "") {
+        return run([textTask(field(node, "text"), label)]);
       }
-      case "mathematical_expression": {
-        const expression = field(node, "expression");
-        if (typeof expression === "string") {
-          emit(label ? escapeLabel(expression) : expression);
-        }
-        return;
-      }
-      case "anchor":
-        return;
-      case "url": {
-        const url = field(node, "url");
-        if (typeof url !== "string" || url === "") {
-          run([textTask(field(node, "text"), label)]);
-          return;
-        }
-        const live = !label && isWebUrl(url);
-        chars += url.length;
-        wrapped(
-          group(linkWrap(url, live), "", ` (${escapeLabel(url)})`),
-          field(node, "text"),
-          live || label,
-        );
-        return;
-      }
-      case "mention": {
-        const username = asText(field(node, "username"));
-        if (username === "") {
-          run([textTask(field(node, "text"), label)]);
-          return;
-        }
+      const live = !label && isWebUrl(url);
+      chars += url.length;
+      return wrapped(
+        group(linkWrap(url, live), "", ` (${escapeLabel(url)})`),
+        field(node, "text"),
+        live || label,
+      );
+    }
+    if (type === "mention") {
+      const username = asText(field(node, "username"));
+      if (username !== "") {
         const handle = escapeLabel(
           username.startsWith("@") ? username : `@${username}`,
         );
         chars += handle.length;
-        wrapped(
+        return wrapped(
           group(mentionWrap(handle), "", ` (${handle})`),
           field(node, "text"),
           label,
         );
-        return;
-      }
-      default: {
-        const body = field(node, "text");
-        if (body !== undefined) {
-          run([textTask(body, label)]);
-          return;
-        }
-        const alternative = field(node, "alternative_text");
-        if (typeof alternative === "string") {
-          emit(label ? escapeLabel(alternative) : alternative);
-          return;
-        }
-        const expression = field(node, "expression");
-        if (typeof expression === "string") {
-          emit(label ? escapeLabel(expression) : expression);
-        }
       }
     }
+    const mark = typeof type === "string" ? INLINE_MARKS[type] : undefined;
+    if (mark !== undefined) {
+      return wrapped(markWrap(mark), field(node, "text"), label);
+    }
+    // Всё остальное, включая незнакомые типы: берём текст, каким бы полем он ни
+    // пришёл. `text` у двадцати подтипов, `alternative_text` у custom_emoji,
+    // `expression` у формулы; у anchor нет ничего, и это правильно.
+    const body = field(node, "text");
+    if (body !== undefined) return run([textTask(body, label)]);
+    const alternative = field(node, "alternative_text");
+    const expression = field(node, "expression");
+    const leaf =
+      typeof alternative === "string"
+        ? alternative
+        : typeof expression === "string"
+          ? expression
+          : "";
+    emit(label ? escapeLabel(leaf) : leaf);
   }
 
   function closeFrame(): void {
