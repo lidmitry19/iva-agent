@@ -159,18 +159,14 @@ function largestPhoto(value: unknown): TelegramRawMedia | null {
     if (!isRecord(size)) continue;
     const fileId = field(size, "file_id");
     if (typeof fileId !== "string" || fileId === "") continue;
-    const rank = measure(size);
-    if (
-      best !== null &&
-      !(
-        rank[0] > bestRank[0] ||
-        (rank[0] === bestRank[0] &&
-          (rank[1] > bestRank[1] ||
-            (rank[1] === bestRank[1] && fileId < bestId)))
-      )
-    ) {
-      continue;
-    }
+    const rank = photoRank(size);
+    const better =
+      best === null ||
+      rank[0] > bestRank[0] ||
+      (rank[0] === bestRank[0] &&
+        (rank[1] > bestRank[1] ||
+          (rank[1] === bestRank[1] && fileId < bestId)));
+    if (!better) continue;
     best = size;
     bestId = fileId;
     bestRank = rank;
@@ -185,7 +181,7 @@ function largestPhoto(value: unknown): TelegramRawMedia | null {
   };
 }
 
-function measure(size: Record<string, unknown>): readonly [number, number] {
+function photoRank(size: Record<string, unknown>): readonly [number, number] {
   const width = field(size, "width");
   const height = field(size, "height");
   const area =
