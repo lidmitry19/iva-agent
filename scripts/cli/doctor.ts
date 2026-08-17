@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
-import { leftoverPluginDirs } from "./plugin-cli-context.ts";
+import { leftoverPluginDirs, pluginReadProblem } from "./plugin-cli-context.ts";
 import {
   installedPluginUnits,
   mcpUnitName,
@@ -568,7 +568,7 @@ export function createDoctorCommand(
         const report = await readPlugin(root);
         if (!report.manifest) {
           bad(
-            `plugin ${entry.name} is unreadable: ${report.diagnostics.at(-1) ?? "no reason given"}`,
+            `plugin ${entry.name} is unreadable: ${pluginReadProblem(report)}`,
           );
           badN++;
           continue;

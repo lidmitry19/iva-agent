@@ -22,7 +22,10 @@ import {
   type PluginUnitSource,
 } from "../lib/plugin-units.ts";
 import { systemdExecArgument } from "../lib/systemd-control.ts";
-import type { PluginCliContext } from "./plugin-cli-context.ts";
+import {
+  pluginReadProblem,
+  type PluginCliContext,
+} from "./plugin-cli-context.ts";
 
 export function createPluginTrustCommands(context: PluginCliContext) {
   const { runtime, core, args, translate, locked, buildCode, mustFind } =
@@ -284,7 +287,7 @@ export function createPluginTrustCommands(context: PluginCliContext) {
       const read = await readPlugin(pluginRoot(data, found.name));
       if (!read.manifest && trusted)
         throw new Error(
-          `${found.name} is not readable: ${read.diagnostics.at(-1) ?? "no reason given"}`,
+          `${found.name} is not readable: ${pluginReadProblem(read)}`,
         );
       if (found.trusted === trusted) {
         // Состояние уже такое: юниты всё равно сверяем — их могли снести руками.

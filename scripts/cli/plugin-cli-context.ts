@@ -57,6 +57,15 @@ export function leftoverPluginDirs(pluginsDirectory: string): string[] {
     .sort();
 }
 
+/**
+ * Почему плагин не годится — последней строкой диагностики: её и пишет читатель манифеста
+ * (agent/lib/plugin-reader.ts), когда отказывается собрать отчёт. Одна фраза на все три
+ * места, где это спрашивают: `trust`, `sync` и `iva doctor`.
+ */
+export function pluginReadProblem(report: PluginReport): string {
+  return report.diagnostics.at(-1) ?? "not a usable plugin folder";
+}
+
 export type PluginCliOptions = {
   readonly runtime: CliRuntime;
   /** Всё из authored tree приходит уже загруженным: команда стартует и без него. */

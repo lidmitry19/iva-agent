@@ -30,7 +30,11 @@ import {
   parsePluginSource,
   type PluginSource,
 } from "../lib/plugin-source.ts";
-import { STAGING_PREFIX, type PluginCliContext } from "./plugin-cli-context.ts";
+import {
+  pluginReadProblem,
+  STAGING_PREFIX,
+  type PluginCliContext,
+} from "./plugin-cli-context.ts";
 import type {
   createPluginMarketplaceCommands,
   Provenance,
@@ -714,9 +718,7 @@ export function createPluginInstallCommands(
         if (findPlugin(next, name)) continue;
         const report = await readPlugin(join(directory, name));
         if (!report.manifest) {
-          bad(
-            `${name}: ${report.diagnostics.at(-1) ?? "not a usable plugin folder"}`,
-          );
+          bad(`${name}: ${pluginReadProblem(report)}`);
           continue;
         }
         if (report.manifest.name !== name) {
