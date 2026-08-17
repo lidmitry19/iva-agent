@@ -64,7 +64,9 @@ extension build` нашим eve → сгенерированный mount `agent/
 (ADR-0007). Один плагин не валит агента (в отличие от fail-loud DSH).
 
 **MCP — оба транспорта.** `streamable-http`/`sse` → сгенерированный
-`agent/connections/<name>__<server>.ts` с `defineMcpClientConnection`. `stdio` →
+`agent/connections/mcp-<name>--<server>.ts` с `defineMcpClientConnection` (имя файла
+складывается в алфавит, который eve принимает под connection — `[a-z][a-z0-9-]`, без
+подчёркиваний и точек; файл с другим именем eve не регистрирует вовсе). `stdio` →
 systemd-юнит `iva-mcp-<name>-<server>.service` с **MCP proxy** — своим сервисом на
 `@modelcontextprotocol/sdk` (`services/mcp-proxy/`), loopback-порт из `plugins.json` +
 bearer, `Restart=on-failure`, тот же connection-файл. Env сервера — только из
@@ -73,11 +75,16 @@ bearer, `Restart=on-failure`, тот же connection-файл. Env сервер�
 служит долгоживущим сервисам плагина, объявленным в `sh.iva/`.
 
 **Только CLI, только владелец.** `iva plugin add|remove|update|enable|disable|
-trust|list [--available]|sync`, `iva plugin marketplace add|remove|list`. Тула модели
+trust|untrust|list [--available]|sync`, `iva plugin marketplace add|remove|list`. Тула модели
 для установки нет: плагин — код в процессе с токенами инсталляции, инъекция не должна
 его ставить. При первом `add` печатается принятый риск из ADR-0008; при `mcp.json` со
 `stdio` — команды серверов и запрос доверия. `iva doctor` проверяет манифесты,
 `plugins.json`, сборку, юниты MCP proxy.
+
+**`sh.iva/` — двух видов.** eve Extension — это `sh.iva/package.json` (собирается в
+версию); сервисы — папки `sh.iva/services/<svc>/` с `service.json` (поднимаются юнитом
+прямо из Custom layer и версию не пересобирают никогда). Ключ `extensions["sh.iva"]`
+обязателен для обоих: без него папка игнорируется.
 
 **Namespace — `sh.iva`.** Ключ в `extensions` и папка `sh.iva/` в корне плагина.
 Домен iva.sh проекту не принадлежит; спека требует reverse-domain как SHOULD и не
@@ -105,6 +112,11 @@ trust|list [--available]|sync`, `iva plugin marketplace add|remove|list`. Тул
 Плагин с кодом работает в процессе агента и видит его env (ADR-0008). Рельсы это не
 меняют: доверие — решение владельца при `add`. MCP-серверы получают меньше: только
 свой env, `PLUGIN_ROOT` и `PLUGIN_DATA`.
+
+Изоляция здесь одна и узкая: от env агента. Друг от друга и от каталога данных плагины
+не изолированы — все юниты идут от того же пользователя, что и Ива, а токен прокси
+лежит в `PLUGIN_DATA`, то есть доступен любому процессу этого пользователя. Песочница
+за это не отвечает (ADR-0005 ступень 2 отложена владельцем).
 
 Статус: решение принято 17.08.2026, реализация — волна «плагины», первый плагин —
 `trace` (ADR-0010).

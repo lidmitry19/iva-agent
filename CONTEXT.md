@@ -97,6 +97,13 @@ _Avoid_: реестр, registry, стор, каталог
 streamable-http на loopback с bearer. Один сервис на один сервер.
 _Avoid_: мост, bridge (это Telegram-поллер), gateway
 
+**Plugin service (сервис плагина)**:
+Долгоживущий процесс плагина, объявленный в `sh.iva/services/<svc>/service.json`:
+Ива поднимает его юнитом `iva-plugin-<name>-<svc>.service` и сообщает выданный порт
+через `IVA_SERVICE_PORT`. Своего протокола Ива ему не задаёт — этим он и отличается
+от MCP proxy.
+_Avoid_: демон, воркер, sidecar
+
 **Trace (трейс)**:
 Журнал событий хода в `data/trace/`: eve-события через хук плюс швы Ивы
 (Bridge, Inbound pipeline, Gate, Outbox). Пишет ядро; читают вьюер плагина
