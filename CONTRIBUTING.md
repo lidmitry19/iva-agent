@@ -63,10 +63,9 @@ npm test
 Run the rest when your change reaches them: `npm run build`, the coverage floors
 (`npm run test:coverage` — lines 75, branches 77, functions 71; they may rise, they do
 not fall), `npm run replica` (installs Iva from scratch against a mock provider),
-and the Python suites. `scripts/autograph/tests/test_autograph.py` and
-`agent/skills/security-defense/scripts/test_security.py` are standalone: plain `python3`
-from any directory. The userbot suites import their neighbouring modules, so they run
-from `services/telegram-userbot/` — `test_health.py` and `test_session_path.py` need
+and the Python suites. `scripts/autograph/tests/test_autograph.py` is standalone: plain
+`python3` from any directory. The userbot suites import their neighbouring modules, so
+they run from `services/telegram-userbot/` — `test_health.py` and `test_session_path.py` need
 nothing installed, `test_guardrails.py` imports `telethon` and needs a virtualenv built
 from `requirements.lock`.
 

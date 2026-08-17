@@ -100,7 +100,14 @@ export function noticeSender(
 export async function sendThroughOutbox(
   message: string,
   transport: OutboxTransport,
-  { limit = 4096 }: { limit?: number } = {},
+  // alwaysRich — путь, где rich выбран вызывающим, а не разметкой: `iva post` шлёт
+  // пост целиком одним сообщением, и в нём может не быть ни одной конструкции, которую
+  // видит needsRichMessage (пост из абзацев и картинок). Решать за такую отправку по
+  // тексту нельзя: HTML-путь картинки не рендерит вовсе.
+  {
+    limit = 4096,
+    alwaysRich = false,
+  }: { limit?: number; alwaysRich?: boolean } = {},
 ): Promise<OutboxResult> {
   const text = redactNotice(message);
 
@@ -113,7 +120,7 @@ export async function sendThroughOutbox(
 
   // Rich-путь рендерит нативно то, чего parse_mode=HTML не умеет. Любой отказ —
   // просто HTML-путь ниже, то есть худший случай равен обычному поведению.
-  if (transport.sendRich && needsRichMessage(text)) {
+  if (transport.sendRich && (alwaysRich || needsRichMessage(text))) {
     const rich = await transport.sendRich(text);
     if (rich.ok) {
       result.delivered = 1;

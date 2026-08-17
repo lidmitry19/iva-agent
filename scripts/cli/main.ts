@@ -3,6 +3,7 @@ import { createConfigCommand } from "./config.ts";
 import { createDoctorCommand } from "./doctor.ts";
 import { createNotifyCommand } from "./notify.ts";
 import { createPluginCommands } from "./plugin.ts";
+import { createPostCommand } from "./post.ts";
 import { createRemindCommand } from "./remind.ts";
 import { createCliRuntime } from "./runtime.ts";
 import { createServiceCommands } from "./services.ts";
@@ -59,6 +60,7 @@ export function createCliMain(root: string) {
   const plugin = createPluginCommands(runtime);
   const cmdNotify = createNotifyCommand(runtime);
   const cmdRemind = createRemindCommand(runtime);
+  const cmdPost = createPostCommand(runtime);
   const legacyUpdate = createUpdateCommand({
     runtime,
     systemdLifecycle,
@@ -96,6 +98,7 @@ ${C.b}Commands:${C.x}
   ${C.c}iva usage${C.x} [win]      token usage (last|today|week|month|by-model|by-source|tail)
   ${C.c}iva notify${C.x} <text>    send one Telegram message verbatim
   ${C.c}iva remind${C.x} <text>    let the agent judge one Reminder, then send it to Telegram
+  ${C.c}iva post${C.x} --md-file <p>  rich Telegram post to the digest chat or an allowlisted --chat
   ${C.c}iva userbot${C.x} [creds|setup|status|diagnose --json|off]  personal-account userbot proxy
   ${C.c}iva logs${C.x} [poll]     agent logs (or the Telegram bridge) -f
   ${C.c}iva uninstall${C.x}       remove units and the command (--purge — delete code+vault)
@@ -119,6 +122,7 @@ ${C.b}Commands:${C.x}
     usage: account.cmdUsage,
     notify: cmdNotify,
     remind: cmdRemind,
+    post: cmdPost,
     start: services.cmdStart,
     stop: services.cmdStop,
     logs: services.cmdLogs,

@@ -45,6 +45,13 @@ export type TelegramSendOptions = {
   readonly trace?: TraceScope;
 };
 
+// Rich-пост (`iva post`): те же гейт и фолбэки, плюс два поля Bot API, которых у
+// ночного отчёта нет — беззвучная отправка и тема форума.
+export type TelegramRichOptions = Omit<TelegramSendOptions, "caption"> & {
+  readonly silent?: boolean;
+  readonly threadId?: string;
+};
+
 const MAX_ATTEMPTS = 3;
 const MAX_RETRY_MS = 30_000;
 
@@ -84,12 +91,13 @@ function telegramRetryAfterMs(text: string): number | undefined {
 
 async function post(
   bot: string,
+  method: string,
   body: TelegramRequest,
   fetchImpl: FetchImpl,
 ): Promise<PostAck> {
   try {
     const res = await fetchImpl(
-      `https://api.telegram.org/bot${bot}/sendMessage`,
+      `https://api.telegram.org/bot${bot}/${method}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -120,17 +128,66 @@ async function post(
 
 async function postWithTransientRetry(
   bot: string,
+  method: string,
   body: TelegramRequest,
   fetchImpl: FetchImpl,
   sleep: Sleep,
 ): Promise<PostAck> {
   for (let attempt = 1; ; attempt++) {
-    const ack = await post(bot, body, fetchImpl);
+    const ack = await post(bot, method, body, fetchImpl);
     if (ack.ok || !ack.retryable || attempt >= MAX_ATTEMPTS) return ack;
     const retryMs =
       ack.retryAfterMs ?? Math.min(MAX_RETRY_MS, 1000 * 2 ** (attempt - 1));
     await sleep(retryMs);
   }
+}
+
+// Один вызов Bot API для всех методов шва: sendMessage у HTML-пути, sendRichMessage
+// у rich-поста. Повторы транзиентных отказов включает вызывающий.
+type SendPost = (method: string, body: TelegramRequest) => Promise<PostAck>;
+
+function poster(
+  bot: string,
+  retryTransient: boolean,
+  fetchImpl: FetchImpl,
+  sleep: Sleep,
+): SendPost {
+  return retryTransient
+    ? (method, body) =>
+        postWithTransientRetry(bot, method, body, fetchImpl, sleep)
+    : (method, body) => post(bot, method, body, fetchImpl);
+}
+
+// Ночной отчёт — цельный документ, а не диалог: если Telegram отказал не по разметке
+// (flood control, 5xx, бот заблокирован), остаток слать некуда и незачем — добитый
+// 429 продлевает throttle на весь токен, общий с интерактивным каналом. Помечаем
+// такой отказ как stop, и шов бросает хвост — ровно как cron-путь делал до шва.
+function messageTransport(
+  chat: string,
+  sendPost: SendPost,
+  extra: TelegramRequest,
+): OutboxTransport {
+  return {
+    sendHtml: async (html) => {
+      const ack = await sendPost("sendMessage", {
+        chat_id: chat,
+        text: html,
+        parse_mode: "HTML",
+        ...extra,
+      });
+      return ack.ok || ack.retryPlain ? ack : { ...ack, stop: true };
+    },
+    // Повтор без разметки — последний шанс этого чанка. Не вышел и он: дальше по
+    // отчёту идти не с чем, каким бы кодом Telegram ни ответил.
+    sendPlain: async (text) => {
+      const ack = await sendPost("sendMessage", {
+        chat_id: chat,
+        text,
+        ...extra,
+      });
+      return ack.ok ? ack : { ...ack, stop: true };
+    },
+  };
 }
 
 export async function sendTelegramHtml(
@@ -145,30 +202,11 @@ export async function sendTelegramHtml(
     trace,
   }: TelegramSendOptions = {},
 ): Promise<{ ok: boolean; fellBack: boolean; error: string }> {
-  const sendPost = retryTransient
-    ? (body: TelegramRequest) =>
-        postWithTransientRetry(bot, body, fetchImpl, sleep)
-    : (body: TelegramRequest) => post(bot, body, fetchImpl);
-  // Ночной отчёт — цельный документ, а не диалог: если Telegram отказал не по разметке
-  // (flood control, 5xx, бот заблокирован), остаток слать некуда и незачем — добитый
-  // 429 продлевает throttle на весь токен, общий с интерактивным каналом. Помечаем
-  // такой отказ как stop, и шов бросает хвост — ровно как cron-путь делал до шва.
-  const transport: OutboxTransport = {
-    sendHtml: async (html) => {
-      const ack = await sendPost({
-        chat_id: chat,
-        text: html,
-        parse_mode: "HTML",
-      });
-      return ack.ok || ack.retryPlain ? ack : { ...ack, stop: true };
-    },
-    // Повтор без разметки — последний шанс этого чанка. Не вышел и он: дальше по
-    // отчёту идти не с чем, каким бы кодом Telegram ни ответил.
-    sendPlain: async (text) => {
-      const ack = await sendPost({ chat_id: chat, text });
-      return ack.ok ? ack : { ...ack, stop: true };
-    },
-  };
+  const transport = messageTransport(
+    chat,
+    poster(bot, retryTransient, fetchImpl, sleep),
+    {},
+  );
   try {
     const { ok, delivered, fellBack, error } = await traceOutbox(
       { source: "cron", ...trace },
@@ -187,6 +225,86 @@ export async function sendTelegramHtml(
   } catch (e) {
     // Шов бросает только на нестроковом md (гейт работает по строке) — контракт
     // «никогда не бросает» держим здесь, у самой границы cron-скриптов.
+    return { ok: false, fellBack: false, error: errorMessage(e) };
+  }
+}
+
+/**
+ * Rich-пост в чат: `iva post` и всё, что шлёт готовый markdown одним сообщением.
+ *
+ * Отличий от sendTelegramHtml два. Первое — метод: rich_message.markdown уходит в
+ * sendRichMessage, где Telegram сам рендерит картинки между абзацами, таблицы и
+ * <details>. Второе — rich-путь выбран вызывающим (alwaysRich), а не разметкой:
+ * пост из текста и картинок никаких rich-конструкций не содержит, но HTML-путь
+ * картинки не рендерит.
+ *
+ * Фолбэка тут нет намеренно. Отказ Bot API — ошибка отправки: ok=false с текстом
+ * ошибки, и наружу не уходит ничего. У канала фолбэк на месте (ответ в диалоге
+ * лучше отдать хоть как-то), но пост в ЧУЖОЙ чат владелец просил именно постом:
+ * молча выдать вместо него HTML-куски без картинок и отчитаться об успехе —
+ * потеря, которую никто не заметит. HTML/plain-транспорт поэтому оставлен как
+ * заглушка со stop: шов доходит до неё, только если rich отвергли, и сразу
+ * возвращает тот же отказ, не трогая Bot API второй раз.
+ */
+export async function sendTelegramRich(
+  bot: string,
+  chat: string,
+  markdown: unknown,
+  {
+    silent = false,
+    threadId,
+    retryTransient = false,
+    sleep = realSleep,
+    fetchImpl = fetch,
+    trace,
+  }: TelegramRichOptions = {},
+): Promise<{ ok: boolean; fellBack: boolean; error: string }> {
+  const sendPost = poster(bot, retryTransient, fetchImpl, sleep);
+  const extra: TelegramRequest = {
+    ...(silent ? { disable_notification: true } : {}),
+    ...(threadId ? { message_thread_id: threadId } : {}),
+  };
+  // Отказ rich-пути, чтобы вернуть его вызывающему как ошибку отправки: шов
+  // спрашивает транспорт, а не наоборот, и другого места запомнить причину нет.
+  let refusal = "";
+  const refuse = (): Promise<OutboxAck> =>
+    Promise.resolve({
+      ok: false,
+      error: refusal || "sendRichMessage was not attempted",
+      retryPlain: false,
+      stop: true,
+    });
+  const transport: OutboxTransport = {
+    sendRich: async (text) => {
+      const ack = await sendPost("sendRichMessage", {
+        chat_id: chat,
+        rich_message: { markdown: text },
+        ...extra,
+      });
+      if (!ack.ok) {
+        refusal = ack.error;
+        console.error(
+          "[telegram] sendRichMessage отвергнут, пост не отправлен:",
+          ack.error.slice(0, 300),
+        );
+      }
+      return ack;
+    },
+    // Ни одного вызова Bot API: пост либо ушёл rich-сообщением, либо не ушёл.
+    sendHtml: refuse,
+    sendPlain: refuse,
+  };
+  try {
+    const { ok, delivered, fellBack, error } = await traceOutbox(
+      { source: "cron", ...trace },
+      String(markdown),
+      () =>
+        sendThroughOutbox(markdown as string, transport, { alwaysRich: true }),
+    );
+    if (ok && delivered === 0)
+      return { ok: false, fellBack, error: "empty post" };
+    return { ok, fellBack, error };
+  } catch (e) {
     return { ok: false, fellBack: false, error: errorMessage(e) };
   }
 }

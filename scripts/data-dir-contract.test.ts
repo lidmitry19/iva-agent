@@ -2,7 +2,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,6 +18,7 @@ import fc from "fast-check";
 import { resolveDataDir as resolveAuthoredDataDir } from "#lib/data-dir.ts";
 import { resolveDataDir as resolveOperationalDataDir } from "./lib/data-dir.ts";
 import { resolveDataDir as canonicalDataDir } from "@iva/data-dir";
+import { imageRoots } from "./cli/post.ts";
 import { systemdExecArgument } from "./cli/systemd.ts";
 import { layoutFor } from "./lib/version-store.ts";
 import { commandRunner } from "./lib/version-update.ts";
@@ -217,11 +217,7 @@ test("C4: the userbot production path receives and consumes the canonical direct
         "import importlib.util, json, sys",
         `sys.path.insert(0, ${JSON.stringify(join(ROOT, "services/telegram-userbot"))})`,
         "import serve",
-        `spec = importlib.util.spec_from_file_location("send_rich", ${JSON.stringify(join(ROOT, "agent/skills/rich-post/scripts/send_rich.py"))})`,
-        "send_rich = importlib.util.module_from_spec(spec)",
-        "spec.loader.exec_module(send_rich)",
-        'rich_data = send_rich.allowed_image_roots({"ASSISTANT_DATA_DIR": "ignored/relative"})[1]',
-        "print(json.dumps([str(serve._session_file()), str(serve._token_file()), rich_data]))",
+        "print(json.dumps([str(serve._session_file()), str(serve._token_file())]))",
       ].join("; "),
     ],
     {
@@ -238,6 +234,12 @@ test("C4: the userbot production path receives and consumes the canonical direct
   assert.deepEqual(JSON.parse(python.stdout), [
     join(canonical, "telegram-userbot.session"),
     join(canonical, "telegram-userbot.token"),
+  ]);
+  // `iva post` берёт корни для локальных картинок у того же резолвера: собственный
+  // расчёт каталога данных увёл бы media-гейт мимо реального data и открыл бы
+  // публичному хосту то, что гейт считает «вне корней».
+  assert.deepEqual(imageRoots(root, { ASSISTANT_DATA_DIR: configured }), [
+    realpathSync(root),
     realpathSync(canonical),
   ]);
 
@@ -247,45 +249,19 @@ test("C4: the userbot production path receives and consumes the canonical direct
   );
 });
 
-test("C4: direct rich-post resolves relative data from installation home", (t) => {
+test("C4: iva post resolves its image roots through the canonical resolver", (t) => {
   const home = sandbox(t);
   const version = join(home, "versions/0.3.22-rc-hotfix-aaaaaaaaaaaa");
-  const richScript = join(
-    version,
-    "agent/skills/rich-post/scripts/send_rich.py",
-  );
-  mkdirSync(join(version, "packages/data-dir"), { recursive: true });
-  mkdirSync(resolve(richScript, ".."), { recursive: true });
-  cpSync(join(ROOT, "agent/skills/rich-post/scripts/send_rich.py"), richScript);
-  cpSync(
-    join(ROOT, "packages/data-dir/index.ts"),
-    join(version, "packages/data-dir/index.ts"),
-  );
+  mkdirSync(version, { recursive: true });
 
-  const python = spawnSync(
-    "uv",
-    [
-      "run",
-      "--no-project",
-      "python",
-      "-c",
-      [
-        "import importlib.util, json, sys",
-        "spec = importlib.util.spec_from_file_location('send_rich', sys.argv[1])",
-        "send_rich = importlib.util.module_from_spec(spec)",
-        "spec.loader.exec_module(send_rich)",
-        "print(send_rich.allowed_image_roots({'ASSISTANT_DATA_DIR': ' runtime '})[1])",
-      ].join("; "),
-      richScript,
-    ],
-    {
-      cwd: version,
-      env: { HOME: process.env.HOME, PATH: process.env.PATH },
-      encoding: "utf8",
-    },
-  );
-  assert.equal(python.status, 0, python.stderr);
-  assert.equal(python.stdout.trim(), join(realpathSync(home), "runtime"));
+  // Относительный каталог данных остаётся у дома установки, а не у каталога версии:
+  // после переезда `current` картинка из data обязана оставаться внутри корней.
+  const data = canonicalDataDir(version, " runtime ");
+  assert.equal(data, join(home, "runtime"));
+  assert.deepEqual(imageRoots(version, { ASSISTANT_DATA_DIR: " runtime " }), [
+    realpathSync(version),
+    data,
+  ]);
 });
 
 test("C4: systemd preserves canonical data-dir metacharacters as one argument", () => {
