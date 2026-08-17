@@ -118,7 +118,13 @@ function world(t: TestContext): World {
   write(
     data,
     "custom/plugins/trace/plugin.json",
-    `${JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: "trace", version: "1.0.0" })}\n`,
+    `${JSON.stringify({
+      $schema: PLUGIN_SCHEMA_URL,
+      name: "trace",
+      version: "1.0.0",
+      // Заявка на namespace: без неё `sh.iva/` не читается (ADR-0009).
+      extensions: { "sh.iva": {} },
+    })}\n`,
   );
   write(
     data,

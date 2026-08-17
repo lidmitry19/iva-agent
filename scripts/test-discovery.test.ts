@@ -15,9 +15,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const TEST_ROOTS = ["agent/**/*.test.ts", "scripts/**/*.test.ts"] as const;
+// `services/` — третий корень: там живут сервисы Ивы со своими тестами (MCP proxy).
+const TEST_ROOTS = [
+  "agent/**/*.test.ts",
+  "scripts/**/*.test.ts",
+  "services/**/*.test.ts",
+] as const;
 const EXPECTED_TEST_COMMAND =
-  'node --test --test-concurrency=4 "agent/**/*.test.ts" "scripts/**/*.test.ts"';
+  'node --test --test-concurrency=4 "agent/**/*.test.ts" "scripts/**/*.test.ts" "services/**/*.test.ts"';
 
 function writeTest(path: string, name: string, failure = false): void {
   writeFileSync(
@@ -44,6 +49,7 @@ test("scoped discovery runs canonical tests and excludes a nested worktree", () 
   try {
     mkdirSync(join(fixture, "agent"), { recursive: true });
     mkdirSync(join(fixture, "scripts"), { recursive: true });
+    mkdirSync(join(fixture, "services/proxy"), { recursive: true });
     mkdirSync(join(fixture, "wt/nested"), { recursive: true });
     writeTest(
       join(fixture, "agent/canonical.test.ts"),
@@ -52,6 +58,10 @@ test("scoped discovery runs canonical tests and excludes a nested worktree", () 
     writeTest(
       join(fixture, "scripts/canonical.test.ts"),
       "CANONICAL_SCRIPT_EXECUTED",
+    );
+    writeTest(
+      join(fixture, "services/proxy/canonical.test.ts"),
+      "CANONICAL_SERVICE_EXECUTED",
     );
     writeTest(
       join(fixture, "wt/nested/sentinel.test.ts"),
@@ -72,6 +82,7 @@ test("scoped discovery runs canonical tests and excludes a nested worktree", () 
     assert.equal(result.status, 0, output);
     assert.match(output, /CANONICAL_AGENT_EXECUTED/u);
     assert.match(output, /CANONICAL_SCRIPT_EXECUTED/u);
+    assert.match(output, /CANONICAL_SERVICE_EXECUTED/u);
     assert.doesNotMatch(output, /NESTED_TEST_DISCOVERED/u);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
