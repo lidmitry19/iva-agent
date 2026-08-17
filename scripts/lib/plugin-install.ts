@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { chmod, copyFile, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { walkPluginTree } from "#lib/plugin-reader.ts";
 
 export type GitResult = {
@@ -118,6 +118,10 @@ export function fetchGitPlugin(
     );
 
   const root = subdir ? join(staging, subdir) : staging;
+  // Второй замок на подпапку: источник её уже проверил, но каталог отсюда уезжает
+  // в стор целиком, и промах здесь стоил бы чужой папки на диске владельца.
+  if (relative(resolve(staging), resolve(root)).startsWith(".."))
+    throw new Error(`${subdir} climbs out of the fetched checkout`);
   if (!existsSync(root))
     throw new Error(`${url} has no ${subdir} at ${sha.slice(0, 12)}`);
   return root;

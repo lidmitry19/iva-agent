@@ -155,6 +155,11 @@ test("an unrecognized source is refused by name, never guessed", () => {
     "owner/repo@",
     "own er/repo",
     "owner/repo@bad ref",
+    // Подпапка, которая карабкается наружу: она назвала бы каталог вне выкачанного
+    // checkout, а установщик переехал бы в стор именно им.
+    "owner/repo/../../etc",
+    "owner/repo/.",
+    "owner/repo@--upload-pack",
     "owner/repo@/leading",
     "owner/repo@trailing/",
   ]) {
@@ -171,9 +176,13 @@ test("an unrecognized source is refused by name, never guessed", () => {
   }
 });
 
-const segment = fc.stringMatching(/^[A-Za-z0-9._-]{1,8}$/u);
+// `.` и `..` сегментами не бывают: такую подпапку парсер отвергает, и в канонической
+// строке ей взяться неоткуда.
+const segment = fc
+  .stringMatching(/^[A-Za-z0-9._-]{1,8}$/u)
+  .filter((value) => value !== "." && value !== "..");
 const ref = fc.stringMatching(
-  /^[A-Za-z0-9._-]{1,6}(?:\/[A-Za-z0-9._-]{1,6}){0,2}$/u,
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,5}(?:\/[A-Za-z0-9._-]{1,6}){0,2}$/u,
 );
 
 const canonical = fc.oneof(
