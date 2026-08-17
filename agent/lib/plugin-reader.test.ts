@@ -486,6 +486,11 @@ test("an invalid mcp entry is skipped and its siblings still load", async () => 
       env: { PLUGIN_ROOT: "/tmp" },
     },
     escapingCwd: { type: "stdio", command: "node", cwd: "./../outside" },
+    escapingDataCwd: {
+      type: "stdio",
+      command: "node",
+      cwd: "${PLUGIN_DATA}/../../etc",
+    },
     bareCwd: { type: "stdio", command: "node", cwd: "tools" },
     remoteHttp: { type: "streamable-http", url: "http://example.test/mcp" },
     urlWithUser: {

@@ -21,7 +21,7 @@
 // пропущена одна запись.
 import type { Dirent } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { parseFrontmatter } from "./frontmatter.ts";
 
 export const PLUGIN_SCHEMA_URL =
@@ -252,6 +252,12 @@ export function containedPath(root: string, candidate: string): string | null {
   )
     return null;
   return target;
+}
+
+/** Лезет ли относительный путь наверх, каким бы ни был его корень. */
+function climbsOut(path: string): boolean {
+  const normalized = posix.normalize(path);
+  return normalized === ".." || normalized.startsWith("../");
 }
 
 /** Разбор `plugin.json`. Фатальное нарушение — `PluginRejected`. */
@@ -511,8 +517,11 @@ function parseMcpServer(
   if (cwd !== undefined) {
     if (typeof cwd !== "string") return "cwd must be a string";
     if (cwd === "${PLUGIN_DATA}" || cwd.startsWith("${PLUGIN_DATA}/")) {
-      // Каталог данных плагина — вне корня по определению; его containment
-      // проверяется при запуске сервера (тикет 04).
+      // Абсолютный путь PLUGIN_DATA знает только клиент в рантайме, но подъём
+      // наружу виден уже лексически — спека требует держаться внутри и здесь.
+      const inside = cwd.slice("${PLUGIN_DATA}".length).replace(/^\//u, "");
+      if (inside && climbsOut(inside))
+        return "cwd escapes the plugin data directory";
     } else if (cwd === "${PLUGIN_ROOT}" || cwd.startsWith("${PLUGIN_ROOT}/")) {
       const inside = cwd.slice("${PLUGIN_ROOT}".length).replace(/^\//u, "");
       if (inside && !containedPath(root, inside))
