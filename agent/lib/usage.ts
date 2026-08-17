@@ -108,8 +108,19 @@ export function subagentTurnId(
   subagentName: string | undefined,
   childTurnId?: string,
 ): string {
+  return `${parentTurnId(turn, childTurnId)}#${subagentName || "subagent"}`;
+}
+
+/**
+ * Ключ хода родителя по канону самого eve. Отдельная функция, потому что тот же ключ
+ * нужен журналу хода (agent/hooks/trace.ts): два разных вывода одного ключа разошлись бы
+ * на первой же правке фолбэков.
+ */
+export function parentTurnId(
+  turn: TurnLike | undefined,
+  childTurnId?: string,
+): string {
   const bySequence =
     typeof turn?.sequence === "number" ? `turn_${turn.sequence}` : "";
-  const parentTurnId = turn?.id || bySequence || childTurnId || "";
-  return `${parentTurnId}#${subagentName || "subagent"}`;
+  return turn?.id || bySequence || childTurnId || "";
 }
