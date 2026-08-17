@@ -1594,7 +1594,12 @@ test("the new version refuses to build on an invalid MODEL_PROVIDER", async (t) 
 /** Запись о плагине в `plugins.json` — то, чем сборка узнаёт, что он включён. */
 function pluginsState(
   home: string,
-  entries: readonly { name: string; enabled?: boolean }[],
+  entries: readonly {
+    name: string;
+    enabled?: boolean;
+    trusted?: boolean;
+    mcp?: Record<string, { port: number }>;
+  }[],
 ): void {
   const file = join(layoutFor(home).data, "custom/plugins.json");
   mkdirSync(dirname(file), { recursive: true });
@@ -1609,7 +1614,8 @@ function pluginsState(
         sha: "",
         digest: "",
         enabled: entry.enabled ?? true,
-        trusted: false,
+        trusted: entry.trusted ?? false,
+        ...(entry.mcp ? { mcp: entry.mcp } : {}),
         installedAt: "2026-08-17T00:00:00.000Z",
       })),
     }),
@@ -1625,11 +1631,13 @@ function plantPlugin(
     body = "export default { name: 'x' };\n",
     config,
     files = {},
+    mcp,
   }: {
     code?: boolean;
     body?: string;
     config?: string;
     files?: Record<string, string>;
+    mcp?: Record<string, unknown>;
   } = {},
 ): void {
   const store = join(layoutFor(home).data, "custom/plugins");
@@ -1641,6 +1649,8 @@ function plantPlugin(
       $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
       name,
       version: "1.0.0",
+      // Наш namespace объявлен: без ключа `sh.iva/` не читается вовсе (ADR-0009).
+      ...(code ? { extensions: { "sh.iva": {} } } : {}),
     }),
   );
   writeFileSync(
@@ -1665,6 +1675,14 @@ function plantPlugin(
       '{ "include": ["extension/**/*.ts"] }\n',
     );
   }
+  if (mcp)
+    writeFileSync(
+      join(root, "mcp.json"),
+      JSON.stringify({
+        $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        mcpServers: mcp,
+      }),
+    );
   for (const [path, contents] of Object.entries(files)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), contents);
@@ -1745,6 +1763,56 @@ test("a plugin with code is copied into the version, built and mounted", async (
   // A plugin is part of what a version is named after, and part of what it carries.
   assert.match(outcome.version, /\+[0-9a-f]{8}$/u);
   assert.equal(outcome.custom, "applied");
+});
+
+test("a trusted plugin with only MCP servers is carried as generated connections", async (t) => {
+  const iva = world(t);
+  plantPlugin(iva.home, "trace", {
+    code: false,
+    mcp: {
+      viewer: { type: "stdio", command: "node", args: ["serve.mjs"] },
+      api: { type: "streamable-http", url: "https://api.test/mcp" },
+    },
+  });
+  pluginsState(iva.home, [
+    { name: "trace", trusted: true, mcp: { viewer: { port: 8731 } } },
+  ]);
+  const { runner, steps } = recorded(iva.home);
+
+  const outcome = updated(await iva.update({ run: runner }));
+  const dir = join(iva.home, "versions", outcome.version);
+
+  // Один файл на сервер, и ничего больше: ни копии плагина, ни mount'а, ни шагов сборки.
+  const proxied = readFileSync(
+    join(dir, "agent/connections/mcp-trace--viewer.ts"),
+    "utf8",
+  );
+  assert.match(proxied, /url: "http:\/\/127\.0\.0\.1:8731\/mcp"/u);
+  assert.match(proxied, /pluginTokenFile\(dataDir\(\), "trace", "viewer"\)/u);
+  const remote = readFileSync(
+    join(dir, "agent/connections/mcp-trace--api.ts"),
+    "utf8",
+  );
+  assert.match(remote, /url: "https:\/\/api\.test\/mcp"/u);
+  assert.equal(existsSync(join(dir, "plugins/trace")), false);
+  assert.equal(existsSync(join(dir, "agent/extensions/trace.ts")), false);
+  assert.deepEqual(
+    steps.filter((step) => step.includes("plugins/trace")),
+    [],
+  );
+  // Плагин без кода, но с MCP — тоже часть того, чем названа версия.
+  assert.match(outcome.version, /\+[0-9a-f]{8}$/u);
+  assert.equal(outcome.custom, "applied");
+
+  // Снятое доверие убирает connection из версии, и это другая версия.
+  pluginsState(iva.home, [{ name: "trace", trusted: false }]);
+  const untrusted = updated(await iva.update({ run: runner }));
+  assert.notEqual(untrusted.version, outcome.version);
+  const after = join(iva.home, "versions", untrusted.version);
+  assert.equal(
+    existsSync(join(after, "agent/connections/mcp-trace--viewer.ts")),
+    false,
+  );
 });
 
 test("a lockfile in the plugin pins its dependencies instead of resolving them", async (t) => {

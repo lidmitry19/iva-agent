@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { PluginMcpServer } from "#lib/plugin-reader.ts";
 import { tryLoadPluginCore } from "./plugin-core.ts";
 import type { Runner } from "./version-update.ts";
 
@@ -29,6 +30,22 @@ type Say = (message: string) => void;
 
 /** Folder eve reads mounts from; the file name in it is the namespace. */
 const MOUNT_DIR = "agent/extensions";
+/** Folder eve reads connections from; the file name in it is the connection name. */
+const CONNECTION_DIR = "agent/connections";
+/**
+ * What eve accepts as a connection file name (its CONNECTION_SLUG_PATTERN): lowercase
+ * letters, digits and dashes, starting with a letter. No underscores and no dots - so
+ * `<namespace>__<server>` from the spec sketch is not a name eve would ever register.
+ */
+const CONNECTION_SLUG = /^[a-z][a-z0-9-]{0,63}$/u;
+/**
+ * Prefix of every generated connection. It keeps a plugin off the names Iva authors
+ * herself (`telegram-userbot`), and it makes a plugin whose name starts with a digit -
+ * which the spec allows and eve's first-letter rule does not - nameable at all.
+ */
+const CONNECTION_PREFIX = "mcp-";
+/** Separator between the plugin part and the server part; neither part can contain it. */
+const CONNECTION_JOIN = "--";
 /** Where a version keeps the copies it builds plugin code from. */
 const PLUGIN_DIR = "plugins";
 /** The namespace folder of a plugin's code, as ADR-0009 pins it. */
@@ -53,6 +70,17 @@ const MOUNT_SLUG = /^[a-z][a-z0-9_]{0,63}$/u;
 /** Enough of a failed step to explain it, little enough to fit a chat message. */
 const OUTPUT_TAIL = 4000;
 
+/** One generated eve connection: the MCP server of a plugin as the agent sees it. */
+export type PluginConnection = {
+  /** The server's name in `mcp.json`. */
+  readonly server: string;
+  /** The connection name eve derives from the file name. */
+  readonly name: string;
+  /** The file inside a version: `agent/connections/<name>.ts`. */
+  readonly file: string;
+  readonly source: string;
+};
+
 export type CodePlugin = {
   readonly name: string;
   /** The plugin in the Custom layer: `data/custom/plugins/<name>`. */
@@ -67,6 +95,13 @@ export type CodePlugin = {
   readonly digest: string;
   /** `<name>.config.json` as written, or "" - part of what names the version. */
   readonly config: string;
+  /**
+   * Does the plugin carry an eve Extension to build (`sh.iva/package.json`)? A plugin
+   * with only MCP servers is here for its connections and has no mount and no copy.
+   */
+  readonly extension: boolean;
+  /** The connections this plugin contributes; empty unless it is enabled and trusted. */
+  readonly connections: readonly PluginConnection[];
 };
 
 export type CodePlugins = {
@@ -128,6 +163,48 @@ export function pluginCodeProblem(root: string, name: string): string | null {
     : `${name} carries code without ${CODE_DIR}/tsconfig.json, and eve cannot build declarations without one - ask the author to run: eve extension init`;
 }
 
+/** Everything eve does not accept in a name folded to a single dash. */
+function folded(part: string): string {
+  return part
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+}
+
+/**
+ * The connection name of one MCP server: `mcp-<plugin>--<server>`, both parts folded
+ * into what eve accepts as a file name. The model sees it in every tool of that server
+ * (`connection__mcp-trace--viewer__…`), so it is a name, not a hash.
+ */
+export function pluginConnectionName(name: string, server: string): string {
+  return `${CONNECTION_PREFIX}${folded(name)}${CONNECTION_JOIN}${folded(server)}`;
+}
+
+/** The connection file of one MCP server inside a version, relative to its root. */
+export function pluginConnectionFile(name: string, server: string): string {
+  return `${CONNECTION_DIR}/${pluginConnectionName(name, server)}.ts`;
+}
+
+/**
+ * Why this MCP server cannot become a connection here, or null. eve names connections
+ * after their files and accepts lowercase letters, digits and dashes only, so a server
+ * called `Echo Server` or one whose folded name is empty is refused by name rather
+ * than silently registered as something else.
+ */
+export function connectionNameProblem(
+  name: string,
+  server: string,
+): string | null {
+  // Nothing eve can use left after the folding: a name of its own is what makes the
+  // server addressable at all, and `mcp-<plugin>--` is not one.
+  if (!folded(server))
+    return `the MCP server ${JSON.stringify(server)} has no letters or digits in its name, so it cannot become a connection`;
+  const connection = pluginConnectionName(name, server);
+  return CONNECTION_SLUG.test(connection)
+    ? null
+    : `the MCP server ${JSON.stringify(server)} would be the connection ${JSON.stringify(connection)}, and eve accepts a lowercase letter followed by lowercase letters, digits or dashes, up to 64 characters`;
+}
+
 /**
  * Who else folds onto the namespace of `name`, or null. `a.b` and `a-b` are two
  * plugins and one mount file, so they may not be installed together: silently keeping
@@ -147,10 +224,81 @@ export function namespaceTaken(
 }
 
 /**
- * The enabled plugins that carry code, with what a version is named after. Read from
- * the store, never from the digest recorded at install time: a folder edited in place
- * is a different version, and the owner who edited it expects the next build to carry
- * the edit.
+ * The connections of one plugin, or the reasons there are none. Written only for a
+ * plugin that is enabled AND trusted (ADR-0009): `enabled` turns on the text in the
+ * prompt, `trusted` turns on processes and outbound calls, and a connection is the
+ * second kind - even an `sse` server is a token of the owner's leaving the machine.
+ */
+function pluginConnections({
+  name,
+  servers,
+  ports,
+  description,
+  diagnostics,
+}: {
+  readonly name: string;
+  readonly servers: Readonly<Record<string, PluginMcpServer>>;
+  /** The loopback port handed to each proxied server, from `plugins.json`. */
+  readonly ports: Readonly<Record<string, { readonly port: number }>>;
+  /** The plugin's own description, so `connection_search` has something to match. */
+  readonly description: string | undefined;
+  readonly diagnostics: string[];
+}): PluginConnection[] {
+  const connections: PluginConnection[] = [];
+  const taken = new Map<string, string>();
+  for (const [server, declared] of Object.entries(servers).sort(([a], [b]) =>
+    a < b ? -1 : 1,
+  )) {
+    const problem = connectionNameProblem(name, server);
+    if (problem) {
+      diagnostics.push(`plugin ${name}: ${problem}`);
+      continue;
+    }
+    const connection = pluginConnectionName(name, server);
+    const owner = taken.get(connection);
+    if (owner !== undefined) {
+      diagnostics.push(
+        `plugin ${name}: the MCP servers ${JSON.stringify(owner)} and ${JSON.stringify(server)} both become the connection ${connection}; neither is generated`,
+      );
+      continue;
+    }
+    taken.set(connection, server);
+    const port = ports[server]?.port;
+    if (declared.type === "stdio" && port === undefined) {
+      diagnostics.push(
+        `plugin ${name}: the MCP server ${JSON.stringify(server)} has no port yet - run: iva plugin trust ${name}`,
+      );
+      continue;
+    }
+    connections.push({
+      server,
+      name: connection,
+      file: pluginConnectionFile(name, server),
+      source: connectionSource({
+        plugin: name,
+        server,
+        description: `MCP server ${JSON.stringify(server)} of the plugin ${name}${description ? `: ${description}` : ""}`,
+        url:
+          declared.type === "stdio"
+            ? `http://127.0.0.1:${port ?? 0}/mcp`
+            : declared.url,
+        tokenFile: declared.type === "stdio",
+        ...(declared.type !== "stdio" && declared.headers
+          ? { headers: declared.headers }
+          : {}),
+      }),
+    });
+  }
+  // One name for two plugins: the same trap as one mount for two names, and the same
+  // answer - neither is generated, both are named.
+  return connections;
+}
+
+/**
+ * The enabled plugins a version has to carry: those with code to build and those with
+ * MCP servers to connect to. Read from the store, never from the digest recorded at
+ * install time: a folder edited in place is a different version, and the owner who
+ * edited it expects the next build to carry the edit.
  */
 export async function codePlugins(dataDir: string): Promise<CodePlugins> {
   const loaded = await tryLoadPluginCore();
@@ -180,14 +328,29 @@ export async function codePlugins(dataDir: string): Promise<CodePlugins> {
       );
       continue;
     }
-    if (!report.code) continue;
-    const problem = pluginCodeProblem(root, entry.name);
-    if (problem) {
-      diagnostics.push(
-        `plugin ${entry.name} is left out of this build: ${problem}`,
-      );
-      continue;
+    // A plugin with unusable code is left out whole: its connections would be half a
+    // plugin, and half a plugin is worse than none (the same rule as `disableCodePlugin`).
+    if (report.code) {
+      const problem = pluginCodeProblem(root, entry.name);
+      if (problem) {
+        diagnostics.push(
+          `plugin ${entry.name} is left out of this build: ${problem}`,
+        );
+        continue;
+      }
     }
+    const connections = entry.trusted
+      ? pluginConnections({
+          name: entry.name,
+          servers: report.mcp,
+          ports: entry.mcp ?? {},
+          description: report.manifest.description,
+          diagnostics,
+        })
+      : [];
+    // Neither code nor connections: nothing about this plugin is in a version, and its
+    // skills are live anyway.
+    if (!report.code && connections.length === 0) continue;
     let digest: string;
     try {
       digest = await pluginTreeDigest(root);
@@ -212,21 +375,52 @@ export async function codePlugins(dataDir: string): Promise<CodePlugins> {
       directory: pluginDirectory(entry.name),
       digest,
       config,
+      extension: report.code,
+      connections,
     });
   }
   // Two names on one mount file: neither is built, and both are named. `add` refuses
   // such a pair (`namespaceTaken`); this is the second lock, for a pair that reached
   // the store another way - a restored `plugins.json`, a folder put there by hand.
-  const names = plugins.map((plugin) => plugin.name);
+  const names = plugins
+    .filter((plugin) => plugin.extension)
+    .map((plugin) => plugin.name);
   const kept = plugins.filter((plugin) => {
-    const other = namespaceTaken(plugin.name, names);
+    const other = plugin.extension ? namespaceTaken(plugin.name, names) : null;
     if (other === null) return true;
     diagnostics.push(
       `plugins ${plugin.name} and ${other} want the same extension mount ${plugin.namespace}.ts; neither is built - remove one: iva plugin remove <name>`,
     );
     return false;
   });
-  return { plugins: kept, diagnostics };
+  // The same trap one level up: two plugins whose folded names meet in one connection
+  // file. Neither is generated, both are named - a file written twice would leave the
+  // owner with one plugin's tools under the other's name.
+  const owners = new Map<string, string>();
+  for (const plugin of kept)
+    for (const connection of plugin.connections) {
+      const owner = owners.get(connection.name);
+      if (owner === undefined) owners.set(connection.name, plugin.name);
+      else if (owner !== plugin.name) owners.set(connection.name, "");
+    }
+  const clean = kept.map((plugin) => {
+    const connections = plugin.connections.filter((connection) => {
+      if (owners.get(connection.name) !== "") return true;
+      diagnostics.push(
+        `plugins on the same connection ${connection.name}; it is not generated - remove one: iva plugin remove <name>`,
+      );
+      return false;
+    });
+    return connections.length === plugin.connections.length
+      ? plugin
+      : { ...plugin, connections };
+  });
+  return {
+    plugins: clean.filter(
+      (plugin) => plugin.extension || plugin.connections.length > 0,
+    ),
+    diagnostics,
+  };
 }
 
 /**
@@ -253,6 +447,91 @@ export function mountSource(plugin: CodePlugin): string {
     `export default extension(readPluginConfig("${plugin.name}"));`,
     ``,
   ].join("\n");
+}
+
+/**
+ * The generated connection: what makes eve reach an MCP server of a plugin. One file per
+ * server, written into the version beside the mount, because `agent/connections/` is
+ * read by eve's own discovery and nothing else registers a connection.
+ *
+ * Nothing about the owner's installation is baked in beyond the port and the URL the
+ * plugin itself declares: the bearer of a proxied server is read from its token file at
+ * every call, and a `${VAR}` inside a header comes out of `<name>.env` at every call too.
+ * Both are the same rule as `agent/connections/telegram-userbot.ts` - a value that has
+ * to be there before the agent starts is a value that needs a restart to change.
+ *
+ * The specifiers are held in variables for the same reason `mountSource` holds them: the
+ * walks that read this tree for its imports would otherwise follow the text of a
+ * generated file as if it were an import of this module.
+ */
+export function connectionSource(spec: {
+  readonly plugin: string;
+  readonly server: string;
+  readonly description: string;
+  /** `http://127.0.0.1:<port>/mcp` for a proxied server, the declared URL otherwise. */
+  readonly url: string;
+  /** A proxied server authenticates with the token file the proxy shares. */
+  readonly tokenFile: boolean;
+  readonly headers?: Readonly<Record<string, string>>;
+}): string {
+  const connections = `"eve/connections"`;
+  const fs = `"node:fs"`;
+  const dataDirModule = `"../lib/data-dir.ts"`;
+  const storeModule = `"../lib/plugin-store.ts"`;
+  const configModule = `"../lib/plugin-config.ts"`;
+  const plugin = JSON.stringify(spec.plugin);
+  const server = JSON.stringify(spec.server);
+  const headers = Object.entries(spec.headers ?? {});
+  const lines = [
+    `// Generated by Iva from data/custom/plugins/${spec.plugin}/mcp.json - do not edit.`,
+    `// Every version build writes this file again (ADR-0009); it exists only while the`,
+    `// plugin is enabled and trusted.`,
+    `import { defineMcpClientConnection } from ${connections};`,
+  ];
+  if (spec.tokenFile)
+    lines.push(
+      `import { readFileSync } from ${fs};`,
+      `import { dataDir } from ${dataDirModule};`,
+      `import { pluginTokenFile } from ${storeModule};`,
+    );
+  if (headers.length)
+    lines.push(`import { expandPluginEnv } from ${configModule};`);
+  lines.push(``);
+  if (spec.tokenFile)
+    lines.push(
+      `// Read at every call: the proxy writes its token when the owner trusts the plugin,`,
+      `// and the agent must not need a restart to notice.`,
+      `function token(): string {`,
+      `  try {`,
+      `    return readFileSync(`,
+      `      pluginTokenFile(dataDir(), ${plugin}, ${server}),`,
+      `      "utf8",`,
+      `    ).trim();`,
+      `  } catch {`,
+      `    return "";`,
+      `  }`,
+      `}`,
+      ``,
+    );
+  lines.push(
+    `export default defineMcpClientConnection({`,
+    `  url: ${JSON.stringify(spec.url)},`,
+    `  description: ${JSON.stringify(spec.description)},`,
+  );
+  if (spec.tokenFile)
+    lines.push(
+      `  auth: { getToken: () => Promise.resolve({ token: token() }) },`,
+    );
+  if (headers.length) {
+    lines.push(`  headers: {`);
+    for (const [key, value] of headers)
+      lines.push(
+        `    ${JSON.stringify(key)}: () => expandPluginEnv(${plugin}, ${JSON.stringify(value)}),`,
+      );
+    lines.push(`  },`);
+  }
+  lines.push(`});`, ``);
+  return lines.join("\n");
 }
 
 /**
@@ -296,7 +575,19 @@ function pointMainAtTheBuild(code: string): string | null {
   return entry;
 }
 
-/** Take a plugin out of a staged version: the copy, the mount, nothing else. */
+/**
+ * Every file of the plugin a finished version must contain. A build that is missing one
+ * of them did not carry the plugin, whatever the version is named after - the mount is
+ * how eve loads its code, and a connection file is how eve reaches its MCP server.
+ */
+export function pluginArtifacts(plugin: CodePlugin): string[] {
+  return [
+    ...(plugin.extension ? [plugin.mount, plugin.directory] : []),
+    ...plugin.connections.map((connection) => connection.file),
+  ];
+}
+
+/** Take a plugin out of a staged version: the copy, the mount, its connections. */
 export function removePluginFromVersion(
   versionDir: string,
   plugin: CodePlugin,
@@ -306,13 +597,32 @@ export function removePluginFromVersion(
     recursive: true,
     force: true,
   });
+  for (const connection of plugin.connections)
+    rmSync(join(versionDir, connection.file), { force: true });
+}
+
+/** The generated connections of one plugin, written into a staged version. */
+function writePluginConnections(
+  versionDir: string,
+  plugin: CodePlugin,
+  log: Say,
+): void {
+  for (const connection of plugin.connections) {
+    const file = join(versionDir, connection.file);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, connection.source);
+  }
+  if (plugin.connections.length)
+    log(
+      `connected ${plugin.name} to ${plugin.connections.map((connection) => connection.server).join(", ")}`,
+    );
 }
 
 /**
- * Put one plugin's code into a staged version: copy, install, build the extension,
- * write the mount. Returns the failing step's own output rather than throwing - the
- * caller decides whether one plugin may fail a build (`iva update`) or must not
- * (`iva plugin add`).
+ * Put one plugin into a staged version: the connections always, and for a plugin with
+ * code the copy, its dependencies, the extension build and the mount. Returns the
+ * failing step's own output rather than throwing - the caller decides whether one plugin
+ * may fail a build (`iva update`) or must not (`iva plugin add`).
  */
 export async function buildPluginExtension({
   versionDir,
@@ -337,6 +647,10 @@ export async function buildPluginExtension({
   });
   const target = join(versionDir, plugin.directory);
   removePluginFromVersion(versionDir, plugin);
+  // Connections are generated files and nothing else: no install, no build step, so a
+  // plugin that only carries MCP servers costs a version its files and nothing more.
+  writePluginConnections(versionDir, plugin, log);
+  if (!plugin.extension) return { ok: true };
   try {
     // The walk-copy of the installer: it rejects symlinks instead of following one
     // out of the store, and the executable bit of a plugin's scripts survives.

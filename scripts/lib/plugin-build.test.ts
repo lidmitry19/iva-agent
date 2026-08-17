@@ -14,14 +14,22 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import fc from "fast-check";
-import { PLUGIN_SCHEMA_URL, pluginNameProblem } from "#lib/plugin-reader.ts";
+import {
+  MCP_SCHEMA_URL,
+  PLUGIN_SCHEMA_URL,
+  pluginNameProblem,
+} from "#lib/plugin-reader.ts";
 import { readPluginsState } from "#lib/plugin-store.ts";
 import {
   codePlugins,
+  connectionNameProblem,
+  connectionSource,
   disableCodePlugin,
   mountSource,
   namespaceProblem,
   namespaceTaken,
+  pluginConnectionFile,
+  pluginConnectionName,
   pluginDirectory,
   pluginMount,
   pluginNamespace,
@@ -48,13 +56,34 @@ function write(root: string, path: string, contents: string): void {
 function plant(
   data: string,
   name: string,
-  { code = true, config }: { code?: boolean; config?: string } = {},
+  {
+    code = true,
+    config,
+    mcp,
+  }: {
+    code?: boolean;
+    config?: string;
+    mcp?: Record<string, unknown>;
+  } = {},
 ): void {
   write(
     data,
     `custom/plugins/${name}/plugin.json`,
-    JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name, version: "1.0.0" }),
+    JSON.stringify({
+      $schema: PLUGIN_SCHEMA_URL,
+      name,
+      version: "1.0.0",
+      description: "Demo plugin.",
+      // Ключ обязателен для обоих видов `sh.iva/` (ADR-0009, решение 12).
+      ...(code ? { extensions: { "sh.iva": {} } } : {}),
+    }),
   );
+  if (mcp)
+    write(
+      data,
+      `custom/plugins/${name}/mcp.json`,
+      JSON.stringify({ $schema: MCP_SCHEMA_URL, mcpServers: mcp }),
+    );
   if (code) {
     write(
       data,
@@ -76,7 +105,12 @@ function plant(
 
 function state(
   data: string,
-  entries: readonly { name: string; enabled?: boolean }[],
+  entries: readonly {
+    name: string;
+    enabled?: boolean;
+    trusted?: boolean;
+    mcp?: Record<string, { port: number }>;
+  }[],
 ): void {
   write(
     data,
@@ -90,7 +124,8 @@ function state(
         sha: "",
         digest: "",
         enabled: entry.enabled ?? true,
-        trusted: false,
+        trusted: entry.trusted ?? false,
+        ...(entry.mcp ? { mcp: entry.mcp } : {}),
         installedAt: "2026-08-17T00:00:00.000Z",
       })),
     }),
@@ -128,6 +163,8 @@ test("the mount eve reads names the plugin package and reads its config at load"
     directory: pluginDirectory("my-tool"),
     digest: "abc",
     config: "",
+    extension: true,
+    connections: [],
   });
   // Форма, которую eve разбирает статически: `export default <ident>(…)` плюс импорт
   // того же имени по относительному спецификатору.
@@ -247,6 +284,173 @@ test("names collide exactly when their folded forms are equal", () => {
         const folded = pluginNamespace(first) === pluginNamespace(second);
         assert.equal(namespaceTaken(first, [second]) !== null, folded);
         assert.equal(namespaceTaken(second, [first]) !== null, folded);
+        return true;
+      },
+    ),
+  );
+});
+
+test("a connection is named after the plugin and the server, folded for eve", () => {
+  assert.equal(pluginConnectionName("trace", "viewer"), "mcp-trace--viewer");
+  // Точки и подчёркивания складываются в дефис: eve принимает только его.
+  assert.equal(
+    pluginConnectionName("sh.iva.trace", "my_srv"),
+    "mcp-sh-iva-trace--my-srv",
+  );
+  // Имя плагина по спеке может начинаться с цифры, а имя connection у eve — нет.
+  assert.equal(pluginConnectionName("7zip", "cli"), "mcp-7zip--cli");
+  assert.equal(
+    pluginConnectionFile("trace", "viewer"),
+    "agent/connections/mcp-trace--viewer.ts",
+  );
+  assert.equal(connectionNameProblem("trace", "viewer"), null);
+  assert.equal(connectionNameProblem("7zip", "cli"), null);
+  assert.match(
+    connectionNameProblem("trace", "!!") ?? "",
+    /has no letters or digits in its name/u,
+  );
+  assert.match(
+    connectionNameProblem("trace", "s".repeat(70)) ?? "",
+    /64 characters/u,
+  );
+});
+
+test("a proxied server reads its bearer from the token file at every call", () => {
+  const source = connectionSource({
+    plugin: "trace",
+    server: "viewer",
+    description: 'MCP server "viewer" of the plugin trace',
+    url: "http://127.0.0.1:8730/mcp",
+    tokenFile: true,
+  });
+  assert.match(source, /url: "http:\/\/127\.0\.0\.1:8730\/mcp"/u);
+  assert.match(source, /pluginTokenFile\(dataDir\(\), "trace", "viewer"\)/u);
+  assert.match(
+    source,
+    /getToken: \(\) => Promise\.resolve\(\{ token: token\(\) \}\)/u,
+  );
+  assert.match(source, /do not edit/u);
+  // Env плагина проксированному серверу через заголовки не передаётся.
+  assert.doesNotMatch(source, /expandPluginEnv/u);
+});
+
+test("a remote server keeps its own url and expands its headers from the env file", () => {
+  const source = connectionSource({
+    plugin: "weather",
+    server: "api",
+    description: "d",
+    url: "https://api.test/mcp",
+    tokenFile: false,
+    headers: { Authorization: "Bearer ${WEATHER_TOKEN}", "X-Plain": "yes" },
+  });
+  assert.match(source, /url: "https:\/\/api\.test\/mcp"/u);
+  assert.match(
+    source,
+    /"Authorization": \(\) => expandPluginEnv\("weather", "Bearer \$\{WEATHER_TOKEN\}"\)/u,
+  );
+  assert.match(
+    source,
+    /"X-Plain": \(\) => expandPluginEnv\("weather", "yes"\)/u,
+  );
+  // Токена у удалённого сервера нет: он не за нашим прокси.
+  assert.doesNotMatch(source, /pluginTokenFile/u);
+});
+
+test("connections are generated only for a plugin that is enabled and trusted", async () => {
+  const data = join(world(), "data");
+  const servers = {
+    local: { type: "stdio", command: "node", args: ["server.mjs"] },
+    api: {
+      type: "streamable-http",
+      url: "https://api.test/mcp",
+      headers: { Authorization: "Bearer ${API_KEY}" },
+    },
+  };
+  plant(data, "trusted-one", { code: false, mcp: servers });
+  plant(data, "untrusted-one", { code: false, mcp: servers });
+  state(data, [
+    { name: "trusted-one", trusted: true, mcp: { local: { port: 8731 } } },
+    { name: "untrusted-one", trusted: false, mcp: { local: { port: 8732 } } },
+  ]);
+
+  const { plugins, diagnostics } = await codePlugins(data);
+  assert.deepEqual(diagnostics, []);
+  // Плагин без доверия не попадает в версию вовсе: ни connection, ни имени.
+  assert.deepEqual(
+    plugins.map((plugin) => plugin.name),
+    ["trusted-one"],
+  );
+  const [trusted] = plugins;
+  // Плагин без Extension версию несёт, но mount и копию — нет.
+  assert.equal(trusted.extension, false);
+  assert.deepEqual(
+    trusted.connections.map((connection) => connection.file),
+    [
+      "agent/connections/mcp-trusted-one--api.ts",
+      "agent/connections/mcp-trusted-one--local.ts",
+    ],
+  );
+  const local = trusted.connections.find(
+    (connection) => connection.server === "local",
+  );
+  assert.match(local?.source ?? "", /url: "http:\/\/127\.0\.0\.1:8731\/mcp"/u);
+  // Описание плагина уходит в connection: по нему модель и выбирает сервер.
+  assert.match(local?.source ?? "", /Demo plugin\./u);
+});
+
+test("a proxied server without a port is named instead of pointed at nothing", async () => {
+  const data = join(world(), "data");
+  plant(data, "trace", {
+    code: false,
+    mcp: {
+      viewer: { type: "stdio", command: "node" },
+      "!!": { type: "stdio", command: "node" },
+    },
+  });
+  state(data, [{ name: "trace", trusted: true }]);
+
+  const { plugins, diagnostics } = await codePlugins(data);
+  assert.deepEqual(plugins, []);
+  assert.deepEqual(diagnostics.length, 2, diagnostics.join("\n"));
+  assert.match(diagnostics.join("\n"), /iva plugin trust trace/u);
+  assert.match(diagnostics.join("\n"), /has no letters or digits in its name/u);
+});
+
+test("two plugins on one connection name generate neither", async () => {
+  const data = join(world(), "data");
+  const mcp = { srv: { type: "streamable-http", url: "https://a.test/mcp" } };
+  plant(data, "my-tool", { code: false, mcp });
+  plant(data, "my.tool", { code: false, mcp });
+  state(data, [
+    { name: "my-tool", trusted: true },
+    { name: "my.tool", trusted: true },
+  ]);
+
+  const { plugins, diagnostics } = await codePlugins(data);
+  assert.deepEqual(plugins, []);
+  assert.match(
+    diagnostics.join("\n"),
+    /on the same connection mcp-my-tool--srv/u,
+  );
+});
+
+test("any server name either maps to a connection eve accepts or is refused", () => {
+  fc.assert(
+    fc.property(
+      fc.stringMatching(/^[a-z0-9][a-z0-9.-]{0,20}[a-z0-9]$/u),
+      fc.string(),
+      (name, server) => {
+        fc.pre(pluginNameProblem(name) === null);
+        if (connectionNameProblem(name, server) !== null) return true;
+        const connection = pluginConnectionName(name, server);
+        assert.match(connection, /^[a-z][a-z0-9-]{0,63}$/u);
+        // Имя файла — один сегмент пути: ни разделителей, ни точек.
+        assert.equal(connection.includes("/"), false);
+        assert.equal(connection.includes("."), false);
+        assert.equal(
+          pluginConnectionFile(name, server),
+          `agent/connections/${connection}.ts`,
+        );
         return true;
       },
     ),

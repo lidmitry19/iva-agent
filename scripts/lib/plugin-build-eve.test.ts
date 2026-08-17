@@ -87,6 +87,8 @@ function plantPlugin(data: string, name: string): void {
       $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
       name,
       version: "1.0.0",
+      // Ключ обязателен: без него `sh.iva/` не читается (ADR-0009).
+      extensions: { "sh.iva": {} },
     })}\n`,
   );
   write(

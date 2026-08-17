@@ -22,6 +22,7 @@ import {
 import {
   buildPluginExtension,
   codePlugins,
+  pluginArtifacts,
   disableCodePlugin,
   removePluginFromVersion,
   type CodePlugin,
@@ -195,10 +196,18 @@ export async function versionOverlay(
   // a different version, and the config beside it is the owner's to change too.
   const hash = createHash("sha256");
   hash.update(`${digest ?? ""}\0`);
-  for (const plugin of plugins)
+  for (const plugin of plugins) {
     hash.update(
       `${plugin.name}\0${plugin.digest}\0${plugin.config.length}\0${plugin.config}\n`,
     );
+    // The generated connections too, because they are neither the folder nor the
+    // config: trusting a plugin, or a port handed to one, changes what a version
+    // contains, and a version that contains something else is a different version.
+    for (const connection of plugin.connections)
+      hash.update(
+        `${connection.file}\0${connection.source.length}\0${connection.source}\n`,
+      );
+  }
   return { files, digest: hash.digest("hex").slice(0, 8), plugins };
 }
 
@@ -212,8 +221,9 @@ function sameFile(one: string, other: string): boolean {
 
 /**
  * What a version was built with, by contents: a stock tree has authored paths too.
- * A plugin counts by its generated mount - without one, eve does not load its code,
- * whatever the version is named after.
+ * A plugin counts by the files it generated - the mount, without which eve does not
+ * load its code, and its connections, without which eve does not reach its MCP
+ * servers - whatever the version is named after.
  */
 export function builtWith(
   dir: string,
@@ -226,7 +236,9 @@ export function builtWith(
   const carried = files.length > 0 || plugins.length > 0;
   return carried &&
     files.every((path) => sameFile(join(dir, path), join(customDir, path))) &&
-    plugins.every((plugin) => existsSync(join(dir, plugin.mount)))
+    plugins.every((plugin) =>
+      pluginArtifacts(plugin).every((path) => existsSync(join(dir, path))),
+    )
     ? "applied"
     : "stock";
 }
