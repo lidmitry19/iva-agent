@@ -13,12 +13,12 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isAuthoredPath } from "./authored-paths.ts";
+import { resolveDataDir } from "./data-dir.ts";
 import {
   alertResolved,
   PLUGIN_ALERT_KEY,
   pluginsSwitchedOffAlert,
 } from "./notice-policy.ts";
-import { resolveDataDir } from "./data-dir.ts";
 import {
   buildPluginExtension,
   codePlugins,
@@ -477,9 +477,9 @@ export async function finishVersionUpdate({
         requirePlugins,
       }).catch(discard);
       custom = built.custom;
-      // The build is done and the version is good; a plugin it refused is switched
-      // off before anything else happens, so a probe failure or a bad start cannot
-      // leave the installation carrying a plugin nothing can build.
+      // What the build refused is remembered, not announced yet: the start below can
+      // still take another plugin out, and the owner gets one message about the tree
+      // that ends up installed rather than one per attempt.
       refuse(built.failed);
       mounted = built.mounted;
     }
