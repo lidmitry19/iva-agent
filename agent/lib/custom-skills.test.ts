@@ -544,3 +544,30 @@ test("a damaged plugins.json costs no skills, says so once, and is never touched
     "plugins.json",
   ]);
 });
+
+test("the skill that loses its name costs the turn no reads at all", async () => {
+  const data = await liveWorld(
+    [pluginEntry("alpha"), pluginEntry("beta")],
+    (dir) => {
+      for (const plugin of ["alpha", "beta"])
+        write(
+          dir,
+          `custom/plugins/${plugin}/skills/viewer/SKILL.md`,
+          `---\nname: viewer\ndescription: From ${plugin}.\n---\n\nBody.\n`,
+        );
+      // Соседний файл проигравшего сделан нечитаемым: если бы резолвер читал
+      // содержимое до того, как имя разыграно, в логе была бы строка про EACCES.
+      write(dir, "custom/plugins/beta/skills/viewer/references/big.md", "x\n");
+      chmodSync(
+        join(dir, "custom/plugins/beta/skills/viewer/references/big.md"),
+        0o000,
+      );
+    },
+  );
+
+  const { skills, log } = await live(data);
+  assert.equal(skills.viewer.description, "From alpha.");
+  assert.deepEqual(log, [
+    "[skills] plugin skill viewer from beta skipped: alpha already provides it",
+  ]);
+});
