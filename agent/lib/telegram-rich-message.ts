@@ -254,8 +254,17 @@ const codeWrap: Wrap = (inner) => {
   return `${bar}${pad}${inner}${pad}${bar}`;
 };
 
+// Разметка живёт внутри одной строки и не липнет к своему же знаку: одинокая `*` на
+// строке — уже пункт списка, `~~` внутри `~~` — забор кода, а пробел по краям markdown
+// и так не оформит. В этих случаях строка остаётся без знаков: текст цел, блок не
+// открывается.
 function markWrap(mark: string): Wrap {
-  return (inner) => (inner === "" ? "" : `${mark}${inner}${mark}`);
+  return (inner) =>
+    inner.replace(/^.*$/gmu, (line) =>
+      line === "" || line !== line.trim() || line.startsWith(mark)
+        ? line
+        : `${mark}${line}${mark}`,
+    );
 }
 
 // H1 и H2 в daily-файл не идут: там свой заголовок. Ниже третьего уровня разметка

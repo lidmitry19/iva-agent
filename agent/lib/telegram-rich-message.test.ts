@@ -6,8 +6,8 @@
 // Политика листьев повторяет ту, что записана в telegram-rich-message.ts, и здесь
 // она превращается в проверку: строка → сама строка, RichText с `text` → листья
 // вложенного текста, custom_emoji → alternative_text, math → expression,
-// mention → текст плюс @username, anchor и divider → текста нет,
-// RichBlockCaption → text, затем credit. Отличие от прежней попытки: медиа в
+// mention → текст плюс @username, anchor и сноска → текст плюс #имя,
+// divider → текста нет, RichBlockCaption → text, затем credit. Отличие от прежней попытки: медиа в
 // списке ожиданий не только фото, а любой файл на любой глубине.
 //
 // КАК ВОСПРОИЗВЕСТИ ПАДЕНИЕ: fast-check печатает строку вида
@@ -586,7 +586,7 @@ const BLOCK_PROBES: readonly BlockProbe[] = [
   {
     name: "anchor",
     block: { type: "anchor", name: "sec" },
-    leaves: [],
+    leaves: ["sec"],
     media: [],
   },
   {
@@ -838,21 +838,21 @@ const TEXT_PROBES: readonly TextProbe[] = [
     node: { type: "bot_command", text: "TXT", bot_command: "/s" },
     leaves: ["TXT"],
   },
-  { name: "anchor", node: { type: "anchor", name: "sec" }, leaves: [] },
+  { name: "anchor", node: { type: "anchor", name: "sec" }, leaves: ["sec"] },
   {
     name: "anchor_link",
     node: { type: "anchor_link", text: "TXT", anchor_name: "sec" },
-    leaves: ["TXT"],
+    leaves: ["TXT", "sec"],
   },
   {
     name: "reference",
     node: { type: "reference", text: "TXT", name: "r" },
-    leaves: ["TXT"],
+    leaves: ["TXT", "r"],
   },
   {
     name: "reference_link",
     node: { type: "reference_link", text: "TXT", reference_name: "r" },
-    leaves: ["TXT"],
+    leaves: ["TXT", "r"],
   },
 ];
 
@@ -978,11 +978,36 @@ test("blocks are separated by a blank line and empty ones leave no gap", () => {
     readRichMessage({
       blocks: [
         { type: "paragraph", text: "one" },
-        { type: "anchor", name: "invisible" },
+        { type: "paragraph", text: "" },
+        { type: "collage", blocks: [] },
         { type: "paragraph", text: "two" },
       ],
     }).text,
     "one\n\ntwo",
+  );
+});
+
+// Имя якоря — тоже текст автора: ссылка внутри пересланной статьи без него повисает.
+test("an anchor name is kept as a marker, not dropped", () => {
+  assert.equal(
+    readRichMessage({ blocks: [{ type: "anchor", name: "section-3" }] }).text,
+    "\\#section-3",
+  );
+  assert.equal(
+    readRichMessage({
+      blocks: [
+        {
+          type: "paragraph",
+          text: { type: "anchor_link", text: "go", anchor_name: "s3" },
+        },
+      ],
+    }).text,
+    "go (\\#s3)",
+  );
+  // Своя решётка экранирована: в начале строки она стала бы заголовком.
+  assert.equal(
+    readRichMessage({ blocks: [{ type: "anchor", name: " Injected" }] }).text,
+    "\\# Injected",
   );
 });
 
@@ -1688,6 +1713,14 @@ const rawLeaf = fc.oneof(
     "[a]: javascript:alert(1)",
     "\\](data:text/html,x)",
     "<script>alert(1)</script>",
+    "# heading",
+    "\n\n> quote",
+    "\n- item",
+    "\n1. item",
+    "\n| a | b |\n| --- | --- |",
+    "\n---",
+    "\n===",
+    "look!",
   ),
 );
 
@@ -1803,4 +1836,273 @@ describe("PROPERTY: escaping a leaf is reversible", () => {
       );
     });
   }
+});
+
+// --- целостность разметки: чужой текст не строит блоки -----------------------
+// Daily-файл принадлежит Шиме, а не отправителю: пересланный абзац не имеет права
+// открыть заголовок (тем более H1 или H2), цитату, список, черту или таблицу.
+const BLOCK_OPENER =
+  /^ {0,3}(#{1,6}([ \t]|$)|>|[-+*]([ \t]|$)|\d{1,9}[.)]([ \t]|$)|\||={1,}[ \t]*$|-{3,}[ \t]*$|_{3,}[ \t]*$|~{3,}|`{3,})/u;
+
+/** Живые `![…](…)`: такую картинку markdown грузит по чужому адресу при открытии. */
+function findImages(source: string): string[] {
+  const found: string[] = [];
+  for (const match of source.matchAll(/!\[[^\]]*\]\(/gu)) {
+    let slashes = 0;
+    while (source[(match.index ?? 0) - 1 - slashes] === "\\") slashes += 1;
+    if (slashes % 2 === 0) found.push(match[0]);
+  }
+  return found;
+}
+
+function openedBlocks(text: string): string[] {
+  return text.split("\n").filter((line) => BLOCK_OPENER.test(line));
+}
+
+test("a forwarded paragraph cannot forge a block of its own", () => {
+  const cases: readonly string[] = [
+    "before\n\n# Injected H1\n\nafter",
+    "title\n===\n\nsubtitle\n---",
+    "a\n\n---\n\n> quoted\n\n- item\n\n1. numbered",
+    "x\n\n| a | b |\n| --- | --- |\n| 1 | 2 |",
+    "   ## indented heading",
+    "~~~js\nnot our fence\n~~~",
+  ];
+  for (const text of cases) {
+    const reading = readRichMessage({ blocks: [{ type: "paragraph", text }] });
+    assert.deepEqual(
+      openedBlocks(reading.text),
+      [],
+      `text=${JSON.stringify(reading.text)}`,
+    );
+    assert.equal(unescape(reading.text), text);
+  }
+});
+
+// `!` вплотную к нашей ссылке — это `![…](…)`, то есть загрузка чужого адреса при
+// открытии файла: IP читателя и отметка о прочтении уходят отправителю.
+test("a leaf ending in a bang never promotes the next link to an image", () => {
+  const reading = readRichMessage({
+    blocks: [
+      {
+        type: "paragraph",
+        text: [
+          "Look!",
+          { type: "url", text: "here", url: "https://tracker.example/p.gif" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(findImages(reading.text), [], `text=${reading.text}`);
+  assert.equal(
+    unescape(reading.text),
+    "Look![here](https://tracker.example/p.gif)",
+  );
+  assert.deepEqual(
+    scanLinks(reading.text).map((link) => link.dest),
+    ["https://tracker.example/p.gif"],
+  );
+  // Экранированный слэш перед `!` не должен снимать экран с самого знака.
+  const doubled = readRichMessage({
+    blocks: [
+      {
+        type: "paragraph",
+        text: ["\\!", { type: "url", text: "h", url: "https://e.example" }],
+      },
+    ],
+  });
+  assert.deepEqual(findImages(doubled.text), [], `text=${doubled.text}`);
+});
+
+const MARKUP = [
+  "#",
+  "###",
+  ">",
+  "-",
+  "+",
+  "*",
+  "=",
+  "===",
+  "_",
+  "___",
+  "~~~",
+  "|",
+  "1.",
+  "2)",
+  "---",
+  "***",
+  "!",
+  "[",
+  "]",
+  "(",
+  ")",
+  "\n",
+  "\n\n",
+  " ",
+  "\t",
+  "a",
+  "б",
+];
+
+const markupLeaf = fc
+  .array(fc.constantFrom(...MARKUP), { maxLength: 14 })
+  .map((parts) => parts.join(""));
+
+// Обёртки без своей блочной разметки: забор кода строит `` ``` `` сам, и это наша
+// разметка, а не подделка отправителя, поэтому `code` и `pre` сюда не входят.
+const PLAIN_WRAPPERS = [
+  "bold",
+  "italic",
+  "underline",
+  "strikethrough",
+  "spoiler",
+  "marked",
+  "subscript",
+  "superscript",
+  "text_mention",
+  "hashtag",
+  "cashtag",
+  "bot_command",
+] as const;
+
+interface MarkupGen {
+  readonly value: unknown;
+  readonly leaves: readonly string[];
+}
+
+const markupText: fc.Arbitrary<MarkupGen> = fc.letrec<{ node: MarkupGen }>(
+  (tie) => ({
+    node: fc.oneof(
+      { depthSize: "small" },
+      markupLeaf.map((value) => ({ value, leaves: [value] })),
+      fc.array(tie("node"), { maxLength: 3 }).map((kids) => ({
+        value: kids.map((kid) => kid.value),
+        leaves: kids.flatMap((kid) => [...kid.leaves]),
+      })),
+      fc
+        .tuple(fc.constantFrom(...PLAIN_WRAPPERS), tie("node"))
+        .map(([type, kid]) => ({
+          value: { type, text: kid.value },
+          leaves: [...kid.leaves],
+        })),
+    ),
+  }),
+).node;
+
+const markupMessage: fc.Arbitrary<MarkupGen> = fc
+  .array(markupText, { minLength: 1, maxLength: 3 })
+  .map((kids) => ({
+    value: {
+      blocks: kids.map((kid) => ({ type: "paragraph", text: kid.value })),
+    },
+    leaves: kids.flatMap((kid) => [...kid.leaves]),
+  }));
+
+describe("PROPERTY: markdown structure belongs to the reader, not to the sender", () => {
+  for (const seed of SEEDS) {
+    it(`no leaf opens a block and none is lost (seed=${seed})`, () => {
+      fc.assert(
+        fc.property(markupMessage, (generated) => {
+          const reading = readRichMessage(generated.value);
+          assert.deepEqual(
+            openedBlocks(reading.text),
+            [],
+            `payload=${JSON.stringify(generated.value)}\ngot=${JSON.stringify(reading.text)}`,
+          );
+          assert.deepEqual(findImages(reading.text), []);
+          // Разметка не переходит на другую строку, поэтому лист сверяется по
+          // строкам: внутри строки его байты обязаны лежать подряд и по порядку.
+          const lines = generated.leaves.flatMap((leaf) => leaf.split("\n"));
+          assert.deepEqual(
+            missingLeaves(unescape(reading.text), lines),
+            [],
+            `payload=${JSON.stringify(generated.value)}\ngot=${JSON.stringify(reading.text)}`,
+          );
+          assert.equal(reading.truncated, false);
+        }),
+        { seed, numRuns: 1000 },
+      );
+    });
+  }
+});
+
+// --- потолок держит и работу, и память --------------------------------------
+// Общий массив детей: каждый узел ссылается на тот же список, включая себя. Раньше
+// список копировался в стек задач на каждом узле, и память росла как квадрат потолка.
+test("a wide cyclic child array stays linear in memory and time", () => {
+  const node: Record<string, unknown> = { type: "collage", text: "KEEP" };
+  const shared = new Array<unknown>(5_000).fill(node);
+  node.blocks = shared;
+  const before = process.memoryUsage().heapUsed;
+  const started = Date.now();
+  const reading = readRichMessage({ blocks: shared });
+  const grewMB = Math.round(
+    (process.memoryUsage().heapUsed - before) / 1048576,
+  );
+  const spent = Date.now() - started;
+  assert.ok(reading.text.includes("KEEP"), "прочитанное потеряно");
+  assert.equal(reading.truncated, true);
+  assert.ok(
+    grewMB < 96,
+    `куча выросла на ${grewMB} МБ при потолке 50000 узлов`,
+  );
+  assert.ok(spent < 2_000, `обход занял ${spent} мс`);
+});
+
+test("an array that claims a billion children is bounded by the node ceiling", () => {
+  const sparse: unknown[] = [{ type: "paragraph", text: "FIRST" }];
+  sparse.length = 4_000_000_000;
+  const started = Date.now();
+  const reading = readRichMessage({ blocks: sparse });
+  assert.ok(
+    reading.text.startsWith("FIRST"),
+    `text=${reading.text.slice(0, 40)}`,
+  );
+  assert.equal(reading.truncated, true);
+  assert.ok(Date.now() - started < 2_000, "обход не уложился в две секунды");
+
+  // Линейка таблицы меряется по строкам, поэтому её тоже держит потолок.
+  const table = readRichMessage({
+    blocks: [{ type: "table", cells: sparse, caption: "CAPLEAF" }],
+  });
+  assert.equal(typeof table.text, "string");
+  assert.equal(table.truncated, true);
+});
+
+// --- рваная таблица ---------------------------------------------------------
+test("a ragged table sizes its ruler by the widest row and pads the header", () => {
+  assert.equal(
+    readRichMessage({
+      blocks: [
+        {
+          type: "table",
+          cells: [
+            [{ text: "h1" }],
+            [{ text: "c1" }, { text: "c2" }, { text: "c3" }],
+          ],
+        },
+      ],
+    }).text,
+    "| h1 |   |   |\n| --- | --- | --- |\n| c1 | c2 | c3 |",
+  );
+});
+
+// --- ловушка в геттере ------------------------------------------------------
+test("a trapped field is reported as an incomplete reading", () => {
+  const bomb = {
+    type: "paragraph",
+    get text(): unknown {
+      throw new Error("boom");
+    },
+  };
+  const reading = readRichMessage({
+    blocks: [bomb, { type: "paragraph", text: "TAIL" }],
+  });
+  assert.ok(reading.text.includes("TAIL"), `text=${reading.text}`);
+  assert.equal(reading.truncated, true);
+  // Соседнее чистое сообщение не наследует чужую ловушку.
+  const clean = readRichMessage({
+    blocks: [{ type: "paragraph", text: "OK" }],
+  });
+  assert.equal(clean.truncated, false);
 });
