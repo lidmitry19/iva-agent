@@ -12,7 +12,8 @@ import { notificationChat } from "./lib/notification-chat.ts";
 import {
   alertOnce,
   noticeTranslator,
-  pluginBuildFailedAlert,
+  PLUGIN_ALERT_KEY,
+  pluginsSwitchedOffAlert,
 } from "./lib/notice-policy.ts";
 import {
   isEntrypoint,
@@ -433,10 +434,10 @@ export async function alertOwnerAboutPlugins(
   if (!deliver) return; // Nowhere to say it; the output above is all there is.
   const tr = await noticeTranslator(layout.values);
   const names = failures.map((failure) => failure.name);
-  const text = pluginBuildFailedAlert(tr, names);
+  const text = pluginsSwitchedOffAlert(tr, names);
   const outcome = await alertOnce(
     layout.data,
-    "plugin-build",
+    PLUGIN_ALERT_KEY,
     // The essence is which content failed: a plugin the owner has since changed is a
     // different problem and speaks at once instead of waiting out the week.
     failures.map((failure) => `${failure.name}@${failure.digest}`).join(" "),

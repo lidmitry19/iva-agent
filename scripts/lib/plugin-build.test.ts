@@ -55,7 +55,7 @@ function plant(
     `custom/plugins/${name}/plugin.json`,
     JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name, version: "1.0.0" }),
   );
-  if (code)
+  if (code) {
     write(
       data,
       `custom/plugins/${name}/sh.iva/package.json`,
@@ -64,6 +64,12 @@ function plant(
         eve: { extension: { source: "./extension", dist: "./dist/extension" } },
       }),
     );
+    write(
+      data,
+      `custom/plugins/${name}/sh.iva/tsconfig.json`,
+      '{ "include": ["extension/**/*.ts"] }\n',
+    );
+  }
   if (config !== undefined)
     write(data, `custom/plugins/${name}.config.json`, config);
 }

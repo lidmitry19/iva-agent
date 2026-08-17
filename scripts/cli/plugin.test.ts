@@ -14,6 +14,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -115,6 +116,9 @@ function codePlugin(
   const folder = join(world("code"), name);
   plantPlugin(folder, name, skill, version);
   write(folder, "sh.iva/index.ts", body);
+  // Свой tsconfig — часть контракта расширения: без него eve не эмитит декларации
+  // внутри дерева версии (TS5112), и `add` отказывает ещё до стора.
+  write(folder, "sh.iva/tsconfig.json", '{ "include": ["*.ts"] }\n');
   write(
     folder,
     "sh.iva/package.json",
@@ -723,6 +727,10 @@ test("leftovers of an interrupted install are reported, then swept under the loc
   const plugins = join(data, "custom/plugins");
   mkdirSync(join(plugins, ".staging-abc"), { recursive: true });
   mkdirSync(join(plugins, ".replaced-9f"), { recursive: true });
+  // Старая смещённая копия: за ней уже некому вернуться. Свежую уборка не трогает —
+  // её держит идущая установка, и на это есть свой тест.
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  utimesSync(join(plugins, ".replaced-9f"), old, old);
   // Законное имя плагина, которое сметало бы вместе с недоделками, если бы уборка
   // смотрела на `.replaced-` где угодно в имени, а не в его начале.
   plantPlugin(join(plugins, "helper.replaced-x"), "helper.replaced-x", "beta");
@@ -1747,4 +1755,118 @@ test("a name eve cannot mount is refused for code and fine for skills", async ()
     ["7zip"],
   );
   assert.deepEqual(build.calls, []);
+});
+
+test("a version that runs without the plugin's code is not a successful install", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  // The pipeline says it built something; the version that runs has no mount for the
+  // plugin. "installed" is a promise about the code that runs, so this is a failure.
+  const build = buildStub({ status: "built", version: "0.3.24-abcdefabcdef" });
+  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+
+  await cmdPlugin(["add", folder]);
+
+  // The stub cannot lie about a real version tree, so the guard that catches this lives
+  // in `rebuild` (scripts/cli/version-update-command.ts); here the contract is that a
+  // failure reason from it aborts the install, whatever produced it.
+  build.outcome = {
+    status: "failed",
+    reason: "0.3.24-abcdefabcdef runs without the code of carrier",
+  };
+  await cmdPlugin(["disable", "carrier"]);
+  await assert.rejects(
+    cmdPlugin(["enable", "carrier"]),
+    /carrier stays disabled: .*runs without the code of carrier/u,
+  );
+  assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
+});
+
+test("a code plugin without a tsconfig in sh.iva is refused with what to do", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  rmSync(join(folder, "sh.iva/tsconfig.json"));
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+
+  await assert.rejects(
+    cmdPlugin(["add", folder]),
+    /carrier carries code without sh\.iva\/tsconfig\.json.*eve extension init/su,
+  );
+
+  assert.equal(existsSync(pluginRoot(data, "carrier")), false);
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+  assert.deepEqual(build.calls, []);
+});
+
+test("the copy an install displaced survives another command's sweep while it builds", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  await cmdPlugin(["add", folder]);
+  // What an install in progress leaves in the store while its version builds: the copy
+  // it displaced, waiting to be put back if the build fails. The build holds the update
+  // lock, so the only thing that can take it away is the next command's sweep.
+  const plugins = join(data, "custom/plugins");
+  mkdirSync(join(plugins, ".replaced-fresh"), { recursive: true });
+
+  await cmdPlugin(["list"]);
+  await cmdPlugin(["disable", "carrier"]);
+
+  assert.ok(
+    existsSync(join(plugins, ".replaced-fresh")),
+    "a young displaced copy belongs to a build that is still running",
+  );
+});
+
+test("an update of several plugins names the one that broke the build", async () => {
+  const root = home();
+  const first = codePlugin("alpha-code", { skill: "one" });
+  const second = codePlugin("beta-code", { skill: "two" });
+  const build = buildStub();
+  const { cmdPlugin, data } = commands(root, undefined, undefined, build);
+  await cmdPlugin(["add", first]);
+  await cmdPlugin(["add", second]);
+  const installed = await readPluginsState(data);
+
+  write(first, "sh.iva/index.ts", "export const one = 1;\n");
+  write(second, "sh.iva/index.ts", "export const two = 2;\n");
+  build.outcome = {
+    status: "failed",
+    reason: "building the extension of beta-code:\neve: extension build failed",
+  };
+
+  await assert.rejects(
+    cmdPlugin(["update"]),
+    /nothing was updated: building the extension of beta-code/u,
+  );
+
+  // Both are back where they were: one build serves the whole run, so one failure takes
+  // the whole run back.
+  assert.deepEqual(await readPluginsState(data), installed);
+  assert.deepEqual(leftoverPluginDirs(join(data, "custom/plugins")), []);
+});
+
+test("sync says the code of a restored plugin is not in the version that runs", async () => {
+  const root = home();
+  const folder = codePlugin("carrier");
+  const build = buildStub();
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    build,
+  );
+  await cmdPlugin(["add", folder]);
+  rmSync(pluginRoot(data, "carrier"), { recursive: true, force: true });
+  events.length = 0;
+
+  await cmdPlugin(["sync"]);
+
+  assert.match(messages(events, "ok"), /carrier restored/u);
+  assert.match(
+    messages(events, "warn"),
+    /carrier: code is not built into the current version — run: iva update/u,
+  );
 });

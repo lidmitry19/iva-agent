@@ -13,6 +13,11 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isAuthoredPath } from "./authored-paths.ts";
+import {
+  alertResolved,
+  PLUGIN_ALERT_KEY,
+  pluginsSwitchedOffAlert,
+} from "./notice-policy.ts";
 import { resolveDataDir } from "./data-dir.ts";
 import {
   buildPluginExtension,
@@ -250,12 +255,31 @@ export async function runVersionUpdate(
 
     const target = await resolveTarget();
     // Half of what gets built, so half of what it is called.
-    const { digest } = await versionOverlay(store.layout.data, log);
+    const { digest, plugins } = await versionOverlay(store.layout.data, log);
     const release = versionName(target.version, target.sha, digest);
     const active = store.currentName();
+    /**
+     * Is the code of every enabled plugin really in this build? A release name says
+     * what a version was built FOR, not what came out of it: a build that refused a
+     * plugin, or one made while the plugin was switched off, carries the same name.
+     * Handing such a tree back would report a plugin as installed with no code in the
+     * version and its skills live - half a plugin, which is worse than none. Same
+     * shape as `store.liveFailed`: a build that is not good enough to reuse.
+     */
+    const carriesPlugins = (name: string): boolean =>
+      plugins.length === 0 ||
+      builtWith(
+        join(store.layout.versions, name),
+        name,
+        join(store.layout.data, "custom"),
+        plugins,
+      ) === "applied";
     // Finished, not just flipped: unrun migrations are an update still owed.
     const settled =
-      active && releaseOf(active) === release && store.settled() === active;
+      active &&
+      releaseOf(active) === release &&
+      store.settled() === active &&
+      carriesPlugins(active);
     if (settled && !force) {
       if (store.cleanupPending(active))
         return handoff
@@ -272,7 +296,11 @@ export async function runVersionUpdate(
     const finished =
       force || store.liveFailed(release)
         ? undefined
-        : store.list().find((name) => releaseOf(name) === release);
+        : store
+            .list()
+            .find(
+              (name) => releaseOf(name) === release && carriesPlugins(name),
+            );
     const name = finished ?? store.nextBuild(release);
     if (!finished) {
       const dir = store.stage(name);
@@ -328,6 +356,50 @@ export async function finishVersionUpdate({
   const tell =
     alertPlugins ??
     ((failures) => Promise.resolve(notify(pluginsOffNotice(failures))));
+  /**
+   * The plugins whose code is in this tree right now - read from the tree, because a
+   * version may have been built by an earlier run, and a rebuild here can take a
+   * plugin back out of one.
+   */
+  let mounted: readonly CodePlugin[] = plugins.filter((plugin) =>
+    existsSync(join(dir, plugin.mount)),
+  );
+  /** Why a plugin is not in the tree, by name; the owner gets told at the end. */
+  const refusals = new Map<string, string>();
+  const refuse = (failures: readonly PluginFailure[]): void => {
+    for (const failure of failures) refusals.set(failure.name, failure.reason);
+  };
+  /**
+   * What a plugin that did not make it into the tree costs. Said once, at the end,
+   * when the tree is final: every path here can drop a plugin - its own build, the
+   * agent build, a start that fails, a rebuild without the customization - and an
+   * owner does not need one message per attempt. The switch comes before the Alert:
+   * being told a plugin is off has to mean finding it off.
+   */
+  const settlePlugins = async (): Promise<void> => {
+    const dropped = plugins.filter(
+      (plugin) => !mounted.some((one) => one.name === plugin.name),
+    );
+    if (dropped.length === 0) {
+      // Every enabled plugin is in: whatever was refused before is over, and a
+      // relapse next week speaks at once instead of waiting out the throttle.
+      if (plugins.length > 0)
+        alertResolved(store.layout.data, PLUGIN_ALERT_KEY);
+      return;
+    }
+    const failures = dropped.map((plugin) => ({
+      name: plugin.name,
+      digest: plugin.digest,
+      reason:
+        refusals.get(plugin.name) ??
+        `${name} was installed without the code of ${plugin.name}`,
+    }));
+    for (const failure of failures) {
+      if (await disableCodePlugin(store.layout.data, failure.name))
+        log(`switched the plugin ${failure.name} off`);
+    }
+    await tell(failures);
+  };
   let custom = builtWith(dir, name, customDir, plugins);
   if (active === name && settledBefore === name && store.cleanupPending(name)) {
     await runPostHealthCleanup({
@@ -392,6 +464,7 @@ export async function finishVersionUpdate({
       );
       await buildStock(store, name, run).catch(discard);
       custom = builtWith(dir, name, customDir, plugins);
+      mounted = [];
       if (custom === "stock") notify(deferredNotice());
     } else {
       const built = await buildVersion({
@@ -407,19 +480,44 @@ export async function finishVersionUpdate({
       // The build is done and the version is good; a plugin it refused is switched
       // off before anything else happens, so a probe failure or a bad start cannot
       // leave the installation carrying a plugin nothing can build.
-      for (const failure of built.failed) {
-        if (await disableCodePlugin(store.layout.data, failure.name))
-          log(`switched the plugin ${failure.name} off`);
-      }
-      if (built.failed.length > 0) await tell(built.failed);
+      refuse(built.failed);
+      mounted = built.mounted;
     }
     let health = await prove();
+    // The build was green and the service still did not come up. The plugins are the
+    // part of the tree the release does not ship and the owner can put back one at a
+    // time, so they come out before the user's own files do (ADR-0003: one plugin may
+    // not keep the box down). Not under `requirePlugins`: there the plugin is the
+    // point of the build, and a version that will not start with it is a refusal.
+    if (!health.ok && mounted.length > 0 && !prepared && !requirePlugins) {
+      log(
+        "the version does not start with its plugins; rebuilding without them",
+      );
+      const broken = health.log;
+      for (const plugin of mounted) removePluginFromVersion(dir, plugin);
+      const again = await run("npm", BUILD, dir);
+      if (again.code === 0) {
+        health = await prove();
+        if (health.ok) {
+          refuse(
+            mounted.map((plugin) => ({
+              name: plugin.name,
+              digest: plugin.digest,
+              reason: `this version does not start with the plugin ${plugin.name}:\n${broken.slice(-OUTPUT_TAIL)}`,
+            })),
+          );
+          custom = builtWith(dir, name, customDir, []);
+          mounted = [];
+        }
+      }
+    }
     // A green build is not a start: the service compiles the authored TypeScript
     // again when it comes up, and a release is not the user's code to hold up.
     if (!health.ok && custom === "applied" && !prepared) {
       log("the customized version does not start; rebuilding without it");
       await buildStock(store, name, run).catch(discard);
       custom = "stock";
+      mounted = [];
       const broken = health.log;
       health = await prove();
       if (health.ok) notify(stockNotice("start against", broken));
@@ -433,6 +531,9 @@ export async function finishVersionUpdate({
       );
       return { status: "unhealthy", version: name, log: health.log };
     }
+    // The tree is final and it starts: the state of the plugins is settled against it,
+    // so `plugins.json` can never claim a plugin whose code is not in what runs.
+    await settlePlugins();
     // Proved and immutable. It remains a candidate until all old writers stop
     // and every state migration finishes against the old active Version.
     store.complete(name);
@@ -671,16 +772,13 @@ function deferredNotice(): string {
  * `iva update` from Telegram is exactly the run whose output nobody reads.
  */
 export function pluginsOffNotice(failures: readonly PluginFailure[]): string {
-  const named = failures.map((failure) => failure.name).join(", ");
-  const one = failures.length === 1;
-  return (
-    `${one ? "this plugin does" : "these plugins do"} not build with this version, so ` +
-    `${one ? "it is" : "they are"} switched off: ${named}. ` +
-    `${one ? "Its" : "Their"} code and skills are out until fixed. Update and turn back ` +
-    `on: iva plugin update <name>, then iva plugin enable <name>` +
-    `${one ? "" : " - one at a time, so the one that breaks the build is the one you see"}.` +
-    `\n${failures[0]?.reason.slice(-1500) ?? ""}`
+  // The same sentence the chat gets, in the language of the terminal, plus the reason
+  // the chat does not carry: one text, so the two channels cannot drift apart.
+  const text = pluginsSwitchedOffAlert(
+    (english) => english,
+    failures.map((failure) => failure.name),
   );
+  return `${text}\n${failures[0]?.reason.slice(-1500) ?? ""}`;
 }
 
 /** One npm step in place; the step's own output is the failure report. */
@@ -694,9 +792,10 @@ async function npmStep(
   if (done.code !== 0) throw new Error(`${what} failed:\n${done.output}`);
 }
 
-/** What a build carried, and every plugin it refused along the way. */
+/** What a build carried, what it mounted, and every plugin it refused along the way. */
 type BuiltVersion = {
   readonly custom: Custom;
+  readonly mounted: readonly CodePlugin[];
   readonly failed: readonly PluginFailure[];
 };
 
@@ -763,7 +862,8 @@ async function buildVersion({
   }
 
   const built = await run("npm", BUILD, dir);
-  if (built.code === 0) return { custom: carried(mounted.length), failed };
+  if (built.code === 0)
+    return { custom: carried(mounted.length), mounted, failed };
 
   // The tree will not compile with the plugins in it. Which one of them it is is not
   // worth a search: they are the only part of the tree that is neither upstream's nor
@@ -779,6 +879,7 @@ async function buildVersion({
       log(reason);
       return {
         custom: carried(0),
+        mounted: [],
         failed: [
           ...failed,
           ...mounted.map((plugin) => ({
@@ -799,7 +900,7 @@ async function buildVersion({
   log("the customized build failed; rebuilding this version without it");
   await buildStock(store, name, run);
   notify(stockNotice("build against", built.output));
-  return { custom: "stock", failed };
+  return { custom: "stock", mounted: [], failed };
 }
 
 /** Rebuild a staged version from its commit alone: a broken customization is tried once. */

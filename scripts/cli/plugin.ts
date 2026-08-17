@@ -22,6 +22,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -29,8 +30,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { PluginManifest, PluginReport } from "#lib/plugin-reader.ts";
 import type { PluginEntry, PluginsState } from "#lib/plugin-store.ts";
 import {
-  namespaceProblem,
   namespaceTaken,
+  pluginCodeProblem,
   pluginNamespace,
 } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
@@ -99,6 +100,12 @@ type Provenance = {
 // начинается с буквы или цифры (§5.5) — значит уборка не может задеть плагин.
 const STAGING_PREFIX = ".staging-";
 const REPLACED_PREFIX = ".replaced-";
+/**
+ * Сколько недоделка считается живой. Столько времени идёт сборка версии, ради которой
+ * смещённая копия и держится: лок на это время у апдейтера, и уборка чужой команды —
+ * единственный, кто может её унести.
+ */
+const LEFTOVER_GRACE_MS = 60 * 60 * 1000;
 
 /** Пришло из ADR-0008 «Принятый риск»: показывается один раз, перед первой установкой. */
 const RISK_EN =
@@ -353,7 +360,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         if (report.code) {
           // Оба отказа — до переезда в стор: mount пишется во время сборки версии,
           // и коллизия, найденная там, стала бы отказом сборки вместо ответа команде.
-          const problem = namespaceProblem(name);
+          const problem = pluginCodeProblem(staged.root, name);
           if (problem) throw new Error(problem);
           const taken = namespaceTaken(name, owned.code);
           if (taken)
@@ -402,13 +409,34 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       }
     }
 
-    /** Недоделки прерванной установки; чистятся под локом, до работы. */
+    /**
+     * Недоделки прерванной установки; чистятся под локом, до работы.
+     *
+     * Со смещённой копией (`.replaced-`) есть оговорка: она живёт, пока идёт сборка
+     * версии, а сборка идёт БЕЗ нашего лока — лок на это время у апдейтера. Свежую
+     * такую копию не трогаем: снести её значит отобрать у команды единственный способ
+     * вернуть плагин на место, если версия с ним не соберётся. Staging (`.staging-`)
+     * оговорки не требует: его создают и убирают под тем же локом, что держим мы,
+     * поэтому чужой staging здесь — всегда след прерванного процесса.
+     */
     function sweepLeftovers(data: string): number {
       const directory = pluginsDir(data);
-      const leftovers = leftoverPluginDirs(directory);
-      for (const name of leftovers)
-        rmSync(join(directory, name), { recursive: true, force: true });
-      return leftovers.length;
+      const swept = leftoverPluginDirs(directory).filter((name) => {
+        const path = join(directory, name);
+        if (name.startsWith(REPLACED_PREFIX) && inUse(path)) return false;
+        rmSync(path, { recursive: true, force: true });
+        return true;
+      });
+      return swept.length;
+    }
+
+    /** Достаточно свежая, чтобы принадлежать идущей прямо сейчас установке. */
+    function inUse(path: string): boolean {
+      try {
+        return now().getTime() - statSync(path).mtimeMs < LEFTOVER_GRACE_MS;
+      } catch {
+        return false; // Папки уже нет — держать нечего.
+      }
     }
 
     /**
@@ -1023,7 +1051,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
               source.kind === "git" && entry.sha
                 ? { ...source, ref: entry.sha }
                 : source;
-            const { entry: installed } = await install(
+            const { entry: installed, report } = await install(
               data,
               next,
               pinned,
@@ -1035,6 +1063,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
               ref: entry.ref,
             });
             ok(`${entry.name} restored`);
+            // `sync` доставляет папки, а не собирает версии: код плагина попадёт в
+            // работающую версию только следующей сборкой, и молчать об этом нельзя.
+            if (report.code && installed.enabled)
+              warn(
+                translate(
+                  `${entry.name}: code is not built into the current version — run: iva update`,
+                  `${entry.name}: кода нет в работающей версии — запусти: iva update`,
+                ),
+              );
           } catch (error) {
             failed.push(entry.name);
             bad(`${entry.name}: ${(error as Error).message}`);

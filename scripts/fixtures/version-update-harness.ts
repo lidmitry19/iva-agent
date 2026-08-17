@@ -64,6 +64,32 @@ export function fixtureRunner(hook?: (step: string) => Promise<void>): Runner {
         join(cwd, "dist/extension/extension.mjs"),
         "export default {};\n",
       );
+      writeFileSync(join(cwd, "dist/extension/_manifest.json"), "{}\n");
+      writeFileSync(join(cwd, "dist/index.mjs"), "export default {};\n");
+      // Exactly what the real eve leaves behind (0.30.8): an `exports` map pointing at
+      // the build and no `main`. The missing `main` is why a generated mount used to
+      // resolve for discovery and fail in the bundler, so the fake must not invent one.
+      const manifest = join(cwd, "package.json");
+      const declared = JSON.parse(readFileSync(manifest, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      writeFileSync(
+        manifest,
+        `${JSON.stringify(
+          {
+            ...declared,
+            exports: {
+              ".": {
+                types: "./dist/index.d.ts",
+                default: "./dist/index.mjs",
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
       return { code: 0, output: "extension built" };
     }
     if (args[0] === "run" && args[1] === "build") {

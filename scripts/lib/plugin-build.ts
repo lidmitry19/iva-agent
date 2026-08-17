@@ -13,7 +13,13 @@
  * `agent/` is therefore reached through `tryLoadPluginCore()`, and a missing tree is a
  * diagnostic, not a crash: a version that cannot read its plugins still builds.
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tryLoadPluginCore } from "./plugin-core.ts";
@@ -22,21 +28,23 @@ import type { Runner } from "./version-update.ts";
 type Say = (message: string) => void;
 
 /** Folder eve reads mounts from; the file name in it is the namespace. */
-export const MOUNT_DIR = "agent/extensions";
+const MOUNT_DIR = "agent/extensions";
 /** Where a version keeps the copies it builds plugin code from. */
-export const PLUGIN_DIR = "plugins";
+const PLUGIN_DIR = "plugins";
 /** The namespace folder of a plugin's code, as ADR-0009 pins it. */
-export const CODE_DIR = "sh.iva";
+const CODE_DIR = "sh.iva";
 /** The version's own eve: a plugin is always built by the eve that will run it. */
 const EVE_BIN = "node_modules/.bin/eve";
 const EVE_BUILD = ["extension", "build"];
 /**
- * What a plugin's own dependencies are installed with. `--omit=peer` on purpose: eve's
- * own scaffold declares `eve` as a peer dependency, and npm would install a SECOND copy
- * of it beside the plugin - the extension would then be built against that eve instead
- * of the one about to run it, which is the compatibility ADR-0009 promises. Declared is
- * enough: eve's package boundary resolves the declaration up the tree, so the plugin
- * builds against the version's own eve (verified against eve 0.30.8).
+ * What a plugin's own dependencies are installed with.
+ *
+ * `--omit=peer` is the load-bearing flag. eve's own extension scaffold declares `eve` in
+ * `peerDependencies`, and npm installs peers by default: without the flag, a plugin whose
+ * only dependency is that peer gets a second copy of eve of its own, and its extension is
+ * then built against that eve instead of the one about to run it - the compatibility
+ * ADR-0009 promises. Declaring is enough for eve: its package boundary resolves the
+ * declaration up the tree and finds the version's own eve (verified on 0.30.8).
  */
 const PLUGIN_INSTALL = ["--omit=dev", "--omit=peer", "--no-audit", "--no-fund"];
 const LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
@@ -103,6 +111,24 @@ export function namespaceProblem(name: string): string | null {
 }
 
 /**
+ * Why this plugin's code cannot be built here, or null. Both answers are the plugin's
+ * own shape, so they are given at install time rather than by a build that fails later.
+ *
+ * The tsconfig is not our taste: `eve extension build` emits declarations with `tsc` and
+ * a file list, and `tsc` refuses that outright (TS5112) when it finds a tsconfig up the
+ * tree - which it always does here, because the plugin is copied INSIDE a version and
+ * Iva's own tsconfig sits at its root. A plugin that ships one (as `eve extension init`
+ * writes it) builds; a plugin without one fails with a message about our tree, not theirs.
+ */
+export function pluginCodeProblem(root: string, name: string): string | null {
+  const namespace = namespaceProblem(name);
+  if (namespace) return namespace;
+  return existsSync(join(root, CODE_DIR, "tsconfig.json"))
+    ? null
+    : `${name} carries code without ${CODE_DIR}/tsconfig.json, and eve cannot build declarations without one - ask the author to run: eve extension init`;
+}
+
+/**
  * Who else folds onto the namespace of `name`, or null. `a.b` and `a-b` are two
  * plugins and one mount file, so they may not be installed together: silently keeping
  * one of them would switch the other off without saying so. Asked at install time, so
@@ -155,9 +181,11 @@ export async function codePlugins(dataDir: string): Promise<CodePlugins> {
       continue;
     }
     if (!report.code) continue;
-    const problem = namespaceProblem(entry.name);
+    const problem = pluginCodeProblem(root, entry.name);
     if (problem) {
-      diagnostics.push(problem);
+      diagnostics.push(
+        `plugin ${entry.name} is left out of this build: ${problem}`,
+      );
       continue;
     }
     let digest: string;
@@ -225,6 +253,47 @@ export function mountSource(plugin: CodePlugin): string {
     `export default extension(readPluginConfig("${plugin.name}"));`,
     ``,
   ].join("\n");
+}
+
+/**
+ * Give the built package a `main`, in the COPY inside the version and never in the store.
+ *
+ * `eve extension build` writes an `exports` map and no `main`. Discovery is happy with
+ * that - it only needs a package.json next to the mount specifier - but the bundler is
+ * not: rolldown applies `exports` to bare specifiers only, so a relative mount resolves
+ * through `main`, and without one the whole agent build dies with UNRESOLVED_IMPORT on
+ * the generated mount (verified on eve 0.30.8). Pointing the mount straight at
+ * `dist/index.mjs` instead is not the fix: then discovery finds no package and the
+ * extension is never mounted at all.
+ *
+ * Returns the entry it wrote, or null when the build left nothing to point at.
+ */
+function pointMainAtTheBuild(code: string): string | null {
+  const file = join(code, "package.json");
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = JSON.parse(readFileSync(file, "utf8")) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    return null;
+  }
+  const dot = (manifest.exports as Record<string, unknown> | undefined)?.["."];
+  const entry =
+    typeof dot === "string"
+      ? dot
+      : typeof manifest.main === "string"
+        ? manifest.main
+        : ((dot as Record<string, unknown> | undefined)?.import ??
+          (dot as Record<string, unknown> | undefined)?.default);
+  if (typeof entry !== "string" || !existsSync(join(code, entry))) return null;
+  if (manifest.main === entry) return entry; // The author already pointed it there.
+  writeFileSync(
+    file,
+    `${JSON.stringify({ ...manifest, main: entry }, null, 2)}\n`,
+  );
+  return entry;
 }
 
 /** Take a plugin out of a staged version: the copy, the mount, nothing else. */
@@ -297,10 +366,16 @@ export async function buildPluginExtension({
   const built = await run(join(versionDir, EVE_BIN), EVE_BUILD, code);
   if (built.code !== 0)
     return failed(`building the extension of ${plugin.name}`, built.output);
+  const entry = pointMainAtTheBuild(code);
+  if (entry === null)
+    return failed(
+      `building the extension of ${plugin.name}`,
+      `eve extension build left no package entry in ${CODE_DIR}/package.json to import`,
+    );
   const mount = join(versionDir, plugin.mount);
   mkdirSync(dirname(mount), { recursive: true });
   writeFileSync(mount, mountSource(plugin));
-  log(`built the code of ${plugin.name} as ${plugin.namespace}`);
+  log(`built the code of ${plugin.name} as ${plugin.namespace} (${entry})`);
   return { ok: true };
 }
 
