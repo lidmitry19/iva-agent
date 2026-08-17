@@ -35,6 +35,15 @@ const PLUGIN_MCP_FILE = "mcp.json";
 
 /** Наш reverse-domain namespace: ключ в `extensions` и папка в корне (ADR-0009). */
 export const IVA_NAMESPACE = "sh.iva";
+/** Что делает `sh.iva/` кодом: манифест пакета eve Extension. */
+const CODE_MANIFEST = "package.json";
+/** Слот сервисов внутри нашего namespace: `sh.iva/services/<svc>/service.json`. */
+const SERVICES_DIR = "services";
+const SERVICE_FILE = "service.json";
+const SERVICE_FIELDS = new Set(["command", "args", "port"]);
+/** Порт сервиса: только непривилегированный, только реальный. */
+const MIN_SERVICE_PORT = 1024;
+const MAX_SERVICE_PORT = 65535;
 
 // Потолки против абьюза, а не рекомендация по размеру: настоящий плагин — это
 // несколько десятков файлов.
@@ -88,6 +97,17 @@ export type PluginMcpServer =
       readonly headers?: Readonly<Record<string, string>>;
     };
 
+/**
+ * Долгоживущий сервис плагина: объявление `sh.iva/services/<svc>/service.json`.
+ * Ива поднимает его юнитом рядом с агентом (ADR-0009) и сообщает выданный порт
+ * через `IVA_SERVICE_PORT`; `port` здесь — тот, который просит автор.
+ */
+export type PluginService = {
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly port: number;
+};
+
 export type PluginReport = {
   readonly root: string;
   /** `null` — плагин отклонён целиком; тогда компонент нет ни одного. */
@@ -95,8 +115,10 @@ export type PluginReport = {
   readonly skills: readonly PluginSkillRef[];
   /** Принятые серверы `mcp.json`; пусто, когда файла нет или компонента невалидна. */
   readonly mcp: Readonly<Record<string, PluginMcpServer>>;
-  /** Есть ли в плагине код: папка `sh.iva/` или наш ключ в `extensions`. */
+  /** Есть ли в плагине eve Extension: `sh.iva/package.json` (ADR-0009). */
   readonly code: boolean;
+  /** Принятые сервисы `sh.iva/services/<svc>/service.json`. */
+  readonly services: Readonly<Record<string, PluginService>>;
   /** Всё, что пропущено или проигнорировано, — поимённо, без молчаливых потерь. */
   readonly diagnostics: readonly string[];
 };
@@ -332,6 +354,53 @@ function parsePluginManifest(
   };
 }
 
+/**
+ * Причина, по которой значение не годится в `command`, или null. Правило одно на
+ * оба места, где Ива запускает чужой процесс: `stdio` в `mcp.json` (§7.2.1 спеки) и
+ * сервис в `sh.iva/services/<svc>/service.json` (ADR-0009). `command` — ОДИН токен:
+ * голое имя (ищется в `PATH`) или `./`-путь внутри `root`. Ни шелл-строки, ни
+ * раскрытия плейсхолдеров. Ведущий дефис отвергаем сами: такой «исполняемый файл»
+ * приезжает опцией в чужой разбор аргументов, и запускать его никто не собирается.
+ */
+function executableProblem(root: string, command: unknown): string | null {
+  if (typeof command !== "string" || !command)
+    return "command must be a string";
+  if (/\s/u.test(command)) return "command must be a single token";
+  if (command.startsWith("-")) return "command must not start with a dash";
+  if (command.includes("${"))
+    return "command does not expand ${PLUGIN_ROOT}/${PLUGIN_DATA}";
+  if (command.startsWith("./")) {
+    const target = containedPath(root, command);
+    if (!target) return "command escapes the plugin root";
+    if (target === resolve(root))
+      return "command must name a file, not the root";
+    return null;
+  }
+  if (command.includes("/") || command.includes("\\"))
+    return "command must be a bare executable name or a ./-relative path";
+  if (command === "." || command === "..")
+    return "command must name an executable";
+  return null;
+}
+
+/**
+ * Раскрыть `${PLUGIN_ROOT}` и `${PLUGIN_DATA}` — ОДИН проход, без рекурсии
+ * (ADR-0009). Значение, приехавшее из подстановки, дальше не разбирается: иначе
+ * содержимое `<name>.env` решало бы, какие пути видит чужой процесс.
+ *
+ * Копия этой функции живёт в `scripts/lib/plugin-units.ts` (генерация юнитов не
+ * может грузить authored tree, ADR-0003); их равенство пинует
+ * `scripts/lib/plugin-units.test.ts`.
+ */
+export function expandPluginPlaceholders(
+  value: string,
+  paths: { readonly root: string; readonly data: string },
+): string {
+  return value.replaceAll(/\$\{(PLUGIN_ROOT|PLUGIN_DATA)\}/gu, (_, key) =>
+    key === "PLUGIN_ROOT" ? paths.root : paths.data,
+  );
+}
+
 /** Разбор одной записи `mcpServers`: сервер или причина пропуска строкой. */
 function parseMcpServer(
   root: string,
@@ -393,27 +462,9 @@ function parseMcpServer(
     };
   }
 
-  // command — ОДИН токен: голое имя или `./`-путь внутри корня. Ни шелл-строки,
-  // ни раскрытия плейсхолдеров здесь спека не допускает (§7.2.1). Ведущий дефис
-  // отвергаем сами: такой «исполняемый файл» приезжает опцией в чужой разбор
-  // аргументов, и запускать его никто не собирается.
-  const command = entry.command;
-  if (typeof command !== "string" || !command)
-    return "command must be a string";
-  if (/\s/u.test(command)) return "command must be a single token";
-  if (command.startsWith("-")) return "command must not start with a dash";
-  if (command.includes("${"))
-    return "command does not expand ${PLUGIN_ROOT}/${PLUGIN_DATA}";
-  if (command.startsWith("./")) {
-    const target = containedPath(root, command);
-    if (!target) return "command escapes the plugin root";
-    if (target === resolve(root))
-      return "command must name a file, not the root";
-  } else if (command.includes("/") || command.includes("\\")) {
-    return "command must be a bare executable name or a ./-relative path";
-  } else if (command === "." || command === "..") {
-    return "command must name an executable";
-  }
+  const commandProblem = executableProblem(root, entry.command);
+  if (commandProblem) return commandProblem;
+  const command = entry.command as string;
 
   const args = entry.args;
   if (args !== undefined) {
@@ -509,6 +560,83 @@ async function readMcp(
   return servers;
 }
 
+/** Разбор одного `service.json`: сервис или причина пропуска строкой. */
+function parseService(folder: string, raw: unknown): PluginService | string {
+  if (!isPlainObject(raw)) return "not a JSON object";
+  for (const key of Object.keys(raw)) {
+    if (!SERVICE_FIELDS.has(key)) return `unknown field ${JSON.stringify(key)}`;
+  }
+  // Команда ищется от папки сервиса, а не от корня плагина: `./`-путь в объявлении
+  // читается рядом с ним, как это делает и сам сервис своим cwd.
+  const problem = executableProblem(folder, raw.command);
+  if (problem) return problem;
+  const args = raw.args;
+  if (args !== undefined) {
+    if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string"))
+      return "args must be an array of strings";
+  }
+  const port = raw.port;
+  if (
+    typeof port !== "number" ||
+    !Number.isInteger(port) ||
+    port < MIN_SERVICE_PORT ||
+    port > MAX_SERVICE_PORT
+  )
+    return `port must be an integer between ${MIN_SERVICE_PORT} and ${MAX_SERVICE_PORT}`;
+  return {
+    command: raw.command as string,
+    ...(Array.isArray(args) ? { args } : {}),
+    port,
+  };
+}
+
+/**
+ * Сервисы плагина: непосредственные дети `sh.iva/services/`, в каждом
+ * `service.json`. Рекурсии нет — то же правило, что у `skills/`. Битое объявление
+ * пропускается поимённо: соседний сервис поднимается.
+ */
+async function readServices(
+  root: string,
+  diagnostics: string[],
+): Promise<Readonly<Record<string, PluginService>>> {
+  const dir = join(root, IVA_NAMESPACE, SERVICES_DIR);
+  const label = `${IVA_NAMESPACE}/${SERVICES_DIR}`;
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT")
+      diagnostics.push(`${label}: unreadable: ${reason(error)}`);
+    return {};
+  }
+  const services: Record<string, PluginService> = {};
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (!entry.isDirectory()) continue;
+    const folder = join(dir, entry.name);
+    const file = join(folder, SERVICE_FILE);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await readFile(file, "utf8"));
+    } catch (error) {
+      diagnostics.push(
+        `${label}/${entry.name}: skipped: ${
+          errorCode(error) === "ENOENT"
+            ? `no ${SERVICE_FILE}`
+            : `${SERVICE_FILE} unreadable (${reason(error)})`
+        }`,
+      );
+      continue;
+    }
+    const service = parseService(folder, raw);
+    if (typeof service === "string") {
+      diagnostics.push(`${label}/${entry.name}: skipped: ${service}`);
+      continue;
+    }
+    services[entry.name] = service;
+  }
+  return services;
+}
+
 /**
  * Прочитать папку плагина. Никогда не кидает: отчёт с `manifest: null` — это
  * отказ плагину целиком, диагностики объясняют причину.
@@ -522,6 +650,7 @@ export async function readPlugin(root: string): Promise<PluginReport> {
     skills: [],
     mcp: {},
     code: false,
+    services: {},
     diagnostics: [...diagnostics, why],
   });
 
@@ -547,13 +676,34 @@ export async function readPlugin(root: string): Promise<PluginReport> {
     diagnostics.push(...listing.diagnostics);
     const mcp = await readMcp(resolvedRoot, diagnostics);
 
+    // `sh.iva/` двух видов (ADR-0009): eve Extension — это `sh.iva/package.json`,
+    // сервисы — папки `sh.iva/services/<svc>/` с `service.json`. Одного без другого
+    // достаточно: первый реальный плагин (`trace`) несёт только сервис.
     let hasNamespaceDir = false;
     try {
       hasNamespaceDir = (
         await lstat(join(resolvedRoot, IVA_NAMESPACE))
       ).isDirectory();
     } catch {
-      // Папки нет — плагин без кода, обычное дело.
+      // Папки нет — плагин без нашего кода и сервисов, обычное дело.
+    }
+    // Ключ в `extensions` — заявка автора на наш namespace, и без неё папка не
+    // читается: `sh.iva/` без ключа могла приехать от клиента, который её и понимает.
+    const declared = IVA_NAMESPACE in manifest.extensions;
+    if (hasNamespaceDir && !declared)
+      diagnostics.push(
+        `${IVA_NAMESPACE}/: ignored: ${PLUGIN_MANIFEST_FILE} does not declare extensions["${IVA_NAMESPACE}"]`,
+      );
+    const ours = hasNamespaceDir && declared;
+    let code = false;
+    if (ours) {
+      try {
+        code = (
+          await lstat(join(resolvedRoot, IVA_NAMESPACE, CODE_MANIFEST))
+        ).isFile();
+      } catch {
+        // Нет манифеста пакета — значит нет и eve Extension: плагин без кода.
+      }
     }
 
     return {
@@ -561,7 +711,8 @@ export async function readPlugin(root: string): Promise<PluginReport> {
       manifest,
       skills: listing.skills,
       mcp,
-      code: hasNamespaceDir || IVA_NAMESPACE in manifest.extensions,
+      code,
+      services: ours ? await readServices(resolvedRoot, diagnostics) : {},
       diagnostics,
     };
   } catch (error) {

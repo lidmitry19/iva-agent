@@ -210,13 +210,92 @@ test("our own namespace must be an object; a foreign one is never inspected", as
   assert.deepEqual(report.manifest?.extensions, { "com.example.client": 7 });
 });
 
-test("code is reported from the sh.iva directory and from the manifest key", async () => {
-  const fromDir = plugin();
-  write(fromDir, `${IVA_NAMESPACE}/index.ts`, "export {};\n");
-  assert.equal((await readPlugin(fromDir)).code, true);
+test("code is the sh.iva package manifest, and only with the namespace declared", async () => {
+  // Заявка без папки — не код: собирать нечего (ADR-0009).
+  const declaredOnly = plugin({ extensions: { [IVA_NAMESPACE]: {} } });
+  assert.equal((await readPlugin(declaredOnly)).code, false);
 
-  const fromManifest = plugin({ extensions: { [IVA_NAMESPACE]: {} } });
-  assert.equal((await readPlugin(fromManifest)).code, true);
+  // Папка без заявки игнорируется целиком, и об этом говорится вслух.
+  const undeclared = plugin();
+  write(undeclared, `${IVA_NAMESPACE}/package.json`, "{}\n");
+  const silent = await readPlugin(undeclared);
+  assert.equal(silent.code, false);
+  assert.deepEqual(silent.diagnostics, [
+    'sh.iva/: ignored: plugin.json does not declare extensions["sh.iva"]',
+  ]);
+
+  // Заявка плюс `sh.iva/package.json` — это eve Extension.
+  const withCode = plugin({ extensions: { [IVA_NAMESPACE]: {} } });
+  write(withCode, `${IVA_NAMESPACE}/index.ts`, "export {};\n");
+  assert.equal(
+    (await readPlugin(withCode)).code,
+    false,
+    "a file is not a package",
+  );
+  write(withCode, `${IVA_NAMESPACE}/package.json`, "{}\n");
+  const code = await readPlugin(withCode);
+  assert.equal(code.code, true);
+  assert.deepEqual(code.diagnostics, []);
+});
+
+test("services are read from sh.iva/services, one folder at a time", async () => {
+  const dir = plugin({ extensions: { [IVA_NAMESPACE]: {} } });
+  write(
+    dir,
+    `${IVA_NAMESPACE}/services/viewer/service.json`,
+    JSON.stringify({
+      command: "node",
+      args: ["server.mjs", "${PLUGIN_DATA}/trace"],
+      port: 8726,
+    }),
+  );
+  // Битое объявление не валит соседей — оно называется и пропускается.
+  write(
+    dir,
+    `${IVA_NAMESPACE}/services/broken/service.json`,
+    '{"command":"node","port":80}',
+  );
+  write(dir, `${IVA_NAMESPACE}/services/nothing/README.md`, "no service\n");
+
+  const report = await readPlugin(dir);
+  // Сервисы — не Extension: версия из-за них не пересобирается.
+  assert.equal(report.code, false);
+  assert.deepEqual(report.services, {
+    viewer: {
+      command: "node",
+      args: ["server.mjs", "${PLUGIN_DATA}/trace"],
+      port: 8726,
+    },
+  });
+  assert.deepEqual(report.diagnostics, [
+    "sh.iva/services/broken: skipped: port must be an integer between 1024 and 65535",
+    "sh.iva/services/nothing: skipped: no service.json",
+  ]);
+});
+
+test("a service command is one token, resolved inside the service folder", async () => {
+  const dir = plugin({ extensions: { [IVA_NAMESPACE]: {} } });
+  const declare = (svc: string, raw: unknown): void =>
+    write(
+      dir,
+      `${IVA_NAMESPACE}/services/${svc}/service.json`,
+      JSON.stringify(raw),
+    );
+  declare("shell", { command: "node server.mjs", port: 8726 });
+  declare("escape", { command: "./../../serve.mjs", port: 8726 });
+  declare("option", { command: "-rf", port: 8726 });
+  declare("extra", { command: "node", port: 8726, restart: "always" });
+  declare("own", { command: "./serve.mjs", args: ["--quiet"], port: 8726 });
+  write(dir, `${IVA_NAMESPACE}/services/own/serve.mjs`, "// server\n");
+
+  const report = await readPlugin(dir);
+  assert.deepEqual(Object.keys(report.services), ["own"]);
+  assert.deepEqual(report.diagnostics, [
+    "sh.iva/services/escape: skipped: command escapes the plugin root",
+    'sh.iva/services/extra: skipped: unknown field "restart"',
+    "sh.iva/services/option: skipped: command must not start with a dash",
+    "sh.iva/services/shell: skipped: command must be a single token",
+  ]);
 });
 
 test("skills that is not a directory disables only the skills component", async () => {
