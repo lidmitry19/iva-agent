@@ -8,6 +8,12 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { CATALOG, catalogProvider } from "./lib/model-catalog.ts";
+import { notificationChat } from "./lib/notification-chat.ts";
+import {
+  alertOnce,
+  noticeTranslator,
+  pluginBuildFailedAlert,
+} from "./lib/notice-policy.ts";
 import {
   isEntrypoint,
   refreshOwnedShim,
@@ -27,8 +33,10 @@ import {
 import {
   commandRunner,
   finishVersionUpdate,
+  pluginsOffNotice,
   type UpdateOutcome,
 } from "./lib/version-update.ts";
+import type { PluginFailure } from "./lib/plugin-build.ts";
 import type { createCliRuntime } from "./cli/runtime.ts";
 
 type Say = (message: string) => void;
@@ -372,6 +380,49 @@ export function tombstoned(
 }
 
 /**
+ * A plugin was switched off because its code will not build with this version. The
+ * update output carries the reason for whoever is watching it; this is the half that
+ * reaches an owner who ordered the update from Telegram and never sees a terminal.
+ *
+ * An Alert, so it obeys ADR-0007: it says what broke, what it costs and what to do,
+ * and it repeats at most once a week for the same plugin. The digest is the essence -
+ * a plugin whose content changed is a new problem and speaks at once.
+ */
+async function alertOwnerAboutPlugins(
+  layout: ReturnType<typeof layoutFor>,
+  failures: readonly PluginFailure[],
+  notify: Say,
+): Promise<void> {
+  notify(pluginsOffNotice(failures));
+  const token = String(layout.values.TELEGRAM_BOT_TOKEN ?? "").trim();
+  const chat = notificationChat(layout.values);
+  if (!token || !chat) return; // Nowhere to say it; the output above is all there is.
+  const tr = await noticeTranslator(layout.values);
+  const names = failures.map((failure) => failure.name);
+  const text = pluginBuildFailedAlert(tr, names);
+  const outcome = await alertOnce(
+    layout.data,
+    "plugin-build",
+    // The essence is which content failed: a plugin the owner has since changed is a
+    // different problem and speaks at once instead of waiting out the week.
+    failures.map((failure) => `${failure.name}@${failure.digest}`).join(" "),
+    async () => {
+      try {
+        // Through the outbound Gate, like every other Notice; loaded here because the
+        // seam lives in the authored tree and this process must start without it.
+        const { sendTelegramHtml } = await import("./lib/telegram-send.ts");
+        return (await sendTelegramHtml(token, chat, text)).ok;
+      } catch (error) {
+        console.error("[plugins] could not send the alert:", error);
+        return false;
+      }
+    },
+  );
+  if (outcome === "failed")
+    notify(`could not tell you in Telegram about ${names.join(", ")}`);
+}
+
+/**
  * The second half of an update, run by the version being installed: install,
  * build, probe, flip, migrate, restart and retire the old checkout all belong to
  * the new code, so a fix to any of them ships in the release carrying it.
@@ -380,6 +431,9 @@ export async function main(argv: readonly string[]): Promise<number> {
   const [home, name, ...flags] = argv;
   if (!home || !name) throw new Error("usage: update-finish <home> <version>");
   const verbose = flags.includes("--verbose");
+  // `iva plugin add|update|enable`: the plugin is what this build is for, so a plugin
+  // that will not build fails the build instead of being switched off (ADR-0009).
+  const requirePlugins = flags.includes("--require-plugins");
   const layout = layoutFor(home);
 
   // The same MODEL_PROVIDER check the CLI does before it starts an update — repeated here
@@ -417,6 +471,9 @@ export async function main(argv: readonly string[]): Promise<number> {
       run: commandRunner(verbose),
       log,
       notify,
+      requirePlugins,
+      alertPlugins: (failures) =>
+        alertOwnerAboutPlugins(layout, failures, notify),
       quiesce: async () => {
         const { createCliRuntime } = await import("./cli/runtime.ts");
         // Before the first conversion there is no current symlink: the checkout

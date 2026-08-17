@@ -168,14 +168,14 @@ void test("status lists and flags a pre-rename nightly timer the migration had t
   ]);
 });
 
-void test("restart, start and stop report success only after their lifecycle action", () => {
+void test("restart, start and stop report success only after their lifecycle action", async () => {
   const events: string[] = [];
   const commands = createServiceCommands(
     runtimeFixture(events),
     lifecycleFixture(events),
   );
 
-  commands.cmdRestart();
+  await commands.cmdRestart();
   commands.cmdStart();
   commands.cmdStop();
 
@@ -192,7 +192,7 @@ void test("restart, start and stop report success only after their lifecycle act
   ]);
 });
 
-void test("restart says so when data/custom is not in the version that runs", (t) => {
+void test("restart says so when data/custom is not in the version that runs", async (t) => {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iva-services-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const store = createVersionStore(home);
@@ -202,7 +202,10 @@ void test("restart says so when data/custom is not in the version that runs", (t
     join(customDir, "agent/tools/mine.ts"),
     "export const m = 1;\n",
   );
-  const restart = (name: string, installed?: string): string[] => {
+  const restart = async (
+    name: string,
+    installed?: string,
+  ): Promise<string[]> => {
     const dir = store.stage(name);
     if (installed !== undefined) {
       mkdirSync(join(dir, "agent/tools"), { recursive: true });
@@ -211,7 +214,7 @@ void test("restart says so when data/custom is not in the version that runs", (t
     store.complete(name);
     store.activate(name);
     const events: string[] = [];
-    createServiceCommands(
+    await createServiceCommands(
       runtimeFixture(events, { root: join(home, "versions", name) }),
       lifecycleFixture(events),
     ).cmdRestart();
@@ -221,7 +224,7 @@ void test("restart says so when data/custom is not in the version that runs", (t
   // A restart is not a build: the version that runs was made before this file
   // existed, and saying nothing is how a user concludes their skill is broken.
   assert.ok(
-    restart("0.3.15-aaaaaaaaaaaa").includes(
+    (await restart("0.3.15-aaaaaaaaaaaa")).includes(
       "runtime.warn:data/custom changed since this version was built - run: iva update",
     ),
   );
@@ -231,7 +234,7 @@ void test("restart says so when data/custom is not in the version that runs", (t
   // installed under that name. This is the case a user is most sure about.
   const digest = customOverlay(customDir).digest;
   assert.ok(
-    restart(`0.3.15-bbbbbbbbbbbb+${digest}`).includes(
+    (await restart(`0.3.15-bbbbbbbbbbbb+${digest}`)).includes(
       "runtime.warn:data/custom is not in the version that runs: it did not build or start - fix it and run: iva update",
     ),
   );
@@ -240,13 +243,15 @@ void test("restart says so when data/custom is not in the version that runs", (t
   // half the authored paths are. The file is there and it is not the user's, so
   // the presence of a file says nothing and the contents say everything.
   assert.ok(
-    restart(`0.3.15-dddddddddddd+${digest}`, "export const m = 0;\n").includes(
+    (
+      await restart(`0.3.15-dddddddddddd+${digest}`, "export const m = 0;\n")
+    ).includes(
       "runtime.warn:data/custom is not in the version that runs: it did not build or start - fix it and run: iva update",
     ),
   );
 
   // The version that was really built with it has nothing to say.
-  const built = restart(
+  const built = await restart(
     `0.3.15-cccccccccccc+${digest}`,
     "export const m = 1;\n",
   );

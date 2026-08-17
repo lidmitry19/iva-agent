@@ -109,6 +109,23 @@ export function memoryReportsOffNotice(tr: Translate): string {
   );
 }
 
+/**
+ * Плагин с кодом не собрался, и Ива выключила его (ADR-0009). Текст по правилу Alert
+ * (ADR-0007): что сломалось, чем это грозит, что сделать. Причина отказа остаётся в
+ * выводе апдейта — в чат уходит короткое и понятное.
+ */
+export function pluginBuildFailedAlert(
+  tr: Translate,
+  names: readonly string[],
+): string {
+  const listed = names.join(", ");
+  const one = names[0] ?? "<name>";
+  return tr(
+    `⚠️ Iva switched these plugins off: ${listed}. The new version does not build with them, so their code and their skills are not loaded. Everything else works as before. Update a plugin and turn it back on, one at a time — that way the one that breaks the build is the one you see:\niva plugin update ${one}\niva plugin enable ${one}`,
+    `⚠️ Ива выключила плагины: ${listed}. Новая версия с ними не собирается, поэтому их код и скиллы не работают. Остальное работает как раньше. Обнови плагин и включи обратно — по одному, тогда видно, какой из них ломает сборку:\niva plugin update ${one}\niva plugin enable ${one}`,
+  );
+}
+
 function errorCode(error: unknown): string | undefined {
   return error !== null && typeof error === "object" && "code" in error
     ? typeof error.code === "string"

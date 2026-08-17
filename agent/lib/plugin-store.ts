@@ -72,6 +72,16 @@ export function pluginDataDir(dataDir: string, name: string): string {
   return join(dataDir, "plugin-data", name);
 }
 
+/**
+ * Конфиг eve Extension этого плагина: `data/custom/plugins/<name>.config.json`.
+ * Лежит РЯДОМ с папкой плагина, а не внутри: папку переписывает `update`, а значения
+ * владельца обязаны это пережить (ADR-0009). Читается в рантайме
+ * (agent/lib/plugin-config.ts), в сборку не запекается.
+ */
+export function pluginConfigFile(dataDir: string, name: string): string {
+  return join(pluginsDir(dataDir), `${name}.config.json`);
+}
+
 /** Файл состояния: `data/custom/plugins.json`. */
 export function pluginsStateFile(dataDir: string): string {
   return join(dataDir, "custom", "plugins.json");

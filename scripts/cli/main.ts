@@ -57,7 +57,6 @@ export function createCliMain(root: string) {
   const services = createServiceCommands(runtime, systemdLifecycle);
   const cmdConfig = createConfigCommand(runtime, systemdLifecycle);
   const cmdDoctor = createDoctorCommand(runtime, systemdLifecycle);
-  const plugin = createPluginCommands(runtime);
   const cmdNotify = createNotifyCommand(runtime);
   const cmdRemind = createRemindCommand(runtime);
   const cmdPost = createPostCommand(runtime);
@@ -78,6 +77,12 @@ export function createCliMain(root: string) {
   const versionUpdate = createVersionUpdateCommand(runtime, systemdLifecycle);
   const cmdUpdate = (args: readonly string[]): Promise<void> =>
     versionUpdate.active() ? versionUpdate.run(args) : legacyUpdate(args);
+  // The code of a plugin is built into a version, on exactly the updater's rails
+  // (ADR-0009), so `iva plugin` is handed the updater's own rebuild instead of a
+  // second path to the same probe, flip and restart.
+  const plugin = createPluginCommands(runtime, {
+    buildVersion: versionUpdate.rebuild,
+  });
   const { C, SERVICES, TIMERS, bad, ok } = runtime;
 
   function cmdHelp(): void {

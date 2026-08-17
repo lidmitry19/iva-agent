@@ -21,6 +21,7 @@ import { classifyRoot, isManagedInstall } from "../lib/version-layout.ts";
 import {
   acquireUpdateLock,
   createVersionStore,
+  parseVersionName,
   writeJson,
 } from "../lib/version-store.ts";
 import {
@@ -32,6 +33,16 @@ import type { createCliRuntime } from "./runtime.ts";
 import { ACCEPTED_PROVIDERS, COPY, invalidProviderRefusal } from "./update.ts";
 
 type CliRuntime = ReturnType<typeof createCliRuntime>;
+
+/**
+ * What `iva plugin` learns from a build it asked for (ADR-0009). `skipped` is a
+ * development checkout, which has no versions to build: the plugin is installed, its
+ * code is not, and the owner is told which of the two happened.
+ */
+export type PluginVersionBuild =
+  | { readonly status: "built"; readonly version: string }
+  | { readonly status: "skipped"; readonly reason: string }
+  | { readonly status: "failed"; readonly reason: string };
 
 /** What the bridge says in the chat once this process is gone. */
 type UpdateOutcomeRecord = {
@@ -139,7 +150,16 @@ export function createVersionUpdateCommand(
 ) {
   const install = classifyRoot(runtime.ROOT);
 
-  async function run(args: readonly string[]): Promise<void> {
+  /**
+   * One `iva update`, from the fetch to the report. The target is a parameter because
+   * a plugin is installed on exactly these rails: same lock, same probe, same flip,
+   * same restart - only the commit it aims at is the one already running (ADR-0009).
+   */
+  async function pipeline(
+    args: readonly string[],
+    target: (repo: string) => Promise<{ sha: string; version: string }>,
+    { requirePlugins = false }: { readonly requirePlugins?: boolean } = {},
+  ): Promise<UpdateOutcome | null> {
     const verbose = args.includes("--verbose");
     // Decided here and never travelling: a build of this release already on disk
     // may not be reused.
@@ -169,7 +189,7 @@ export function createVersionUpdateCommand(
       reporter?.dispose();
       await removeTelegramJob(job?.path);
       process.exitCode = 1;
-      return;
+      return null;
     }
 
     const store = createVersionStore(install.home);
@@ -196,6 +216,7 @@ export function createVersionUpdateCommand(
       process.exitCode = 1;
     };
 
+    let result: UpdateOutcome | null;
     try {
       terminal.start(text.fetch[0]);
       await reporter?.start("fetch");
@@ -203,9 +224,10 @@ export function createVersionUpdateCommand(
       const outcome = await runVersionUpdate({
         home: install.home,
         store,
-        resolveTarget: () => resolveTarget(repo),
+        resolveTarget: () => target(repo),
         run: commandRunner(verbose),
         force,
+        requirePlugins,
         log: (message) => terminal.info(message),
         handoff: async (name) => {
           terminal.done(text.fetch[1]);
@@ -217,9 +239,10 @@ export function createVersionUpdateCommand(
           await reporter?.start("build");
           // The spinner and the new version's own output must not share a line.
           terminal.dispose();
-          return handoff(name, report, verbose);
+          return handoff(name, report, { verbose, requirePlugins });
         },
       });
+      result = outcome;
 
       if (outcome.status === "busy") {
         terminal.fail(text.busy);
@@ -249,7 +272,9 @@ export function createVersionUpdateCommand(
           await finished(outcome.previous ?? before, outcome.version);
       }
     } catch (error) {
-      await failed((error as { message?: string }).message ?? String(error));
+      const message = (error as { message?: string }).message ?? String(error);
+      await failed(message);
+      result = { status: "failed", message };
     } finally {
       rmSync(reportDir, { recursive: true, force: true });
       terminal.dispose();
@@ -258,25 +283,96 @@ export function createVersionUpdateCommand(
       // the only record of what to say with it.
       if (!handedToBridge) await removeTelegramJob(job?.path);
     }
+    return result;
+  }
+
+  async function run(args: readonly string[]): Promise<void> {
+    await pipeline(args, resolveTarget);
+  }
+
+  /**
+   * What a version of THIS release is built from: its own commit. `iva plugin` builds
+   * with the plugins the store holds now, and nothing else is allowed to change - an
+   * install of a plugin that also dragged in a new release would be two updates in one,
+   * and only one of them was asked for.
+   */
+  async function currentTarget(
+    repo: string,
+  ): Promise<{ sha: string; version: string }> {
+    const active = createVersionStore(install.home).currentName();
+    const at = active ? parseVersionName(active) : null;
+    if (!at) throw new Error("no version is installed yet - run: iva update");
+    // The directory name carries the short sha; the mirror turns it back into the
+    // commit the archive is unpacked from, without touching the network.
+    return {
+      sha: await requireGit(gitAt, repo, ["rev-parse", at.sha]),
+      version: at.version,
+    };
+  }
+
+  /**
+   * Build and install a version of the running release again, so that the plugins in
+   * `data/custom/plugins/` are in it. Same rails as `iva update` (ADR-0009): a failed
+   * build leaves the running version alone, and the caller undoes what it did to the
+   * store.
+   */
+  async function rebuild({
+    requirePlugins,
+  }: {
+    /** Whether a plugin that will not build fails the build or is switched off. */
+    readonly requirePlugins: boolean;
+  }): Promise<PluginVersionBuild> {
+    if (!isManagedInstall(install))
+      return {
+        status: "skipped",
+        reason:
+          "plugin code is built into a version, and this tree is a development checkout - build it yourself: npm run build",
+      };
+    const outcome = await pipeline([], currentTarget, { requirePlugins });
+    if (!outcome)
+      return {
+        status: "failed",
+        reason: "fix MODEL_PROVIDER first: iva config",
+      };
+    if (outcome.status === "updated" || outcome.status === "current")
+      return { status: "built", version: outcome.version };
+    if (outcome.status === "busy")
+      return {
+        status: "failed",
+        reason:
+          "an update is running - try again when it finishes (iva status)",
+      };
+    return {
+      status: "failed",
+      reason:
+        outcome.status === "unhealthy"
+          ? `${outcome.version} did not start: ${outcome.log}`
+          : outcome.message,
+    };
   }
 
   /** Run the new version's updater, in its own process, from its own directory. */
   function handoff(
     name: string,
     report: string,
-    verbose: boolean,
+    {
+      verbose,
+      requirePlugins,
+    }: { readonly verbose: boolean; readonly requirePlugins: boolean },
   ): UpdateOutcome {
     const dir = join(install.home, "versions", name);
-    const args = [join(dir, "scripts/update-finish.ts"), install.home, name];
-    const result = spawnSync(
-      process.execPath,
-      verbose ? [...args, "--verbose"] : args,
-      {
-        cwd: dir,
-        stdio: "inherit",
-        env: { ...runtime.childEnv, IVA_UPDATE_OUTCOME: report },
-      },
-    );
+    const args = [
+      join(dir, "scripts/update-finish.ts"),
+      install.home,
+      name,
+      ...(verbose ? ["--verbose"] : []),
+      ...(requirePlugins ? ["--require-plugins"] : []),
+    ];
+    const result = spawnSync(process.execPath, args, {
+      cwd: dir,
+      stdio: "inherit",
+      env: { ...runtime.childEnv, IVA_UPDATE_OUTCOME: report },
+    });
     if (result.error) throw result.error;
     try {
       return JSON.parse(readFileSync(report, "utf8")) as UpdateOutcome;
@@ -323,6 +419,7 @@ export function createVersionUpdateCommand(
     /** Only a real installation is converted; a development checkout is left alone. */
     active: (): boolean => isManagedInstall(install),
     run,
+    rebuild,
     rollback,
   };
 }

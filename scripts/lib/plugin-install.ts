@@ -168,8 +168,16 @@ export async function copyPluginTree(
  * Put the staged plugin in place, atomically enough that a failure leaves the
  * previous copy where it was: the old directory is moved aside first and only
  * removed once the new one is in.
+ *
+ * `retain` keeps that displaced copy and hands back its path. A plugin with code is
+ * only really installed once a version carrying it builds (ADR-0009), and until then
+ * the copy it replaced is the only way back - `restoreDisplaced` is that way.
  */
-export function swapIntoStore(staged: string, store: string): void {
+export function swapIntoStore(
+  staged: string,
+  store: string,
+  { retain = false }: { readonly retain?: boolean } = {},
+): string | null {
   mkdirSync(dirname(store), { recursive: true });
   // Имя временной папки начинается с точки, а имя плагина по спеке начинается с
   // буквы или цифры: пересечься они не могут, поэтому уборка недоделок никогда не
@@ -184,5 +192,14 @@ export function swapIntoStore(staged: string, store: string): void {
     if (displaced) renameSync(displaced, store);
     throw error;
   }
-  if (displaced) rmSync(displaced, { recursive: true, force: true });
+  if (!displaced) return null;
+  if (retain) return displaced;
+  rmSync(displaced, { recursive: true, force: true });
+  return null;
+}
+
+/** Put a displaced copy back, dropping the one that took its place. */
+export function restoreDisplaced(displaced: string, store: string): void {
+  rmSync(store, { recursive: true, force: true });
+  renameSync(displaced, store);
 }

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { leftoverPluginDirs } from "./plugin.ts";
+import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
@@ -457,6 +458,23 @@ export function createDoctorCommand(
 
     return finish();
 
+    /**
+     * Есть ли код плагина в версии, которая работает. `null` — версий тут нет вовсе
+     * (development checkout): сборка плагинов там не при чём, и говорить не о чем.
+     */
+    function codeBuiltIntoVersion(name: string): boolean | null {
+      const install = classifyRoot(ROOT);
+      if (install.kind !== "version") return null;
+      const store = createVersionStore(install.home);
+      const active = store.currentName();
+      if (!active) return null;
+      const dir = join(store.layout.versions, active);
+      return (
+        existsSync(join(dir, pluginMount(name))) &&
+        existsSync(join(dir, pluginDirectory(name)))
+      );
+    }
+
     async function checkPlugins(): Promise<void> {
       // Плагины читает authored tree, а доктор обязан работать и на установке, где
       // его нет (ADR-0003) — отсюда загрузка по требованию и честная строка вместо
@@ -527,6 +545,20 @@ export function createDoctorCommand(
           `plugin ${entry.name}${entry.enabled ? "" : " (disabled)"}: ${parts.join(", ")}`,
         );
         okN++;
+        // Код плагина живёт в версии, а не в папке (ADR-0009): запись «включён» без
+        // сборки в работающей версии значит, что тулов плагина у агента нет.
+        if (report.code && entry.enabled) {
+          const built = codeBuiltIntoVersion(entry.name);
+          if (built === false) {
+            warn(
+              `plugin ${entry.name}: built into current version: no — run: iva update`,
+            );
+            warnN++;
+          } else if (built === true) {
+            ok(`plugin ${entry.name}: built into current version: yes`);
+            okN++;
+          }
+        }
       }
 
       for (const name of folders) {

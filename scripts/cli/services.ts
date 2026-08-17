@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
 import { createVersionStore, parseVersionName } from "../lib/version-store.ts";
-import { builtWith, customOverlay } from "../lib/version-update.ts";
+import { builtWith, versionOverlay } from "../lib/version-update.ts";
 import {
   quarantinePath as defaultQuarantinePath,
   resetStateTargets as defaultResetStateTargets,
@@ -80,11 +80,14 @@ export function createServiceCommands(
     ]);
   }
 
-  function cmdRestart(): void {
+  // Not `async`: `requireSystemd` and the restart itself must throw synchronously,
+  // the way every other service command does (scripts/cli/main.ts, dispatchCli).
+  // Only what comes after the restart - reading the version's plugins - awaits.
+  function cmdRestart(): Promise<void> {
     requireSystemd();
     restartServices(); // regenerate the unit before restart → PORT stays in sync with IVA_PORT in .env
     ok("Restarted: iva + telegram-poll");
-    warnUnbuiltCustom();
+    return warnUnbuiltCustom();
   }
 
   /**
@@ -93,7 +96,7 @@ export function createServiceCommands(
    * built, and silence is the worst possible answer to somebody who has just
    * written a skill and restarted to see it work.
    */
-  function warnUnbuiltCustom(): void {
+  async function warnUnbuiltCustom(): Promise<void> {
     // Only versions carry a build; on a checkout `iva restart` must not shell out
     // to git to learn what it can see for itself.
     const install = classifyRoot(ROOT);
@@ -102,7 +105,9 @@ export function createServiceCommands(
     const active = store.currentName();
     if (!active) return;
     const customDir = join(store.layout.data, "custom");
-    const digest = customOverlay(customDir).digest;
+    // The plugins carrying code are half of what names a version (ADR-0009), so an
+    // installed plugin that no build has seen yet reads exactly like an edited skill.
+    const { digest, plugins } = await versionOverlay(store.layout.data);
     if (parseVersionName(active)?.overlay !== digest) {
       warn(
         "data/custom changed since this version was built - run: iva update",
@@ -115,8 +120,12 @@ export function createServiceCommands(
     // case where a user is most sure their skill should be running.
     if (
       digest &&
-      builtWith(join(store.layout.versions, active), active, customDir) !==
-        "applied"
+      builtWith(
+        join(store.layout.versions, active),
+        active,
+        customDir,
+        plugins,
+      ) !== "applied"
     )
       warn(
         "data/custom is not in the version that runs: it did not build or start - fix it and run: iva update",

@@ -5,10 +5,12 @@
 // able to install one. There is no model tool and no Telegram command by design.
 //
 // A plugin that only ships skills needs no build and no restart: the live resolver
-// (agent/lib/custom-skills.ts) re-reads `data/custom/plugins/` on every turn.
-// Building code and starting MCP servers arrive in later tickets; this command
-// already reads and reports both, so the owner sees what a plugin carries before
-// it is installed.
+// (agent/lib/custom-skills.ts) re-reads `data/custom/plugins/` on every turn. A plugin
+// that carries code is built into a version instead - the same rails as `iva update`,
+// down to the probe, the flip and the restart (ADR-0009) - so installing one takes as
+// long as an update, and a build that fails undoes the install rather than the box.
+// Starting MCP servers arrives in a later ticket; this command already reads and
+// reports them, so the owner sees what a plugin carries before it is installed.
 //
 // Everything that lives in the authored tree comes through `loadPluginCore()`,
 // never a static import: `iva` has to start on an installation whose `agent/` is
@@ -26,6 +28,11 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { PluginManifest, PluginReport } from "#lib/plugin-reader.ts";
 import type { PluginEntry, PluginsState } from "#lib/plugin-store.ts";
+import {
+  namespaceProblem,
+  namespaceTaken,
+  pluginNamespace,
+} from "../lib/plugin-build.ts";
 import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import {
   DEFAULT_MARKETPLACE,
@@ -45,6 +52,7 @@ import {
 } from "../lib/plugin-source.ts";
 import { acquireUpdateLock } from "../lib/version-store.ts";
 import type { createCliRuntime } from "./runtime.ts";
+import type { PluginVersionBuild } from "./version-update-command.ts";
 
 type CliRuntime = ReturnType<typeof createCliRuntime>;
 type Translate = (en: string, ru: string) => string;
@@ -55,6 +63,23 @@ type PluginDependencies = {
   /** Where a relative local source is resolved from: the owner's shell, not ROOT. */
   readonly cwd?: () => string;
   readonly translate?: Translate;
+  /**
+   * Build and install a version carrying today's plugins, on the updater's rails
+   * (`iva update`'s own `rebuild`). Absent means nobody can build one here, and a
+   * plugin with code is installed with its code left out and said so.
+   */
+  readonly buildVersion?: (options: {
+    readonly requirePlugins: boolean;
+  }) => Promise<PluginVersionBuild>;
+};
+
+/** What an install has to put back if the version carrying it will not build. */
+type Undo = {
+  readonly name: string;
+  /** The entry `plugins.json` had before, or null when there was none. */
+  readonly previous: PluginEntry | null;
+  /** The folder the install displaced, kept so an update can be taken back. */
+  readonly displaced: string | null;
 };
 
 type Staged = {
@@ -106,6 +131,7 @@ export function createPluginCommands(
   const { C, ok, warn, bad, step, cap, childEnv, dataDirAbs } = runtime;
   const now = dependencies.now ?? (() => new Date());
   const cwd = dependencies.cwd ?? (() => process.cwd());
+  const buildVersion = dependencies.buildVersion;
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
   // `GIT_TERMINAL_PROMPT=0` только здесь, для плагинов и Marketplace: приватный или
@@ -169,8 +195,13 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       upsertPlugin,
       writePluginsState,
     } = core.store;
-    const { copyPluginTree, fetchGitPlugin, resolveRemoteSha, swapIntoStore } =
-      core.install;
+    const {
+      copyPluginTree,
+      fetchGitPlugin,
+      resolveRemoteSha,
+      restoreDisplaced,
+      swapIntoStore,
+    } = core.install;
 
     const force = argv.includes("--force");
     const args = argv.filter((value) => !value.startsWith("--"));
@@ -241,22 +272,30 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     }
 
     /**
-     * Одноимённый скилл у двух плагинов — отказ на add: две папки претендуют на одно
-     * имя в промпте, и молча выбрать одну значило бы отключить другую втихую.
+     * Кто из уже стоящих плагинов чем владеет. Одноимённый скилл у двух плагинов —
+     * отказ на add: две папки претендуют на одно имя в промпте, и молча выбрать одну
+     * значило бы отключить другую втихую. Так же и с кодом: mount у плагинов с кодом
+     * один файл на namespace (ADR-0009), и вторая папка на то же имя перезаписала бы
+     * первую.
      */
-    async function skillOwners(
+    async function owners(
       data: string,
       state: PluginsState,
       except: string,
-    ): Promise<Map<string, string>> {
-      const owners = new Map<string, string>();
+    ): Promise<{
+      readonly skills: Map<string, string>;
+      readonly code: string[];
+    }> {
+      const skills = new Map<string, string>();
+      const code: string[] = [];
       for (const entry of state.plugins) {
         if (entry.name === except) continue;
         const report = await readPlugin(pluginRoot(data, entry.name));
         for (const skill of report.skills)
-          if (!owners.has(skill.name)) owners.set(skill.name, entry.name);
+          if (!skills.has(skill.name)) skills.set(skill.name, entry.name);
+        if (report.code) code.push(entry.name);
       }
-      return owners;
+      return { skills, code };
     }
 
     async function install(
@@ -265,7 +304,11 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       raw: PluginSource,
       previous: PluginEntry | null,
       provenance: Provenance | null = null,
-    ): Promise<{ readonly entry: PluginEntry; readonly report: PluginReport }> {
+    ): Promise<{
+      readonly entry: PluginEntry;
+      readonly report: PluginReport;
+      readonly undo: Undo;
+    }> {
       const source = absolute(raw);
       mkdirSync(pluginsDir(data), { recursive: true });
       // Staging живёт рядом с плагинами: переезд к ним обязан быть переименованием,
@@ -298,12 +341,23 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             `${name} is already installed — use: iva plugin update ${name}`,
           );
 
-        const owners = await skillOwners(data, state, name);
+        const owned = await owners(data, state, name);
         for (const skill of report.skills) {
-          const owner = owners.get(skill.name);
+          const owner = owned.skills.get(skill.name);
           if (owner)
             throw new Error(
               `skill ${JSON.stringify(skill.name)} is already provided by the plugin ${owner} — remove one of them first`,
+            );
+        }
+        if (report.code) {
+          // Оба отказа — до переезда в стор: mount пишется во время сборки версии,
+          // и коллизия, найденная там, стала бы отказом сборки вместо ответа команде.
+          const problem = namespaceProblem(name);
+          if (problem) throw new Error(problem);
+          const taken = namespaceTaken(name, owned.code);
+          if (taken)
+            throw new Error(
+              `${name} and ${taken} both need the extension mount ${pluginNamespace(name)}.ts — remove one of them first`,
             );
         }
 
@@ -318,12 +372,17 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
               : `a folder named ${name} was there without an entry in plugins.json — replacing it`,
           );
 
-        swapIntoStore(staged.root, pluginRoot(data, name));
+        // Папку, которую установка сместила, держим до конца сборки версии: только
+        // ею можно вернуть плагин на место, если версия с ним не собралась.
+        const displaced = swapIntoStore(staged.root, pluginRoot(data, name), {
+          retain: report.code,
+        });
         // PLUGIN_DATA переживает и обновление, и удаление плагина (спека §9.1).
         await mkdir(pluginDataDir(data, name), { recursive: true });
         const marketplace =
           provenance?.marketplace ?? (previous ?? recorded)?.marketplace;
         return {
+          undo: { name, previous: previous ?? recorded ?? null, displaced },
           entry: {
             name,
             source: formatPluginSource(source),
@@ -400,6 +459,61 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           warn(`${one.label}: ${line}`);
     }
 
+    /**
+     * Собрать версию с кодом плагинов, как это делает `iva update`: тот же лок, тот же
+     * probe, тот же flip и рестарт (ADR-0009). `requirePlugins` — для команд, ради
+     * которых сборка и затевается (`add`, `update`, `enable`): плагин, который не
+     * собрался, там валит сборку, а не выключается молча. `disable` и `remove` идут без
+     * него: их дело сделано записью в plugins.json, а сборке нечего требовать.
+     *
+     * Возвращает причину отказа или null. Печатать прогресс не нужно: его печатает сам
+     * апдейтер, теми же строками.
+     */
+    async function buildCode(
+      what: string,
+      requirePlugins: boolean,
+    ): Promise<string | null> {
+      if (!buildVersion) {
+        warn(
+          translate(
+            `the code of ${what} is not built here: this Iva has no versions to build`,
+            `код ${what} здесь не собирается: у этой Ивы нет версий для сборки`,
+          ),
+        );
+        return null;
+      }
+      step(
+        translate(
+          `Building Iva with ${what}`,
+          `Собираю Иву с плагином: ${what}`,
+        ),
+      );
+      const built = await buildVersion({ requirePlugins });
+      if (built.status === "failed") return built.reason;
+      if (built.status === "skipped") warn(built.reason);
+      return null;
+    }
+
+    /** Вернуть стор и plugins.json в то состояние, из которого установка вышла. */
+    async function undoInstall(data: string, undo: Undo): Promise<void> {
+      const target = pluginRoot(data, undo.name);
+      if (undo.displaced) restoreDisplaced(undo.displaced, target);
+      else rmSync(target, { recursive: true, force: true });
+      const state = await readPluginsState(data);
+      await writePluginsState(
+        data,
+        undo.previous
+          ? upsertPlugin(state, undo.previous)
+          : removePlugin(state, undo.name),
+      );
+    }
+
+    /** Сборка прошла — смещённая папка больше не нужна. */
+    function dropDisplaced(undo: Undo): void {
+      if (undo.displaced)
+        rmSync(undo.displaced, { recursive: true, force: true });
+    }
+
     async function add(): Promise<void> {
       const raw = args[0];
       if (!raw)
@@ -431,7 +545,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
       // Состояние читается и пишется ВНУТРИ лока: прочитать до лока значило бы
       // записать поверх чужого `disable`, который случился, пока шла установка.
-      const { entry, report } = await locked(data, async () => {
+      const { entry, report, undo } = await locked(data, async () => {
         const state = await readPluginsState(data);
         if (!state.riskNoticeShownAt) {
           warn(translate(RISK_EN, RISK_RU));
@@ -453,6 +567,18 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         return installed;
       });
 
+      // Код плагина живёт в версии, поэтому установка заканчивается сборкой и
+      // рестартом. Сборка не прошла — установки не было: стор и plugins.json
+      // возвращаются как были, работающая версия не тронута (ADR-0003).
+      if (report.code && entry.enabled) {
+        const failure = await buildCode(entry.name, true);
+        if (failure !== null) {
+          await locked(data, () => undoInstall(data, undo));
+          throw new Error(`${entry.name} was not installed: ${failure}`);
+        }
+      }
+      dropDisplaced(undo);
+
       ok(`${entry.name} installed`);
       if (report.skills.length)
         ok(
@@ -461,11 +587,18 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             "скиллы работают со следующего хода: без сборки и рестарта",
           ),
         );
-      if (report.code || Object.keys(report.mcp).length)
+      if (report.code && entry.enabled)
+        ok(
+          translate(
+            `code is built into the version that runs; its tools are prefixed ${pluginNamespace(entry.name)}__`,
+            `код собран в работающую версию; тулы идут с префиксом ${pluginNamespace(entry.name)}__`,
+          ),
+        );
+      if (Object.keys(report.mcp).length)
         warn(
           translate(
-            "code and MCP servers are read and reported, but not built or started yet",
-            "код и MCP-серверы прочитаны и показаны, но пока не собираются и не запускаются",
+            "MCP servers are read and reported, but not started yet",
+            "MCP-серверы прочитаны и показаны, но пока не запускаются",
           ),
         );
     }
@@ -566,7 +699,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     async function toggle(enabled: boolean): Promise<void> {
       const data = dataDirAbs();
-      const entry = await locked(data, async () => {
+      const { entry, code } = await locked(data, async () => {
         const state = await readPluginsState(data);
         const found = mustFind(state, args[0]);
         if (found.enabled !== enabled)
@@ -574,11 +707,31 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             data,
             upsertPlugin(state, { ...found, enabled }),
           );
-        return found;
+        const report = await readPlugin(pluginRoot(data, found.name));
+        return { entry: found, code: report.code };
       });
       if (entry.enabled === enabled) {
         ok(`${entry.name} is already ${enabled ? "enabled" : "disabled"}`);
         return;
+      }
+      // Тумблер у плагина с кодом — это состав версии, значит сборка и рестарт.
+      // Включение, которое не собралось, возвращается в выключенное: иначе владелец
+      // остался бы с записью «включён» и без кода в работающей версии.
+      if (code) {
+        const failure = await buildCode(entry.name, enabled);
+        if (failure !== null) {
+          if (enabled) {
+            await locked(data, async () => {
+              const state = await readPluginsState(data);
+              await writePluginsState(
+                data,
+                upsertPlugin(state, { ...entry, enabled: false }),
+              );
+            });
+            throw new Error(`${entry.name} stays disabled: ${failure}`);
+          }
+          warn(failure);
+        }
       }
       ok(
         enabled
@@ -595,13 +748,20 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     async function remove(): Promise<void> {
       const data = dataDirAbs();
-      const entry = await locked(data, async () => {
+      const { entry, code } = await locked(data, async () => {
         const state = await readPluginsState(data);
         const found = mustFind(state, args[0]);
+        // Код читается ДО удаления папки: после него узнать, был ли он, неоткуда.
+        const report = await readPlugin(pluginRoot(data, found.name));
         rmSync(pluginRoot(data, found.name), { recursive: true, force: true });
         await writePluginsState(data, removePlugin(state, found.name));
-        return found;
+        return { entry: found, code: report.code && found.enabled };
       });
+      // Плагин удалён, а его код всё ещё в работающей версии: убирает его сборка.
+      if (code) {
+        const failure = await buildCode(entry.name, false);
+        if (failure !== null) warn(failure);
+      }
       ok(
         translate(
           `${entry.name} removed — its data stays in ${pluginDataDir(data, entry.name)}`,
@@ -630,16 +790,24 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       }
     }
 
+    type Updated = {
+      readonly state: PluginsState;
+      /** Чем откатить установку, если версия с новым кодом не соберётся. */
+      readonly undo: Undo | null;
+      readonly code: boolean;
+    };
+
     async function updateOne(
       data: string,
       state: PluginsState,
       entry: PluginEntry,
-    ): Promise<PluginsState> {
+    ): Promise<Updated> {
+      const untouched: Updated = { state, undo: null, code: false };
       if (!entry.source) {
         warn(
           `${entry.name} has no source recorded — reinstall it: iva plugin add <source>`,
         );
-        return state;
+        return untouched;
       }
       const source = parsePluginSource(entry.source);
       const root = pluginRoot(data, entry.name);
@@ -656,7 +824,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
                 `${entry.name}: папка не читается (${changed.why}) — не трогаю; заменить принудительно: --force`,
               ),
         );
-        return state;
+        return untouched;
       }
       if (source.kind === "git") {
         const { sha } = resolveRemoteSha(git, source.url, source.ref);
@@ -671,21 +839,31 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
                 `${entry.name} запинен маркетплейсом ${entry.marketplace} — сойти с пина: iva plugin remove ${entry.name} && iva plugin add ${entry.name}`,
               ),
             );
-          return state;
+          return untouched;
         }
       }
-      const { entry: installed } = await install(data, state, source, entry);
+      const {
+        entry: installed,
+        report,
+        undo,
+      } = await install(data, state, source, entry);
       ok(
         entry.sha && installed.sha
           ? `${entry.name}: ${entry.sha.slice(0, 12)} → ${installed.sha.slice(0, 12)}`
           : `${entry.name} reinstalled from ${installed.source}`,
       );
-      return upsertPlugin(state, installed);
+      return {
+        state: upsertPlugin(state, installed),
+        undo,
+        code: report.code && installed.enabled,
+      };
     }
 
     async function update(): Promise<void> {
       const data = dataDirAbs();
       const failed: string[] = [];
+      const undone: Undo[] = [];
+      const rebuilt: string[] = [];
       await locked(data, async () => {
         const state = await readPluginsState(data);
         const targets = args[0]
@@ -698,7 +876,10 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         let next = state;
         for (const entry of targets) {
           try {
-            next = await updateOne(data, next, entry);
+            const done = await updateOne(data, next, entry);
+            next = done.state;
+            if (done.undo) undone.push(done.undo);
+            if (done.code) rebuilt.push(entry.name);
           } catch (error) {
             failed.push(entry.name);
             bad(`${entry.name}: ${(error as Error).message}`);
@@ -706,6 +887,18 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         }
         await writePluginsState(data, next);
       });
+      // Одна сборка на весь прогон: версия собирается со всеми плагинами сразу, и
+      // отдельная сборка на каждый стоила бы столько же рестартов, сколько плагинов.
+      if (rebuilt.length) {
+        const failure = await buildCode(rebuilt.join(", "), true);
+        if (failure !== null) {
+          await locked(data, async () => {
+            for (const undo of undone) await undoInstall(data, undo);
+          });
+          throw new Error(`nothing was updated: ${failure}`);
+        }
+      }
+      for (const undo of undone) dropDisplaced(undo);
       if (failed.length)
         throw new Error(`could not update: ${failed.join(", ")}`);
     }

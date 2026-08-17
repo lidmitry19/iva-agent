@@ -3,6 +3,7 @@ import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -13,6 +14,14 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isAuthoredPath } from "./authored-paths.ts";
 import { resolveDataDir } from "./data-dir.ts";
+import {
+  buildPluginExtension,
+  codePlugins,
+  disableCodePlugin,
+  removePluginFromVersion,
+  type CodePlugin,
+  type PluginFailure,
+} from "./plugin-build.ts";
 import {
   awaitServing,
   probeEnvironment,
@@ -98,6 +107,15 @@ type FinishOptions = {
   readonly notify?: Say;
   readonly log?: Say;
   readonly store?: Store;
+  /**
+   * `iva plugin add|update|enable`: the plugin is the point of the build, so a plugin
+   * that will not build fails it and leaves the running version alone. An `iva update`
+   * leaves this off - there a plugin broken by a new eve is switched off instead, and
+   * the release still installs (ADR-0003).
+   */
+  readonly requirePlugins?: boolean;
+  /** Tell the owner which plugins are off, at most once a week per set (ADR-0007). */
+  readonly alertPlugins?: (failures: readonly PluginFailure[]) => Promise<void>;
 };
 
 type UpdateOptions = Omit<FinishOptions, "name"> & {
@@ -150,6 +168,35 @@ export function customOverlay(customDir: string): {
   };
 }
 
+/**
+ * What a version is built out of, beyond its commit: the files the user authored and
+ * the plugins that carry code (ADR-0009). Both go into the digest that names it, so
+ * adding, updating, enabling or disabling a code plugin is a new release and a build -
+ * and a plugin with only skills changes nothing, because its skills are live.
+ */
+export async function versionOverlay(
+  dataDir: string,
+  log: Say = () => {},
+): Promise<{
+  files: string[];
+  digest: string | null;
+  plugins: readonly CodePlugin[];
+}> {
+  const { files, digest } = customOverlay(join(dataDir, "custom"));
+  const { plugins, diagnostics } = await codePlugins(dataDir);
+  for (const line of diagnostics) log(line);
+  if (plugins.length === 0) return { files, digest, plugins };
+  // The plugin's content, not the digest recorded for it: a folder edited in place is
+  // a different version, and the config beside it is the owner's to change too.
+  const hash = createHash("sha256");
+  hash.update(`${digest ?? ""}\0`);
+  for (const plugin of plugins)
+    hash.update(
+      `${plugin.name}\0${plugin.digest}\0${plugin.config.length}\0${plugin.config}\n`,
+    );
+  return { files, digest: hash.digest("hex").slice(0, 8), plugins };
+}
+
 function sameFile(one: string, other: string): boolean {
   try {
     return readFileSync(one).equals(readFileSync(other));
@@ -158,16 +205,23 @@ function sameFile(one: string, other: string): boolean {
   }
 }
 
-/** What a version was built with, by contents: a stock tree has authored paths too. */
+/**
+ * What a version was built with, by contents: a stock tree has authored paths too.
+ * A plugin counts by its generated mount - without one, eve does not load its code,
+ * whatever the version is named after.
+ */
 export function builtWith(
   dir: string,
   name: string,
   customDir: string,
+  plugins: readonly CodePlugin[] = [],
 ): Custom {
   if (!parseVersionName(name)?.overlay) return "none";
   const { files } = customOverlay(customDir);
-  return files.length > 0 &&
-    files.every((path) => sameFile(join(dir, path), join(customDir, path)))
+  const carried = files.length > 0 || plugins.length > 0;
+  return carried &&
+    files.every((path) => sameFile(join(dir, path), join(customDir, path))) &&
+    plugins.every((plugin) => existsSync(join(dir, plugin.mount)))
     ? "applied"
     : "stock";
 }
@@ -196,7 +250,7 @@ export async function runVersionUpdate(
 
     const target = await resolveTarget();
     // Half of what gets built, so half of what it is called.
-    const { digest } = customOverlay(join(store.layout.data, "custom"));
+    const { digest } = await versionOverlay(store.layout.data, log);
     const release = versionName(target.version, target.sha, digest);
     const active = store.currentName();
     // Finished, not just flipped: unrun migrations are an update still owed.
@@ -258,6 +312,8 @@ export async function finishVersionUpdate({
   notify = () => {},
   log = () => {},
   store = createVersionStore(home),
+  requirePlugins = false,
+  alertPlugins,
 }: FinishOptions): Promise<UpdateOutcome> {
   const dir = join(store.layout.versions, name);
   const customDir = join(store.layout.data, "custom");
@@ -268,7 +324,11 @@ export async function finishVersionUpdate({
     probe ??
     ((at, port) =>
       probeVersion({ dir: at, port, env: probeEnvironment(env, port, at) }));
-  let custom = builtWith(dir, name, customDir);
+  const { plugins } = await versionOverlay(store.layout.data, log);
+  const tell =
+    alertPlugins ??
+    ((failures) => Promise.resolve(notify(pluginsOffNotice(failures))));
+  let custom = builtWith(dir, name, customDir, plugins);
   if (active === name && settledBefore === name && store.cleanupPending(name)) {
     await runPostHealthCleanup({
       name,
@@ -331,10 +391,28 @@ export async function finishVersionUpdate({
         "the service died on this version before; building it without data/custom",
       );
       await buildStock(store, name, run).catch(discard);
-      custom = builtWith(dir, name, customDir);
+      custom = builtWith(dir, name, customDir, plugins);
       if (custom === "stock") notify(deferredNotice());
-    } else
-      custom = await buildVersion(store, name, run, notify, log).catch(discard);
+    } else {
+      const built = await buildVersion({
+        store,
+        name,
+        run,
+        notify,
+        log,
+        plugins,
+        requirePlugins,
+      }).catch(discard);
+      custom = built.custom;
+      // The build is done and the version is good; a plugin it refused is switched
+      // off before anything else happens, so a probe failure or a bad start cannot
+      // leave the installation carrying a plugin nothing can build.
+      for (const failure of built.failed) {
+        if (await disableCodePlugin(store.layout.data, failure.name))
+          log(`switched the plugin ${failure.name} off`);
+      }
+      if (built.failed.length > 0) await tell(built.failed);
+    }
     let health = await prove();
     // A green build is not a start: the service compiles the authored TypeScript
     // again when it comes up, and a release is not the user's code to hold up.
@@ -587,6 +665,21 @@ function deferredNotice(): string {
   );
 }
 
+/**
+ * The local half of what a refused plugin costs the owner: the update output says it
+ * outright. The Alert that says the same in the chat is the caller's (ADR-0007), and
+ * `iva update` from Telegram is exactly the run whose output nobody reads.
+ */
+export function pluginsOffNotice(failures: readonly PluginFailure[]): string {
+  const named = failures.map((failure) => failure.name).join(", ");
+  return (
+    `these plugins do not build with this version, so they are switched off: ${named}. ` +
+    `Their code and their skills are out until they are fixed. Update one and turn it ` +
+    `back on: iva plugin update <name>, then iva plugin enable <name> - one at a time, ` +
+    `so the one that breaks the build is the one you see.\n${failures[0]?.reason.slice(-1500) ?? ""}`
+  );
+}
+
 /** One npm step in place; the step's own output is the failure report. */
 async function npmStep(
   dir: string,
@@ -598,14 +691,30 @@ async function npmStep(
   if (done.code !== 0) throw new Error(`${what} failed:\n${done.output}`);
 }
 
+/** What a build carried, and every plugin it refused along the way. */
+type BuiltVersion = {
+  readonly custom: Custom;
+  readonly failed: readonly PluginFailure[];
+};
+
 /** Build a staged version with the user's files in it, or without them if they break it. */
-async function buildVersion(
-  store: Store,
-  name: string,
-  run: Runner,
-  notify: Say,
-  log: Say,
-): Promise<Custom> {
+async function buildVersion({
+  store,
+  name,
+  run,
+  notify,
+  log,
+  plugins,
+  requirePlugins,
+}: {
+  readonly store: Store;
+  readonly name: string;
+  readonly run: Runner;
+  readonly notify: Say;
+  readonly log: Say;
+  readonly plugins: readonly CodePlugin[];
+  readonly requirePlugins: boolean;
+}): Promise<BuiltVersion> {
   const dir = join(store.layout.versions, name);
   const customDir = join(store.layout.data, "custom");
   const { files } = customOverlay(customDir);
@@ -617,8 +726,63 @@ async function buildVersion(
     cpSync(join(customDir, path), join(dir, path));
   }
   if (files.length > 0) log(`applied ${files.length} customized file(s)`);
+  const carried = files.length > 0 ? "applied" : "none";
+
+  // One plugin at a time: a plugin whose own extension build fails is named by that
+  // step, and its neighbours still get theirs.
+  const failed: PluginFailure[] = [];
+  const mounted: CodePlugin[] = [];
+  for (const plugin of plugins) {
+    const staged = await buildPluginExtension({
+      versionDir: dir,
+      plugin,
+      run,
+      log,
+    });
+    if (staged.ok) {
+      mounted.push(plugin);
+      continue;
+    }
+    removePluginFromVersion(dir, plugin);
+    if (requirePlugins) throw new Error(staged.output);
+    log(staged.output);
+    failed.push({
+      name: plugin.name,
+      digest: plugin.digest,
+      reason: staged.output,
+    });
+  }
+
   const built = await run("npm", BUILD, dir);
-  if (built.code === 0) return files.length > 0 ? "applied" : "none";
+  if (built.code === 0) return { custom: carried, failed };
+
+  // The tree will not compile with the plugins in it. Which one of them it is is not
+  // worth a search: they are the only part of the tree that is neither upstream's nor
+  // the user's, so they all come out in one build, and the owner puts them back one at
+  // a time. That answer costs one rebuild; a search costs one per plugin.
+  if (mounted.length > 0) {
+    for (const plugin of mounted) removePluginFromVersion(dir, plugin);
+    const withoutPlugins = await run("npm", BUILD, dir);
+    if (withoutPlugins.code === 0) {
+      const named = mounted.map((plugin) => plugin.name).join(", ");
+      const reason = `this version does not build with ${named}:\n${built.output.slice(-OUTPUT_TAIL)}`;
+      if (requirePlugins) throw new Error(reason);
+      log(reason);
+      return {
+        custom: carried,
+        failed: [
+          ...failed,
+          ...mounted.map((plugin) => ({
+            name: plugin.name,
+            digest: plugin.digest,
+            reason,
+          })),
+        ],
+      };
+    }
+    // Not the plugins after all. Nothing is put back: what comes next rebuilds the
+    // whole tree from the commit, or throws and takes the directory with it.
+  }
   if (files.length === 0) throw new Error(`build failed:\n${built.output}`);
 
   // The user's own code must never keep the service down: rebuild the stock tree
@@ -626,7 +790,7 @@ async function buildVersion(
   log("the customized build failed; rebuilding this version without it");
   await buildStock(store, name, run);
   notify(stockNotice("build against", built.output));
-  return "stock";
+  return { custom: "stock", failed };
 }
 
 /** Rebuild a staged version from its commit alone: a broken customization is tried once. */
