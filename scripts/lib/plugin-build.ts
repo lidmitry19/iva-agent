@@ -289,8 +289,6 @@ function pluginConnections({
       }),
     });
   }
-  // One name for two plugins: the same trap as one mount for two names, and the same
-  // answer - neither is generated, both are named.
   return connections;
 }
 
