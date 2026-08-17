@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   noticeSender,
@@ -7,6 +10,31 @@ import {
   type OutboxAck,
   type OutboxTransport,
 } from "./outbox.ts";
+
+// Журнал хода (ADR-0010) пишется и отсюда: вердикт outbound-Gate на каждом вызове гейта и
+// исход доставки на каждую отправку. Каталог данных — временный, писатель резолвит его на
+// каждой записи, поэтому окружение можно выставить и после импорта шва.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-outbox-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+const trace = await import("./trace.ts");
+// Уборка на выходе процесса, а НЕ через after(): файл регистрирует тесты через
+// `await test(...)`, и корневой хук успевает сработать посреди файла.
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 const SECRET = `sk-${"a".repeat(24)}`;
 
@@ -450,4 +478,108 @@ await test("noticeSender переживает пустую и многостро
   await send(`строка\nвторая api_key=${"z".repeat(24)}\nтретья`);
 
   assert.deepEqual(sent, ["", "строка\nвторая [REDACTED]\nтретья"]);
+});
+
+await test("Trace: вердикт гейта и доставка ложатся в журнал одного хода", async () => {
+  const { sent, transport } = stub();
+  const before = traceEvents().length;
+
+  const result = await trace.traceOutbox(
+    { turn: "turn_5", session: "wrun_2", source: "telegram" },
+    "готово",
+    () => sendThroughOutbox("готово", transport),
+  );
+
+  assert.equal(result.delivered, 1);
+  assert.equal(sent.length, 1);
+  const added = traceEvents().slice(before);
+  assert.deepEqual(
+    added.map((event) => `${String(event.kind)}.${String(event.name)}`),
+    ["gate.outbound", "outbox.delivered"],
+  );
+  // Вердикт гейта уезжает с ключом хода, хотя сигнатура redactNotice его не знает.
+  assert.equal(added[0].turn, "turn_5");
+  assert.equal(added[0].session, "wrun_2");
+  assert.deepEqual(added[0].data, {
+    clean: true,
+    findings: [],
+    chars: 6,
+    textChars: 6,
+    text: "готово",
+  });
+  const outbox = added[1];
+  assert.equal(outbox.turn, "turn_5");
+  assert.equal(outbox.session, "wrun_2");
+  const data = outbox.data as Record<string, unknown>;
+  assert.equal(data.ok, true);
+  assert.equal(data.delivered, 1);
+  assert.equal(data.chars, 6);
+  assert.equal(typeof data.ms, "number");
+});
+
+await test("Trace: rich-путь даёт ровно одно событие доставки", async () => {
+  const { sent, transport } = stub({ rich: () => ({ ok: true }) });
+  const before = traceEvents().length;
+
+  // Таблица уходит нативным rich-сообщением — своим путём, мимо HTML-чанков.
+  const table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+  const result = await trace.traceOutbox(
+    { turn: "turn_7", session: "wrun_3", source: "telegram" },
+    table,
+    () => sendThroughOutbox(table, transport),
+  );
+
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(
+    sent.map((item) => item.kind),
+    ["rich"],
+  );
+  const added = traceEvents().slice(before);
+  assert.deepEqual(
+    added.map((event) => `${String(event.kind)}.${String(event.name)}`),
+    ["gate.outbound", "outbox.delivered"],
+  );
+  assert.equal(added[1].turn, "turn_7");
+});
+
+await test("Trace: находка гейта и провал доставки видны в журнале", async (t) => {
+  captureErrors(t);
+  const { transport } = stub({
+    html: () => ({ ok: false, error: "flood control", retryPlain: false }),
+  });
+  const before = traceEvents().length;
+
+  await trace.traceOutbox(
+    { turn: "turn_6", session: "wrun_2", source: "telegram" },
+    `ключ: ${SECRET}`,
+    () => sendThroughOutbox(`ключ: ${SECRET}`, transport),
+  );
+
+  const added = traceEvents().slice(before);
+  const gate = added[0].data as Record<string, unknown>;
+  assert.equal(gate.clean, false);
+  // Превью находки в журнал не едет: там кусок самого секрета.
+  assert.deepEqual(gate.findings, ["api_key:openai"]);
+  assert.equal(gate.chars, 33);
+  // В журнал попадает текст ПОСЛЕ редактуры — вымаранный секрет назад не возвращается.
+  assert.equal(String(gate.text).includes(SECRET), false);
+  assert.ok(String(gate.text).includes("[REDACTED]"));
+  assert.equal(added[1].name, "failed");
+  const data = added[1].data as Record<string, unknown>;
+  assert.equal(data.ok, false);
+  assert.equal(data.delivered, 0);
+  assert.equal(data.error, "flood control");
+  assert.equal(JSON.stringify(added[1]).includes(SECRET), false);
+});
+
+await test("Trace: отправка вне хода журнал не трогает", async () => {
+  const { transport } = stub();
+  const before = traceEvents().length;
+
+  // Ни cron без контекста, ни юнит-тест шва не имеют права писать в журнал: событие
+  // без ключа хода читателю бесполезно, а файл растёт.
+  await sendThroughOutbox("просто текст", transport);
+  redactNotice("служебная реплика");
+
+  assert.equal(traceEvents().length, before);
 });

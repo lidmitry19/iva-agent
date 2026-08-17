@@ -1,5 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   emitTelegramTurnLatency,
@@ -9,6 +18,28 @@ import {
   publishTelegramTurnStarted,
   type TurnHeartbeat,
 } from "./telegram-turn-start.ts";
+
+// Старт хода — единственное место, где ключ апдейта сшивается с turnId (ADR-0010).
+// Каталог данных временный: писатель журнала резолвит его на каждой записи.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-turn-start-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+const trace = await import("./trace.ts");
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 type Status = Record<string, unknown>;
 
@@ -737,4 +768,69 @@ void test("a heartbeat losing the CAS race reports failure without retry storms"
   nowMs += 1_000;
   assert.equal(beat(), false);
   assert.equal(casCalls, 1); // отметка стоит: поток событий не превращается в поток записей
+});
+
+void test("Trace: старт хода связывает ключ апдейта с turnId", async () => {
+  const chatKey = "931:";
+  const status = statusStore();
+  // Так же, как это делает acceptance-обёртка на принятом апдейте.
+  trace.traceBindUpdate(chatKey, "tg:931:12");
+  const before = traceEvents().length;
+
+  await publishTelegramTurnStarted({
+    chatKey,
+    continuationToken: "telegram:931::",
+    sessionId: "wrun_31",
+    turnId: "turn_2",
+    getStatusImpl: status.get,
+    setStatusIfImpl: status.cas,
+  });
+
+  const added = traceEvents().slice(before);
+  const bound = added.filter((event) => event.kind === "turn");
+  assert.equal(bound.length, 1);
+  assert.equal(added[0].kind, "turn");
+  assert.equal(added[0].name, "bound");
+  assert.equal(added[0].turn, "turn_2");
+  assert.equal(added[0].session, "wrun_31");
+  assert.deepEqual(added[0].data, { chatKey, updateKey: "tg:931:12" });
+});
+
+void test("Trace: старт хода снимает состав памяти, которая уедет в промпт", async (t) => {
+  const vault = mkdtempSync(join(tmpdir(), "iva-turn-start-vault-"));
+  const previous = process.env.ASSISTANT_VAULT_DIR;
+  process.env.ASSISTANT_VAULT_DIR = vault;
+  writeFileSync(join(vault, "CORE.md"), "ядро памяти");
+  writeFileSync(join(vault, "MOC.md"), "карта тем");
+  t.after(() => {
+    if (previous === undefined) delete process.env.ASSISTANT_VAULT_DIR;
+    else process.env.ASSISTANT_VAULT_DIR = previous;
+    rmSync(vault, { recursive: true, force: true });
+  });
+  const status = statusStore();
+  const before = traceEvents().length;
+
+  await publishTelegramTurnStarted({
+    chatKey: "941:",
+    continuationToken: "telegram:941::",
+    sessionId: "wrun_41",
+    turnId: "turn_5",
+    getStatusImpl: status.get,
+    setStatusIfImpl: status.cas,
+  });
+
+  const parts = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "context");
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].name, "parts");
+  assert.equal(parts[0].turn, "turn_5");
+  assert.equal(parts[0].session, "wrun_41");
+  const data = parts[0].data as Record<string, unknown>;
+  // Размеры в БАЙТАХ тех же файлов, которые прочитают динамические инструкции eve.
+  assert.equal(data.core, 21);
+  assert.equal(data.moc, 17);
+  assert.equal(data.persona, 0); // квиз не пройден — файла нет
+  assert.equal(data.unit, "bytes");
+  assert.equal(data.approximate, true);
 });

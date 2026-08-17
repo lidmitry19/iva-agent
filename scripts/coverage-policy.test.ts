@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 218;
+const EXPECTED_PRODUCTION_COUNT = 220;
 const EXPECTED_INVENTORY_SHA256 =
-  "de0a52b46776e44d79560d457d1222b5cdd45dabb06a82ee057f5adc1d699043";
+  "7e1ebaadd402cb64d09d7722b7c1c4cf5423ee718909f7938e60d805d4bbb7fa";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -63,6 +63,12 @@ const EXPECTED_INVENTORY_SHA256 =
 // the store, the source parser, the install seam, and the `iva plugin` and doctor CLI
 // tests) reports all seven, 97.61% lines together and no file under 93%, so the blind
 // spot stays 26.
+// The turn journal (ADR-0010) came next: `agent/lib/trace.ts` and `agent/hooks/trace.ts`.
+// Scoped coverage over `agent/lib/trace.test.ts`, `agent/lib/trace.property.test.ts` and
+// `agent/lib/trace-hook.test.ts` reports them at 97% and 98% lines, so the blind spot
+// stays 26 - unlike `agent/hooks/transcript.ts`, this hook is loaded by its own test. That
+// test lives in `agent/lib/`, not beside the hook: eve treats every file under
+// `agent/hooks/` as a hook, and `trace.test` is not a legal hook name.
 // The rich-message reader `agent/lib/telegram-rich-message.ts` came last. Its own test
 // reports it at 99.53% lines, 92.69% branches and 100% functions, so the blind spot
 // stays 26.

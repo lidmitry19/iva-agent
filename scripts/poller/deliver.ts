@@ -13,6 +13,7 @@ import {
   sleep,
   log,
 } from "./config.ts";
+import { traceBridgeDelivery } from "#lib/trace.ts";
 import { tg } from "./transport.ts";
 import { chatKey } from "./offset.ts";
 import type { TelegramQueueUpdate } from "../lib/telegram-queue.ts";
@@ -250,6 +251,7 @@ const lastDeliverAt = new Map<string, number>();
 // отметить время. ЕДИНЫЙ путь для главного цикла и для меню (deps.deliver) — оба делят
 // lastDeliverAt, поэтому доставка из меню сдвигает паузу для следующего реального сообщения.
 async function pacedDeliver(update: TelegramUpdate, options?: DeliverOptions) {
+  const startedAt = Date.now();
   const deadline =
     options?.timeoutMs === undefined
       ? null
@@ -273,6 +275,9 @@ async function pacedDeliver(update: TelegramUpdate, options?: DeliverOptions) {
           timeoutMs: Math.max(1, Math.floor(deadline - Date.now())),
         };
   const accepted = await deliver(update, deliverOptions); // wait for delivery — ordered and lossless
+  // Trace: чем кончилась отдача апдейта агенту. Один исход на одну доставку, включая
+  // повторы очереди — их видно по одинаковому ключу апдейта (ADR-0010).
+  traceBridgeDelivery(update, accepted, Date.now() - startedAt);
   if (key !== null) lastDeliverAt.set(key, Date.now());
   return accepted; // false is retained/not delivered and must never be acknowledged
 }

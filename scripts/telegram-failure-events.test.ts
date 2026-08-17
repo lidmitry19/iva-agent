@@ -68,6 +68,7 @@ type FailureAdapter = {
   "action.partial": ChannelEventHandler;
   "action.result": ChannelEventHandler;
   "message.appended": ChannelEventHandler;
+  "message.completed": ChannelEventHandler;
 };
 
 const apiCalls: ApiCall[] = [];
@@ -118,6 +119,21 @@ const [
 ]);
 
 const adapter = (channel as unknown as { adapter: FailureAdapter }).adapter;
+
+// Журнал хода (ADR-0010): «Стоп» пишет свой исход из ЕДИНОЙ политики остановки, поэтому
+// одинаково виден и в webhook-режиме, и через мост.
+const trace = await import("#lib/trace.ts");
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(trace.traceFilePath(trace.traceDay(), dataDir), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 after(() => rmSync(dataDir, { recursive: true, force: true }));
 
@@ -672,6 +688,29 @@ test("the Stop button reaches the channel's own cancel route when no bridge is r
   assert.equal(acks[0].body!.text, "Stopping…");
 });
 
+test("Trace: исход «Стопа» ложится в журнал хода", async () => {
+  const chatId = "739";
+  const key = chatKeyOf(chatId);
+  setChatStatus(key, {
+    status: "running",
+    continuationToken: `${chatId}::`,
+    sessionId: "trace-stop-session",
+    turnId: "turn_11",
+  });
+  const before = traceEvents().length;
+
+  await postWebhookUpdate(stopTap(chatId, 9));
+
+  const stops = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "stop");
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].name, "requested");
+  assert.equal(stops[0].turn, "turn_11");
+  assert.equal(stops[0].session, "trace-stop-session");
+  assert.deepEqual(stops[0].data, { chatKey: key, outcome: "requested" });
+});
+
 test("an idle chat and an untrusted tap never reach the cancel route", async () => {
   const idleChat = "732";
   setChatStatus(chatKeyOf(idleChat), { status: "idle" });
@@ -789,5 +828,48 @@ test("a crashed turn's stale status is not stoppable in webhook mode either", as
   assert.equal(
     callsSince(before, "answerCallbackQuery")[0].body!.text,
     "Nothing is running right now.",
+  );
+});
+
+test("Trace: ответ модели уходит в журнал ключом своего хода", async () => {
+  const chatId = "741";
+  const key = chatKeyOf(chatId);
+  setChatStatus(key, {
+    status: "running",
+    sessionId: "trace-outbox-session",
+    turnId: "turn_12",
+    firstOutputAt: 1,
+  });
+  const before = traceEvents().length;
+  const context = eventContext({
+    chatId,
+    sessionId: "trace-outbox-session",
+  });
+
+  await contextStorage.run(context.ctx, () =>
+    adapter["message.completed"](
+      {
+        finishReason: "stop",
+        message: "готово, отпуск в июле",
+        sequence: 4,
+        stepIndex: 1,
+        turnId: "turn_12",
+      },
+      context.value,
+    ),
+  );
+
+  const added = traceEvents().slice(before);
+  const outbox = added.find((event) => event.kind === "outbox");
+  const gate = added.find((event) => event.kind === "gate");
+  // Ключ хода и сессия приходят из канала: без них последнее звено цепочки повисло бы.
+  assert.equal(outbox?.name, "delivered");
+  assert.equal(outbox?.turn, "turn_12");
+  assert.equal(outbox?.session, "trace-outbox-session");
+  assert.equal(outbox?.source, "telegram");
+  assert.equal(gate?.turn, "turn_12");
+  assert.equal(
+    (gate?.data as Record<string, unknown>).text,
+    "готово, отпуск в июле",
   );
 });

@@ -17,6 +17,7 @@ import {
   collectorTakeExpired,
   createCollector,
 } from "../lib/telegram-collect.ts";
+import { traceBridgeAdmission } from "#lib/trace.ts";
 import { ALLOWED, BOT_USERNAME, DATA_DIR, log } from "./config.ts";
 import { chatKey } from "./offset.ts";
 import { routeMessageUpdate, type RouteMessageResult } from "./routing.ts";
@@ -166,13 +167,20 @@ export async function admitTelegramUpdate(
       ? { action: "unownable" as const }
       : { action: "own" as const, key: trustedKey }
     : admissionPolicy(update, allowedUserIds, botUsername);
-  if (decision.action !== "own") return decision.action;
+  // Trace: мост принял апдейт или отбросил его своей политикой — первое звено цепочки
+  // хода, и пишется оно из ПРОЦЕССА МОСТА в тот же дневной файл (ADR-0010).
+  if (decision.action !== "own") {
+    traceBridgeAdmission(update, decision.action);
+    return decision.action;
+  }
   try {
     await enqueueImpl(decision.key, update);
+    traceBridgeAdmission(update, "owned");
     return "owned";
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logImpl(`inbox write failed for update ${update.update_id}:`, message);
+    traceBridgeAdmission(update, "write-failed");
     return "write-failed";
   }
 }

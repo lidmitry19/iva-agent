@@ -1,7 +1,13 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node's test runner owns registration promises and the harness preserves production async seams. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { telegramChannel } from "eve/channels/telegram";
@@ -25,6 +31,41 @@ import {
 } from "#lib/telegram-acceptance.ts";
 
 const WEBHOOK_SECRET = "test-secret";
+
+// Журнал хода (ADR-0010): обёртка onMessage — единственное место, где видны и апдейт, и
+// результат inbound-пайплайна, поэтому состав контекста и связка «апдейт ↔ ход» пишутся
+// здесь, а не внутри самого пайплайна.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-acceptance-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+const trace = await import("#lib/trace.ts");
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
+
+function inboundMessage(chatId: number, messageId: number): TelegramMessage {
+  return {
+    attachments: [],
+    caption: "",
+    chat: { id: String(chatId), type: "private" },
+    from: { id: "42", isBot: false },
+    messageId: String(messageId),
+    raw: {},
+    text: "привет",
+  } as unknown as TelegramMessage;
+}
 type TestUpdate = {
   update_id: number;
   message: {
@@ -649,4 +690,35 @@ test("missing webhook secret disables deduplication and reports it once", async 
     logs.filter((line) => line.includes("durable deduplication")).length,
     1,
   );
+});
+
+test("Trace: обёртка пишет состав контекста и связывает ход с апдейтом", async () => {
+  const before = traceEvents().length;
+  const accepted = wrapTelegramQueueOnMessage(() => ({
+    auth: null,
+    context: ["[reply]", "[voice] spoken words"],
+  }));
+  const dropped = wrapTelegramQueueOnMessage(() => null);
+
+  await accepted({} as TelegramContext, inboundMessage(77, 5));
+  await dropped({} as TelegramContext, inboundMessage(78, 6));
+
+  const added = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "inbound");
+  assert.deepEqual(
+    added.map((event) => event.name),
+    ["accepted", "dropped"],
+  );
+  assert.equal(added[0].turn, "tg:77:5");
+  assert.deepEqual(added[0].data, {
+    chatId: "77",
+    chatKey: "77:",
+    parts: 2,
+    partChars: [7, 20],
+    context: ["[reply]", "[voice] spoken words"],
+  });
+  // Принятый апдейт помечен для старта хода, отброшенный — нет.
+  assert.equal(trace.traceBoundUpdate("77:"), "tg:77:5");
+  assert.equal(trace.traceBoundUpdate("78:"), "");
 });

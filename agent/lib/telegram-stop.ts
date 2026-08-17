@@ -17,6 +17,7 @@ import { chatKeyOf, getChatStatus, isRunning } from "./run-status.ts";
 import { toChannelLocalToken } from "./telegram-continuation-token.ts";
 import { tr } from "./i18n.ts";
 import { isPrivateTelegramChat } from "./telegram-private-chat.ts";
+import { traceStop } from "./trace.ts";
 
 export type StopOutcome = "requested" | "idle" | "failed";
 export type StopCancelRequest = {
@@ -72,8 +73,17 @@ export async function requestTurnCancel(
     logImpl?: (...parts: unknown[]) => void;
   },
 ): Promise<StopOutcome> {
+  // Trace: одна точка исхода на обе двери «Стопа» — журнал не может разойтись с политикой
+  // остановки, потому что смотрит на её же результат (ADR-0010).
+  const finish = (
+    outcome: StopOutcome,
+    status?: Record<string, unknown> | null,
+  ): StopOutcome => {
+    traceStop(chatKey ?? "", status ?? null, outcome);
+    return outcome;
+  };
   if (chatKey === null || chatKey.length === 0 || !runningImpl(chatKey))
-    return "idle";
+    return finish("idle", chatKey ? getStatusImpl(chatKey) : null);
   const status = getStatusImpl(chatKey);
   const storedToken = status?.continuationToken;
   if (
@@ -81,12 +91,12 @@ export async function requestTurnCancel(
     typeof storedToken !== "string" ||
     storedToken.length === 0
   ) {
-    return "idle";
+    return finish("idle", status);
   }
   // Без секрета вебхука роут ответит 401 — молчать об этом хуже, чем сказать «не вышло».
   if (secret === undefined || secret.length === 0) {
     logImpl("turn cancel failed: no TELEGRAM_WEBHOOK_SECRET_TOKEN");
-    return "failed";
+    return finish("failed", status);
   }
   const turnId = status.turnId;
   try {
@@ -98,10 +108,10 @@ export async function requestTurnCancel(
       // Гард от запоздалого нажатия: несовпавший turnId eve глотает как no-op.
       ...(typeof turnId === "string" && turnId.length > 0 ? { turnId } : {}),
     });
-    return "requested";
+    return finish("requested", status);
   } catch (error) {
     logImpl("turn cancel failed:", error);
-    return "failed";
+    return finish("failed", status);
   }
 }
 

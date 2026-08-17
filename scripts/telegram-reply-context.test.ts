@@ -14,6 +14,10 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 
 const vault = mkdtempSync(join(tmpdir(), "iva-reply-context-"));
+// Свой каталог данных: пайплайн пишет run-status и журнал хода, и ни то, ни другое не
+// должно оседать в каталоге репозитория при прогоне тестов.
+const dataDir = mkdtempSync(join(tmpdir(), "iva-reply-context-data-"));
+process.env.ASSISTANT_DATA_DIR = dataDir;
 const telegramBotToken = `bot-${randomUUID()}`;
 const telegramWebhookSecret = `webhook-${randomUUID()}`;
 process.env.ASSISTANT_VAULT_DIR = vault;
@@ -107,7 +111,10 @@ const webhook = channel.routes.find(
   (route: { path: string }) => route.path === "/eve/v1/telegram",
 ) as unknown as WebhookRoute | undefined;
 
-after(() => rmSync(vault, { recursive: true, force: true }));
+after(() => {
+  rmSync(vault, { recursive: true, force: true });
+  rmSync(dataDir, { recursive: true, force: true });
+});
 
 function message(overrides: Record<string, unknown> = {}): Message {
   return {

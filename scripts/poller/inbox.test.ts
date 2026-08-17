@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import fc from "fast-check";
 import {
@@ -16,6 +19,28 @@ import {
 } from "./inbox.ts";
 
 const SEED = 18_702;
+
+// Мост пишет журнал хода (ADR-0010) из СВОЕГО процесса, в тот же дневной файл, что и
+// агент. Каталог данных — временный: писатель резолвит его на каждой записи.
+const traceRoot = mkdtempSync(join(tmpdir(), "iva-bridge-trace-"));
+process.env.ASSISTANT_DATA_DIR = join(traceRoot, "data");
+mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
+const trace = await import("#lib/trace.ts");
+process.on("exit", () => rmSync(traceRoot, { recursive: true, force: true }));
+
+function traceEvents(): Record<string, unknown>[] {
+  try {
+    return readFileSync(
+      trace.traceFilePath(trace.traceDay(), process.env.ASSISTANT_DATA_DIR),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return []; // журнала ещё нет — событий тоже
+  }
+}
 
 function update(updateId: number, text: string): TelegramQueueUpdate {
   return {
@@ -394,4 +419,59 @@ void test("callback admission owns allowed users, terminally drops known unautho
     "unownable",
   );
   assert.deepEqual(owned, [["callback:1:", 101]]);
+});
+
+void test("Trace: мост пишет вердикт приёма своим ключом апдейта", async () => {
+  const before = traceEvents().length;
+
+  await admitTelegramUpdate(update(701, "принимай"), {
+    allowedUserIds: new Set(["42"]),
+    enqueueImpl: () => Promise.resolve(),
+  });
+  await admitTelegramUpdate(update(702, "чужое"), {
+    allowedUserIds: new Set(["7"]),
+    enqueueImpl: () => assert.fail("чужой апдейт не ставится в очередь"),
+  });
+
+  const added = traceEvents().slice(before);
+  // Имя события следует исходу: принятый апдейт и отброшенный — разные строки ленты.
+  assert.deepEqual(
+    added.map((event) => `${String(event.kind)}.${String(event.name)}`),
+    ["bridge.admitted", "bridge.dropped"],
+  );
+  // Ключ апдейта — тот же, что напишет ядро: чат и сообщение, а не update_id.
+  assert.equal(added[0].turn, "tg:1:701");
+  assert.equal(added[0].source, "bridge");
+  assert.deepEqual(added[0].data, {
+    updateId: 701,
+    chatId: 1,
+    messageId: "701",
+    kind: "message",
+    decision: "owned",
+  });
+  assert.equal(
+    (added[1].data as Record<string, unknown>).decision,
+    "terminal-drop",
+  );
+});
+
+void test("Trace: сбой записи в inbox виден в журнале отдельным вердиктом", async () => {
+  const before = traceEvents().length;
+
+  assert.equal(
+    await admitTelegramUpdate(update(703, "не влезло"), {
+      allowedUserIds: new Set(["42"]),
+      enqueueImpl: () => Promise.reject(new Error("ENOSPC")),
+      logImpl: () => {},
+    }),
+    "write-failed",
+  );
+
+  const added = traceEvents().slice(before);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].name, "dropped");
+  assert.equal(
+    (added[0].data as Record<string, unknown>).decision,
+    "write-failed",
+  );
 });

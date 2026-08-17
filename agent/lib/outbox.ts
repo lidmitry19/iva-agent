@@ -30,6 +30,7 @@
 // и голым node (cron → scripts/lib/telegram-send.ts), где «./x.js» → «./x.ts» никто
 // не переписывает.
 import { scanOutbound } from "./security-gate.ts";
+import { traceOutboundGate } from "./trace.ts";
 import {
   htmlToPlain,
   needsRichMessage,
@@ -71,6 +72,11 @@ export function redactNotice(text: string): string {
       "[security] outbound leak redacted:",
       guard.findings.map((f) => `${f.type}:${f.name}`).join(", "),
     );
+  // Trace: вердикт outbound-Gate. Стоит на самом вызове гейта, поэтому в журнал попадает
+  // и ответ модели через шов, и служебная реплика канала через noticeSender. Ключ хода
+  // берётся из контекста хода (его ставит traceOutbox вокруг отправки), вне хода событие
+  // не пишется вовсе — сигнатура шва при этом не меняется (ADR-0010).
+  traceOutboundGate(guard.clean, guard.findings, text.length, guard.text);
   return guard.text;
 }
 

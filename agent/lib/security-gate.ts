@@ -2,6 +2,7 @@
 // and bare-Node operational scripts.
 
 import secretKeyInventory from "../skills/security-defense/outbound-sensitive-keys.json" with { type: "json" };
+import { traceInboundGate } from "./trace.ts";
 
 const INVISIBLE_RE = /[\p{Cf}\p{Cc}\u034F]/gu;
 const KEEP_CONTROL = new Set(["\n", "\r", "\t"]);
@@ -337,10 +338,29 @@ function normalizeLookalikes(text: string): {
   return { text: probe, normalized };
 }
 
+/**
+ * Санитайзер входа плюс запись вердикта в журнал хода. Обёртка, а не строка внутри
+ * правил: вердиктов у гейта два (ранний выход и обычный), а событие обязано быть одно —
+ * иначе журнал показывал бы вход, который гейт не смотрел (ADR-0010).
+ *
+ * САМ ГЕЙТ ОСТАЁТСЯ ЧИСТЫМ: событие пишется, только когда вызов идёт внутри хода
+ * (контекст ставят inbound-пайплайн и web-тулы). Вне хода — юнит-тест, скрипт, чужой
+ * вызов — на диск не уходит ничего, и вердикт без ключа хода в журнале не появляется.
+ */
 export function sanitizeInbound(
   input: string,
   maxChars = 50000,
   options: SanitizeOptions = {},
+): SanitizeResult {
+  const verdict = judgeInbound(input, maxChars, options);
+  traceInboundGate(options.surface ?? "telegram", verdict, input.length);
+  return verdict;
+}
+
+function judgeInbound(
+  input: string,
+  maxChars: number,
+  options: SanitizeOptions,
 ): SanitizeResult {
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a non-negative safe integer");

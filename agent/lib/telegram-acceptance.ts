@@ -14,6 +14,8 @@ import {
   saveJsonAtomic,
 } from "./json-store.ts";
 import { dataDir } from "./data-dir.ts";
+import { chatKeyOf } from "./run-status.ts";
+import { traceInboundOutcome } from "./trace.ts";
 
 export const TELEGRAM_ACCEPTANCE_ROUTE = "/eve/v1/telegram/accepted";
 export const TELEGRAM_QUEUE_RECEIPT_FIELD = "iva_durable_queue_receipt";
@@ -110,6 +112,15 @@ export function wrapTelegramQueueOnMessage(
     }
 
     const result = await onMessage(context, message);
+    // Trace: чем кончился inbound-пайплайн и каким апдейтом вызван начинающийся ход.
+    // Место выбрано снаружи пайплайна: только здесь видны и сообщение, и его результат,
+    // а сам пайплайн остаётся с одной точкой журнала (ADR-0010).
+    traceInboundOutcome(
+      message,
+      chatKeyOf(message.chat.id, message.messageThreadId),
+      result?.context,
+      result !== null && result !== undefined,
+    );
     const active = receiptContext.getStore();
     if (result === null && receipt !== null && active?.receipt === receipt) {
       active.handled = true;

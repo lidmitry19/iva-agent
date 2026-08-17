@@ -450,8 +450,17 @@ if (REPORTS_TO_TELEGRAM[period]) {
   const send =
     BOT && CHAT
       ? {
-          report: (text: string) => sendTelegramHtml(BOT, CHAT, text),
-          notice: (text: string) => sendTelegramHtml(BOT, CHAT, text),
+          // Ночной ход зовётся своим именем в журнале хода (ADR-0010): без источника
+          // вьюер прочитал бы rollup как разговор в Telegram. Сессия — сквозная,
+          // по ней читатель сшивает весь ночной ход.
+          report: (text: string) =>
+            sendTelegramHtml(BOT, CHAT, text, {
+              trace: { session: session.state.sessionId, source: "rollup" },
+            }),
+          notice: (text: string) =>
+            sendTelegramHtml(BOT, CHAT, text, {
+              trace: { session: session.state.sessionId, source: "rollup" },
+            }),
         }
       : null;
   if (!send && memoryReportsEnabled(settings)) {

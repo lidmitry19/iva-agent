@@ -54,10 +54,12 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 
-export function readSettingsState(): SettingsFileState {
+export function readSettingsState(
+  file: string = SETTINGS_FILE,
+): SettingsFileState {
   let bytes: Buffer;
   try {
-    bytes = readFileSync(SETTINGS_FILE);
+    bytes = readFileSync(file);
   } catch (error) {
     return errorCode(error) === "ENOENT"
       ? { state: "missing" }
@@ -91,8 +93,10 @@ export function readSettingsState(): SettingsFileState {
 
 // Чтение остаётся settings-specific и fail-safe: UI/Report не включаются из-за
 // битого файла. Запись ниже использует полное состояние и ничего не чинит молча.
-export function readSettings(): Settings {
-  const result = readSettingsState();
+// Путь параметром нужен читателям, которые резолвят каталог данных на каждом вызове
+// (журнал хода: agent/lib/trace.ts). По умолчанию — тот же файл, что и у записи.
+export function readSettings(file: string = SETTINGS_FILE): Settings {
+  const result = readSettingsState(file);
   return result.state === "valid" ? result.settings : {};
 }
 
