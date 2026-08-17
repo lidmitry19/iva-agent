@@ -183,9 +183,15 @@ void test("ошибка записи не выходит наружу", (t) => {
     console.error = original;
   });
 
-  assert.doesNotThrow(() =>
-    trace.appendTrace({ kind: "eve", name: "turn.started" }, { dir, now: AT }),
-  );
+  for (let i = 0; i < 5; i++) {
+    assert.doesNotThrow(() =>
+      trace.appendTrace(
+        { kind: "eve", name: "turn.started" },
+        { dir, now: AT },
+      ),
+    );
+  }
+  // Полный диск не имеет права залить journal службы: одна жалоба в минуту.
   assert.equal(errors.length, 1);
   assert.ok(errors[0].startsWith("[trace] событие не записано:"));
 });
