@@ -10,7 +10,9 @@ import test from "node:test";
 import fc from "fast-check";
 import {
   formatPluginSource,
+  isScpLikeUrl,
   parsePluginSource,
+  positional,
   type PluginSource,
 } from "./plugin-source.ts";
 
@@ -185,6 +187,25 @@ test("every written form parses into one value and writes back unchanged", () =>
     assert.deepEqual(parsePluginSource(raw), expected, raw);
     assert.equal(formatPluginSource(expected), raw, raw);
   }
+});
+
+test("a value that git would read as an option never reaches it", () => {
+  // Один замок на двоих: этим же охранником пользуется установка и обновление кэша.
+  for (const value of ["-utouch", "--upload-pack=touch", "--depth"])
+    assert.throws(
+      () => positional(["https://h.test/x.git", value]),
+      new RegExp(
+        `refusing to pass "${value.replace(/[-]/gu, "-")}" to git`,
+        "u",
+      ),
+      value,
+    );
+  assert.deepEqual(positional(["https://h.test/x.git", "main"]), [
+    "https://h.test/x.git",
+    "main",
+  ]);
+  assert.equal(isScpLikeUrl("git@github.com:smixs/iva.git"), true);
+  assert.equal(isScpLikeUrl("https://github.com/smixs/iva.git"), false);
 });
 
 test("an unrecognized source is refused by name, never guessed", () => {

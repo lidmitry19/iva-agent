@@ -65,9 +65,9 @@ const EXPECTED_INVENTORY_SHA256 =
 // spot stays 26.
 // The Marketplace came after them, one path: `scripts/lib/marketplace.ts`. Scoped
 // coverage over its own anchors and properties plus the `iva plugin` CLI suite reports
-// it at 99.68% lines, 93.51% branches and 100% functions - the one uncovered pair is
-// the guard that refuses to hand git an argument starting with a dash, which a parsed
-// source can no longer produce. Nothing new is unreported, so the blind spot stays 26.
+// it at 100% lines, 96.62% branches and 100% functions, with `plugin-source.ts` at 100%
+// and `plugin-install.ts` at 97.87% beside it. Nothing new is unreported, so the blind
+// spot stays 26.
 // The turn journal (ADR-0010) came next: `agent/lib/trace.ts` and `agent/hooks/trace.ts`.
 // Scoped coverage over `agent/lib/trace.test.ts`, `agent/lib/trace.property.test.ts` and
 // `agent/lib/trace-hook.test.ts` reports them at 97% and 98% lines, so the blind spot
