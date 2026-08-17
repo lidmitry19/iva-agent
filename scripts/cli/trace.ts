@@ -60,6 +60,9 @@ const TAIL_PREVIEW_CHARS = 80;
 const FACT_LIMIT = 40;
 const SHOW_PREVIEW_CHARS = 160;
 const TURN_LIST_LIMIT = 20;
+// Group key of a night turn: the session AND the eve turnId. One session holds many
+// turns, so the pair is the identity — see stitchTurns.
+const SESSION_TURN = "|";
 
 // Content fields, in the order a reader wants to see them: the writer merges content flat
 // into `data` next to its `<key>Chars` sizes, so there is no separate object to look in.
@@ -236,27 +239,34 @@ function baseTurn(key: string): string {
  * Lines → turns, exactly as docs/trace.md describes it.
  *
  * `turn.bound` is the only line where the update key and the turnId lie together, so it
- * decides which events belong to a chat turn. An event whose turnId never got a
- * `turn.bound` falls back to its session — that is a night turn, which has no turn key at
- * all. Left with neither, it stands alone: Bridge callback lines are orphans by design.
+ * decides which lines belong to a chat turn. Everything else is grouped by session AND eve
+ * turnId together, never by session alone: one Eve session holds many turns — the daily
+ * digest sends twice inside one session, and the nightly Rollup keeps its session alive
+ * across nights — so a session on its own would glue a fortnight of nights into one turn.
  *
- * The night-turn group is keyed by session only, not by session and source: inside one
- * night turn the eve lines carry `source: "unknown"` while `gate.outbound` and `outbox.*`
- * carry `rollup`, so keying on source would cut one turn in two.
+ * A line with no turn key at all (the `gate.outbound` and `outbox.*` of a night send)
+ * belongs to the most recent turn of its session by `ts`. Left with neither a key nor a
+ * session, a line stands alone: Bridge callback lines are orphans by design.
+ *
+ * Source is deliberately part of no key: inside one night turn the eve lines carry
+ * `source: "unknown"` while `gate.outbound` and `outbox.*` carry `rollup`, so keying on
+ * source would cut one turn in two.
  */
 export function stitchTurns(lines: readonly TraceLine[]): StitchedTurn[] {
+  // Write order is not turn order — two processes append to one file — so everything below
+  // reads the journal in `ts` order, including which turn a keyless line lands on.
+  const sorted = [...lines].sort(
+    (left, right) => left.at - right.at || left.index - right.index,
+  );
+
   const turnIdByUpdateKey = new Map<string, string>();
   const updateKeyByTurnId = new Map<string, string>();
   const chatTurns = new Set<string>();
-  // By `ts`, and the earliest claim wins. Two `turn.bound` lines can name the same update
-  // key — a proactive turn in a chat whose last binding is still on the books — and which
-  // one wins must not depend on which process wrote its line first.
-  const bound = lines
-    .filter(
-      (line) => line.kind === "turn" && line.name === "bound" && line.turn,
-    )
-    .sort((left, right) => left.at - right.at || left.index - right.index);
-  for (const line of bound) {
+  // The earliest claim wins. Two `turn.bound` lines can name the same update key — a
+  // proactive turn in a chat whose last binding is still on the books — and which one wins
+  // must not depend on which process wrote its line first.
+  for (const line of sorted) {
+    if (line.kind !== "turn" || line.name !== "bound" || !line.turn) continue;
     chatTurns.add(line.turn);
     const updateKey = str(line.data.updateKey);
     if (!updateKey) continue; // a proactive turn has no update behind it
@@ -266,13 +276,45 @@ export function stitchTurns(lines: readonly TraceLine[]): StitchedTurn[] {
       updateKeyByTurnId.set(line.turn, updateKey);
   }
 
+  /** The group of a line that carries a turn key of its own. */
+  function keyOf(line: TraceLine, base: string): string {
+    if (chatTurns.has(base)) return base;
+    return (
+      turnIdByUpdateKey.get(base) ??
+      (line.session ? `${line.session}${SESSION_TURN}${base}` : base)
+    );
+  }
+
+  const keys = new Map<TraceLine, string>();
+  const openTurn = new Map<string, string>();
+  const firstTurn = new Map<string, string>();
+  const waiting: TraceLine[] = [];
+  for (const line of sorted) {
+    const base = baseTurn(line.turn);
+    if (!base) {
+      // Keyless: the send seam of a night turn. It joins the turn open at that moment.
+      const open = line.session ? openTurn.get(line.session) : undefined;
+      if (open) keys.set(line, open);
+      else waiting.push(line);
+      continue;
+    }
+    const key = keyOf(line, base);
+    keys.set(line, key);
+    if (!line.session) continue;
+    openTurn.set(line.session, key);
+    if (!firstTurn.has(line.session)) firstTurn.set(line.session, key);
+  }
+  // A keyless line ahead of every turn of its session can only belong to the first one.
+  for (const line of waiting)
+    keys.set(
+      line,
+      (line.session ? firstTurn.get(line.session) : "") || line.session || "?",
+    );
+
   const groups = new Map<string, TraceLine[]>();
   const order: string[] = [];
-  for (const line of lines) {
-    const base = baseTurn(line.turn);
-    const key = chatTurns.has(base)
-      ? base
-      : (turnIdByUpdateKey.get(base) ?? (line.session || base || "?"));
+  for (const line of sorted) {
+    const key = keys.get(line) ?? "?";
     const bucket = groups.get(key);
     if (bucket) bucket.push(line);
     else {
@@ -283,17 +325,22 @@ export function stitchTurns(lines: readonly TraceLine[]): StitchedTurn[] {
 
   const turns: StitchedTurn[] = [];
   for (const key of order) {
-    const events = [...(groups.get(key) ?? [])].sort(
-      (left, right) => left.at - right.at || left.index - right.index,
-    );
+    const events = groups.get(key) ?? [];
+    // A turnId never carries the separator, so the last one is where the session ends.
+    const split = key.lastIndexOf(SESSION_TURN);
     const sources: string[] = [];
-    let session = "";
-    let turnId = chatTurns.has(key) ? key : "";
+    let session = split === -1 ? "" : key.slice(0, split);
+    let turnId =
+      split === -1
+        ? chatTurns.has(key)
+          ? key
+          : ""
+        : key.slice(split + SESSION_TURN.length);
     for (const event of events) {
       if (event.source && !sources.includes(event.source))
         sources.push(event.source);
       if (!session && event.session) session = event.session;
-      // A night turn has no turn key of its own, but its eve lines still carry `turn_N`
+      // A night turn has no turn key on its seams, but its eve lines still carry `turn_N`
       // from the hook — worth showing, and worth accepting as a selector.
       const base = baseTurn(event.turn);
       if (!turnId && base && !base.startsWith("tg:")) turnId = base;
@@ -315,18 +362,36 @@ export function stitchTurns(lines: readonly TraceLine[]): StitchedTurn[] {
   );
 }
 
-/** A turnId, an update key, a session id, or `last` — whatever the owner has at hand. */
+/**
+ * A turnId, an update key, a session id, or `last` — whatever the owner has at hand.
+ *
+ * The newest match wins, like `last` does. A turnId restarts at `turn_0` in every Eve
+ * session and a session holds many turns, so both can name more than one turn in fourteen
+ * days; the one the owner is looking at is the last one.
+ */
 export function selectTurn(
   turns: readonly StitchedTurn[],
   selector: string,
 ): StitchedTurn | undefined {
   if (selector === "last") return turns.at(-1);
   return (
-    turns.find((turn) => turn.turnId === selector) ??
-    turns.find((turn) => turn.updateKey === selector) ??
-    turns.find((turn) => turn.key === selector) ??
-    turns.find((turn) => turn.session === selector)
+    lastMatch(turns, (turn) => turn.turnId === selector) ??
+    lastMatch(turns, (turn) => turn.updateKey === selector) ??
+    lastMatch(turns, (turn) => turn.key === selector) ??
+    lastMatch(turns, (turn) => turn.session === selector)
   );
+}
+
+/** The newest match. `Array.findLast` is ES2023 and the target of this repo is ES2022. */
+function lastMatch(
+  turns: readonly StitchedTurn[],
+  match: (turn: StitchedTurn) => boolean,
+): StitchedTurn | undefined {
+  for (let at = turns.length - 1; at >= 0; at -= 1) {
+    const turn = turns[at];
+    if (match(turn)) return turn;
+  }
+  return undefined;
 }
 
 export type TurnOutcome =
@@ -369,8 +434,8 @@ export function turnOutcome(turn: StitchedTurn): TurnOutcome {
 
 /**
  * Model steps of the turn: what it began, not what survived. Subagent steps are excluded —
- * they belong to the subagent's own run, and counting them here would make one planner call
- * look like extra work by the turn itself.
+ * they belong to the subagent, and counting them here would make one planner call look
+ * like extra work by the turn itself.
  */
 export function countSteps(turn: StitchedTurn): number {
   let started = 0;
@@ -433,6 +498,24 @@ export function clock(at: number, timeZone: string): string {
   }
 }
 
+/**
+ * Day and wall time. The turn list spans fourteen days, so a bare clock there would print
+ * two nightly Rollups as the same `03:00:00`.
+ */
+export function stamp(at: number, timeZone: string): string {
+  if (!at) return "--:-- --:--:--";
+  try {
+    const day = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(at));
+    return `${day} ${clock(at, timeZone)}`;
+  } catch {
+    return `--:-- ${clock(at, timeZone)}`;
+  }
+}
+
 /** A duration a person reads at a glance, not a number they convert. */
 export function duration(ms: number): string {
   const value = Number.isFinite(ms) ? Math.max(0, ms) : 0;
@@ -484,13 +567,32 @@ function flat(value: unknown): string {
 }
 
 /**
+ * Invisible characters: the repo's own threat class (`INVISIBLE_RE` in
+ * `agent/lib/security-gate.ts`). A journal reads back whatever arrived from Telegram or a
+ * tool, and an escape sequence in there would repaint the terminal it is printed on, so
+ * nothing invisible reaches stdout — with or without `--full`.
+ */
+const INVISIBLE = /[\p{Cc}\p{Cf}\u034f]/gu;
+
+/**
+ * Any value → many lines, invisibles gone, line breaks kept. `--full` prints content whole
+ * and a real newline is what makes it readable, so it is the one control character that
+ * survives; everything else becomes a space.
+ */
+function visible(value: unknown): string {
+  return flat(value)
+    .replace(/\r\n?/gu, "\n")
+    .replace(INVISIBLE, (character) => (character === "\n" ? character : " "));
+}
+
+/**
  * Any value → one line. Whitespace, control and format characters all collapse to one
  * space: a newline inside a tool result must not turn one event into two, and a stray
  * escape sequence must not repaint the terminal it is printed on.
  */
 function sanitize(value: unknown): string {
   return flat(value)
-    .replace(/[\s\p{Cc}\p{Cf}]+/gu, " ")
+    .replace(/[\s\p{Cc}\p{Cf}\u034f]+/gu, " ")
     .trim();
 }
 
@@ -583,10 +685,10 @@ function contentLines(
       out.push(`${indent}${key}: ${oneLine(value, SHOW_PREVIEW_CHARS)}`);
       continue;
     }
-    const text = typeof value === "string" ? value : flat(value);
-    const [first, ...rest] = text.split("\n");
-    out.push(`${indent}${key}: ${first ?? ""}`);
-    for (const line of rest) out.push(`${indent}  ${line}`);
+    const [first, ...rest] = visible(value).split("\n");
+    // Trailing space is what a stripped escape sequence leaves behind; nobody needs it.
+    out.push(`${indent}${key}: ${first ?? ""}`.trimEnd());
+    for (const line of rest) out.push(`${indent}  ${line}`.trimEnd());
   }
   if (out.length === 0 && event.data.traceTrimmed === true)
     out.push(`${indent}content: …[trimmed]`);
@@ -654,7 +756,7 @@ export function formatTurnList(
     const first = turn.events[0];
     const last = turn.events.at(-1);
     return [
-      clock(first?.at ?? 0, options.timeZone),
+      stamp(first?.at ?? 0, options.timeZone),
       column(oneLine(turnSource(turn), 9), 9),
       column(shortTurn(turn.turnId || turn.key, 20), 20),
       column(stepLabel(countSteps(turn)), 8),
@@ -722,6 +824,15 @@ export function createTraceTail(options: {
     return buffer.subarray(0, read);
   }
 
+  /** Jump to the end without reading: a live tail with no history owes the file nothing. */
+  function skipToEnd(): void {
+    try {
+      offset = statSync(options.filePath(day)).size;
+    } catch {
+      offset = 0; // the day file is not there yet, so its end is its start
+    }
+  }
+
   return {
     day: () => day,
     drain() {
@@ -730,6 +841,13 @@ export function createTraceTail(options: {
         day = today;
         offset = 0;
         pending = empty;
+      }
+      // The first drain of a tail with no history reads no bytes at all: a day file can be
+      // megabytes, and none of them are going to be printed.
+      if (firstDrain && since === 0) {
+        firstDrain = false;
+        skipToEnd();
+        return [];
       }
       pending = Buffer.concat([pending, readDelta()]);
       const events: TraceLine[] = [];
@@ -747,7 +865,7 @@ export function createTraceTail(options: {
       if (start > 0) pending = Buffer.from(pending.subarray(start));
       if (!firstDrain) return events;
       firstDrain = false;
-      // A live tail starts at the end; `--since N` asks for N lines of run-up first.
+      // A live tail starts at the end; `--since N` asks for N lines of history first.
       return since > 0 ? events.slice(-since) : [];
     },
   };
@@ -837,7 +955,7 @@ function currentUser(): string {
   }
 }
 
-/** `--since 20` or `--since=20`; anything else means no run-up. */
+/** `--since 20` or `--since=20`; anything else means no history. */
 export function flagCount(argv: readonly string[], flag: string): number {
   for (let at = 0; at < argv.length; at += 1) {
     const value = argv[at];
@@ -942,6 +1060,12 @@ ${C.b}iva trace${C.x} — ${translate("read the turn journal", "читать ж�
     }
     const selector = argv.find((value) => !value.startsWith("--"));
     if (!selector) {
+      // `--json` on the list would silently print the human table instead of JSON, and a
+      // pipe that gets prose where it asked for lines fails somewhere far from here.
+      if (argv.includes("--json"))
+        throw new Error(
+          "--json shows one turn: iva trace show --json <turn|last>",
+        );
       log(
         translate(
           "One turn: iva trace show <turn|last>",

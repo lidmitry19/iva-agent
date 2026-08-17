@@ -89,7 +89,7 @@ const EXPECTED_INVENTORY_SHA256 =
 // stdin reader, both injected in tests - so the blind spot stays 26.
 // stays 26.
 // The journal's second reader came next, one path: `scripts/cli/trace.ts`. Scoped coverage
-// over `scripts/cli/trace.test.ts` reports it at 98.94% lines, 90.05% branches and 96.05%
+// over `scripts/cli/trace.test.ts` reports it at 98.71% lines, 90.57% branches and 96.25%
 // functions, so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [

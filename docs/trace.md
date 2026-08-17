@@ -48,7 +48,15 @@ content and is marked `data.traceTrimmed: true`; names, timings and sizes always
 - _Chat turn:_ take `turn.bound`, collect everything whose `turn` equals its
   `data.updateKey` (Bridge, inbound, inbound gate) plus everything whose `turn` equals its
   `turn` (Eve events, Outbox, Stop), then sort by `ts`.
-- _Night turn:_ group by `session` (and `source`), not by `turn`.
+- _Night turn:_ group by `session` **and** `turn_N` together. One Eve session holds many
+  turns — the daily digest sends twice inside one session, and the nightly Rollup keeps its
+  session alive across nights — so a session on its own would glue a fortnight of nights
+  into one turn.
+- _A line with no turn key_ (`gate.outbound` and `outbox.*` of a night send) belongs to the
+  **most recent turn of its session** by `ts`.
+- _Source is part of no key._ Inside one night turn the Eve lines carry
+  `source: "unknown"` while `gate.outbound` and `outbox.*` carry `rollup`, so grouping by
+  source would cut one turn in two.
 
 Callback updates (`⏹ Stop`, `/menu` buttons) get the key `tg:<chatId>:cb:<callbackId>`,
 and **only the Bridge produces it**: callbacks never reach `runTelegramInbound`, so those

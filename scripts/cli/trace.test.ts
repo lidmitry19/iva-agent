@@ -17,6 +17,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -549,17 +550,18 @@ test("show lists the last turns with source, steps, tools, duration and outcome"
 
   const rows = printed.slice(1);
   assert.equal(rows.length, 5, printed.join("\n"));
-  // Newest last: the owner reads a terminal from the bottom.
+  // Newest last: the owner reads a terminal from the bottom. The day is on every row —
+  // fourteen days of nightly Rollups would otherwise all read `03:00:00`.
   assert.match(
     rows[0],
-    /^18:10:00 {2}telegram {3}tg:100:8000 .*0 steps.*blocked$/u,
+    /^08-16 18:10:00 {2}telegram {3}tg:100:8000 .*0 steps.*blocked$/u,
   );
-  assert.match(rows[1], /^20:00:00 {2}telegram {3}turn_9 .*failed$/u);
-  assert.match(rows[2], /^21:00:00 {2}bridge {5}tg:100:cb:77 .*open$/u);
-  assert.match(rows[3], /^03:00:00 {2}rollup {5}turn_1 .*delivered$/u);
+  assert.match(rows[1], /^08-16 20:00:00 {2}telegram {3}turn_9 .*failed$/u);
+  assert.match(rows[2], /^08-16 21:00:00 {2}bridge {5}tg:100:cb:77 .*open$/u);
+  assert.match(rows[3], /^08-17 03:00:00 {2}rollup {5}turn_1 .*delivered$/u);
   assert.equal(
     rows[4],
-    "09:32:05  telegram   turn_12               1 step    memory_search             14.0s    delivered",
+    "08-17 09:32:05  telegram   turn_12               1 step    memory_search             14.0s    delivered",
   );
   assert.match(printed[0], /iva trace show <turn\|last>/u);
 });
@@ -1336,4 +1338,360 @@ test("a line that is not an object, or carries neither kind nor name, is not an 
     ),
     { numRuns: 300 },
   );
+});
+
+// --- Round 2: many turns in one session ---
+
+/** The digest shape: one Eve session, two `session.send()` calls, so two turns. */
+const DIGEST_SESSION: readonly Event[] = [
+  {
+    ts: "2026-08-17T06:00:00.000Z",
+    turn: "turn_0",
+    session: "sess-digest",
+    source: "unknown",
+    kind: "eve",
+    name: "turn.started",
+    data: { sequence: 1, sessionId: "sess-digest" },
+  },
+  {
+    ts: "2026-08-17T06:00:02.000Z",
+    session: "sess-digest",
+    source: "digest",
+    kind: "gate",
+    name: "outbound",
+    data: { clean: true, findings: [], chars: 120, text: "утренний дайджест" },
+  },
+  {
+    ts: "2026-08-17T06:00:02.500Z",
+    session: "sess-digest",
+    source: "digest",
+    kind: "outbox",
+    name: "delivered",
+    data: {
+      ok: true,
+      delivered: 1,
+      fellBack: false,
+      error: "",
+      chars: 120,
+      ms: 210,
+    },
+  },
+  {
+    ts: "2026-08-17T06:00:10.000Z",
+    turn: "turn_1",
+    session: "sess-digest",
+    source: "unknown",
+    kind: "eve",
+    name: "turn.started",
+    data: { sequence: 2, sessionId: "sess-digest" },
+  },
+  {
+    ts: "2026-08-17T06:00:12.000Z",
+    session: "sess-digest",
+    source: "digest",
+    kind: "gate",
+    name: "outbound",
+    data: { clean: true, findings: [], chars: 80, text: "и второе сообщение" },
+  },
+  {
+    ts: "2026-08-17T06:00:12.500Z",
+    session: "sess-digest",
+    source: "digest",
+    kind: "outbox",
+    name: "failed",
+    data: {
+      ok: false,
+      delivered: 0,
+      fellBack: false,
+      error: "429",
+      chars: 80,
+      ms: 40,
+    },
+  },
+];
+
+test("two sends in one session are two turns, and each keyless line lands on its own", () => {
+  const turns = stitchTurns(parseAll(DIGEST_SESSION.map(line)));
+
+  assert.deepEqual(
+    turns.map((turn) => [turn.turnId, turn.session, turn.events.length]),
+    [
+      ["turn_0", "sess-digest", 3],
+      ["turn_1", "sess-digest", 3],
+    ],
+  );
+  // Each turn keeps the send seam of ITS OWN send.
+  assert.deepEqual(
+    turns.map((turn) => turnOutcome(turn)),
+    ["delivered", "failed"],
+  );
+  assert.deepEqual(
+    turns[0].events.map((event) => event.data.chars ?? null),
+    [null, 120, 120],
+  );
+  // Both turns answer to their name, and the session names the newest of them.
+  assert.equal(selectTurn(turns, "turn_0")?.key, "sess-digest|turn_0");
+  assert.equal(selectTurn(turns, "turn_1")?.key, "sess-digest|turn_1");
+  assert.equal(selectTurn(turns, "sess-digest")?.turnId, "turn_1");
+  assert.equal(selectTurn(turns, "last")?.turnId, "turn_1");
+});
+
+test("a Rollup session that spans two nights stays two turns, not one", async () => {
+  const root = world("two-nights");
+  write(root, ".env", "ASSISTANT_DATA_DIR=data\nASSISTANT_TIMEZONE=UTC\n");
+  const night = (day: string, turn: string, text: string): string[] => [
+    line({
+      ts: `${day}T03:00:00.000Z`,
+      turn,
+      session: "sess-rollup",
+      source: "unknown",
+      kind: "eve",
+      name: "turn.started",
+      data: { sequence: 1, sessionId: "sess-rollup" },
+    }),
+    line({
+      ts: `${day}T03:00:20.000Z`,
+      session: "sess-rollup",
+      source: "rollup",
+      kind: "outbox",
+      name: "delivered",
+      data: {
+        ok: true,
+        delivered: 1,
+        fellBack: false,
+        error: "",
+        chars: 400,
+        ms: 90,
+        text,
+      },
+    }),
+  ];
+  write(
+    root,
+    `data/trace/${DAY_ONE}.jsonl`,
+    `${night(DAY_ONE, "turn_4", "ночь одна").join("\n")}\n`,
+  );
+  write(
+    root,
+    `data/trace/${DAY_TWO}.jsonl`,
+    `${night(DAY_TWO, "turn_5", "ночь два").join("\n")}\n`,
+  );
+
+  const listed = commands(root);
+  await listed.cmdTrace(["show"]);
+  assert.equal(listed.printed.slice(1).length, 2, listed.out());
+
+  for (const turn of ["turn_4", "turn_5"]) {
+    const one = commands(root);
+    await one.cmdTrace(["show", turn]);
+    assert.equal(one.printed[0], `${turn} · - · rollup · session sess-rollup`);
+    assert.equal(
+      one.printed[1],
+      "03:00:00 → 03:00:20 · 20.0s · 0 steps · no tools · delivered",
+    );
+  }
+});
+
+test("a keyless line ahead of every turn of its session joins the first one", () => {
+  const turns = stitchTurns(
+    parseAll([
+      line({
+        ts: "2026-08-17T03:00:00.000Z",
+        session: "sess-early",
+        source: "rollup",
+        kind: "gate",
+        name: "outbound",
+        data: { clean: true, findings: [], chars: 10 },
+      }),
+      line({
+        ts: "2026-08-17T03:00:01.000Z",
+        turn: "turn_2",
+        session: "sess-early",
+        source: "unknown",
+        kind: "eve",
+        name: "turn.started",
+        data: { sequence: 1 },
+      }),
+    ]),
+  );
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].turnId, "turn_2");
+  assert.equal(turns[0].events.length, 2);
+});
+
+test("the earliest turn.bound owns an update key that two of them claim", () => {
+  const claim = (ts: string, turn: string): string =>
+    line({
+      ts,
+      turn,
+      session: "sess-a",
+      source: "telegram",
+      kind: "turn",
+      name: "bound",
+      data: { chatKey: "tg:100", updateKey: "tg:100:9241" },
+    });
+  const inbound = line({
+    ts: "2026-08-17T09:00:00.000Z",
+    turn: "tg:100:9241",
+    source: "telegram",
+    kind: "inbound",
+    name: "received",
+    data: { chatId: "100", allowlisted: true },
+  });
+  const early = claim("2026-08-17T09:00:01.000Z", "turn_20");
+  const late = claim("2026-08-17T09:00:02.000Z", "turn_21");
+
+  for (const raws of [
+    [inbound, early, late],
+    [late, early, inbound],
+    [early, late, inbound],
+  ]) {
+    const turns = stitchTurns(parseAll(raws));
+    const owner = turns.find((turn) => turn.updateKey === "tg:100:9241");
+    assert.equal(owner?.turnId, "turn_20", raws.join("\n"));
+    // The inbound line goes to whoever claimed it first, whatever the write order was.
+    assert.ok(owner?.events.some((event) => event.kind === "inbound"));
+  }
+});
+
+// --- Round 2: invisible characters ---
+
+// The repo's threat class (INVISIBLE_RE in agent/lib/security-gate.ts). Built by code
+// point on purpose: a source file that carries a live escape sequence is its own problem.
+const ESCAPE = String.fromCharCode(0x1b);
+const BELL = String.fromCharCode(0x07);
+const SOFT_HYPHEN = String.fromCharCode(0xad);
+
+test("--full keeps the line breaks of content and drops everything else invisible", async () => {
+  const root = world("invisible");
+  write(root, ".env", "ASSISTANT_DATA_DIR=data\nASSISTANT_TIMEZONE=UTC\n");
+  write(
+    root,
+    `data/trace/${DAY_TWO}.jsonl`,
+    `${[
+      line({
+        ts: "2026-08-17T10:00:00.000Z",
+        turn: "turn_3",
+        session: "sess-e",
+        source: "telegram",
+        kind: "turn",
+        name: "bound",
+        data: { chatKey: "tg:1", updateKey: "tg:1:1" },
+      }),
+      line({
+        ts: "2026-08-17T10:00:01.000Z",
+        turn: "turn_3",
+        session: "sess-e",
+        source: "telegram",
+        kind: "eve",
+        name: "action.result",
+        data: {
+          toolName: "bash",
+          status: "ok",
+          // What a shell command really returns: a colour code, a bell, a soft hyphen.
+          result: `first${ESCAPE}[31m red${BELL}\nsecond${SOFT_HYPHEN}line\r\nthird`,
+        },
+      }),
+    ].join("\n")}\n`,
+  );
+
+  const full = commands(root);
+  await full.cmdTrace(["show", "turn_3", "--full"]);
+  const capped = commands(root);
+  await capped.cmdTrace(["show", "turn_3"]);
+
+  for (const out of [full.out(), capped.out()])
+    for (const invisible of [ESCAPE, BELL, SOFT_HYPHEN])
+      assert.equal(
+        out.includes(invisible),
+        false,
+        "nothing invisible reaches stdout",
+      );
+  // `--full` keeps the shape of the result: three lines where the tool wrote three.
+  assert.match(
+    full.out(),
+    /result: first \[31m red\n {14}second line\n {14}third/u,
+  );
+  // Capped, the same result is one line.
+  assert.match(capped.out(), /result: first \[31m red second line third$/mu);
+});
+
+// --- Round 2: tail and the timezone ---
+
+test("tail with no history reads no bytes of the day file", () => {
+  const root = home("no-read");
+  const path = join(root, `data/trace/${DAY_TWO}.jsonl`);
+  let lookups = 0;
+  const tail = createTraceTail({
+    filePath: () => {
+      lookups += 1;
+      return path;
+    },
+    day: () => DAY_TWO,
+    now: () => new Date("2026-08-17T12:00:00.000Z"),
+  });
+
+  assert.deepEqual(tail.drain(), []);
+  // One lookup, for the size that becomes the offset. No read, no parse.
+  assert.equal(lookups, 1);
+  const size = statSync(path).size;
+  writeFileSync(
+    path,
+    `${readFileSync(path, "utf8")}${line({
+      ts: "2026-08-17T11:00:00.000Z",
+      turn: "turn_30",
+      source: "telegram",
+      kind: "eve",
+      name: "turn.started",
+      data: {},
+    })}\n`,
+  );
+  assert.ok(statSync(path).size > size);
+
+  assert.deepEqual(
+    tail.drain().map((event) => event.turn),
+    ["turn_30"],
+  );
+});
+
+test("the day file and the clock both follow ASSISTANT_TIMEZONE out of .env", async () => {
+  const root = world("tashkent");
+  // 20:30 UTC is 01:30 the next day in Tashkent, so the journal is already on 18 August.
+  write(
+    root,
+    ".env",
+    "ASSISTANT_DATA_DIR=data\nASSISTANT_TIMEZONE=Asia/Tashkent\n",
+  );
+  write(
+    root,
+    "data/trace/2026-08-18.jsonl",
+    `${line({
+      ts: "2026-08-17T20:30:00.000Z",
+      turn: "turn_40",
+      session: "sess-t",
+      source: "telegram",
+      kind: "eve",
+      name: "turn.started",
+      data: { sequence: 1 },
+    })}\n`,
+  );
+  const { cmdTrace, printed } = commands(root, {
+    now: () => new Date("2026-08-17T20:30:00.000Z"),
+  });
+
+  await cmdTrace(["tail", "--since", "1"]);
+
+  assert.equal(printed.length, 1, printed.join("\n"));
+  assert.match(printed[0], /^01:30:00 {2}turn_40 {9}eve\.turn\.started/u);
+});
+
+test("--json needs one turn and says so instead of printing the list", async () => {
+  const { cmdTrace, printed } = commands(home());
+
+  await assert.rejects(
+    () => cmdTrace(["show", "--json"]),
+    /--json shows one turn: iva trace show --json <turn\|last>/u,
+  );
+  assert.deepEqual(printed, []);
 });

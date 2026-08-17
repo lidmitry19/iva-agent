@@ -60,6 +60,7 @@ The installer puts `iva` in `~/.local/bin`. Commands that touch systemd need a L
 | `iva restart`                      | Regenerates units (keeps the port in sync with `IVA_PORT`), restarts agent + bridge                                                                                                                                                                                                                      |
 | `iva reset`                        | Stop, quarantine workflow plus Telegram busy/queue state, restart — cures stuck turns that a plain restart brings right back                                                                                                                                                                             |
 | `iva usage [window]`               | Same windows as `/usage`, plus `tail [N]` — the last N raw log lines (default 10)                                                                                                                                                                                                                        |
+| `iva trace <sub>`                  | The turn journal in the terminal: `tail [--since N]` streams events live, `show [turn]` prints one turn or the last 20, `open` prints the viewer address and the `ssh -N -L` tunnel that reaches it — what the journal holds is in [trace.md](trace.md)                                                  |
 | `iva notify <text>`                | Send one message to the digest chat, or to the first allowed user ID when no digest chat is set — how cron and `systemd-run` reminders reach Telegram                                                                                                                                                    |
 | `iva userbot <sub>`                | The personal-account proxy (opt-in beta): `creds`, `setup`, `status`, `diagnose --json`, `off` — full walkthrough and the anti-ban guardrail in [userbot.md](userbot.md)                                                                                                                                 |
 | `iva start` / `iva stop`           | Start both services and enable at boot / stop them                                                                                                                                                                                                                                                       |
@@ -73,6 +74,10 @@ The installer records the selected update branch in the checkout's local Git con
 ```bash
 iva usage week      # 7-day totals, by source and model
 iva usage tail 20   # last 20 raw log lines
+
+iva trace show           # the last 20 turns
+iva trace show last      # the newest turn, step by step
+iva trace tail --since 20 # 20 lines of history, then the stream
 ```
 
 ## Token accounting
