@@ -1765,9 +1765,16 @@ test("switching a plugin off and removing it rebuild without demanding it", asyn
   const root = home();
   const folder = codePlugin("carrier");
   const build = buildStub();
-  const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
+  const { cmdPlugin, events, data } = commands(
+    root,
+    undefined,
+    undefined,
+    {},
+    build,
+  );
   await cmdPlugin(["add", folder]);
   build.calls.length = 0;
+  events.length = 0;
 
   await cmdPlugin(["disable", "carrier"]);
   // Выключенный плагин уже не в составе версии, поэтому включать его назад нечему.
@@ -1778,6 +1785,12 @@ test("switching a plugin off and removing it rebuild without demanding it", asyn
     { requirePlugins: false },
     { requirePlugins: true },
     { requirePlugins: false },
+  ]);
+  // Шаг сборки называет направление: плагин уходит из версии, а не приезжает в неё.
+  assert.deepEqual(messages(events, "step").split("\n"), [
+    "Rebuilding Iva without carrier",
+    "Building Iva with carrier",
+    "Rebuilding Iva without carrier",
   ]);
   assert.equal(existsSync(pluginRoot(data, "carrier")), false);
 });
@@ -1802,6 +1815,16 @@ test("a build that cannot happen here leaves the plugin installed and says why",
 
   assert.match(messages(events, "warn"), /development checkout/u);
   assert.equal((await readPluginsState(data)).plugins.length, 1);
+  // Последняя строка не имеет права обещать код в работающей версии сразу после того,
+  // как команда сказала, что собрать его тут нечем.
+  assert.match(
+    messages(events, "ok"),
+    /code is not in the version that runs; its tools appear once it is built/u,
+  );
+  assert.doesNotMatch(
+    messages(events, "ok"),
+    /code is built into the version/u,
+  );
 });
 
 test("two plugins whose code wants one mount file are not installed together", async () => {

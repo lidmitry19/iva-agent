@@ -102,6 +102,18 @@ type Staged = {
   readonly ref: string;
 };
 
+/** Чем кончилась сборка версии, ради которой команду и позвали. */
+type CodeBuild = {
+  /** Причина отказа, из-за которой команда обязана отменить сделанное; иначе null. */
+  readonly failure: string | null;
+  /**
+   * Собралась ли версия на самом деле. На development checkout собирать нечем, и тогда
+   * это `false` при пустом `failure`: плагин поставлен, а его кода в работающей версии
+   * нет — говорить про «код собран» там было бы неправдой.
+   */
+  readonly built: boolean;
+};
+
 /** Откуда пришёл плагин, когда его нашли по имени. */
 type Provenance = {
   readonly marketplace: string;
@@ -521,18 +533,17 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     /**
      * Собрать версию с кодом плагинов, как это делает `iva update`: тот же лок, тот же
-     * probe, тот же flip и рестарт (ADR-0009). `requirePlugins` — для команд, ради
-     * которых сборка и затевается (`add`, `update`, `enable`): плагин, который не
-     * собрался, там валит сборку, а не выключается молча. `disable` и `remove` идут без
-     * него: их дело сделано записью в plugins.json, а сборке нечего требовать.
+     * probe, тот же flip и рестарт (ADR-0009).
      *
-     * Возвращает причину отказа или null. Печатать прогресс не нужно: его печатает сам
-     * апдейтер, теми же строками.
+     * `keeps` — остаётся ли плагин в составе версии. Он же `requirePlugins` апдейтера: у
+     * команд, ради которых сборка и затевается (`add`, `update`, `enable`, `trust`),
+     * плагин, который не собрался, валит сборку, а не выключается молча. `disable`,
+     * `untrust` и `remove` идут без него — их дело сделано записью в plugins.json, — и
+     * шаг там говорит, что версия пересобирается БЕЗ этого плагина.
+     *
+     * Печатать прогресс не нужно: его печатает сам апдейтер, теми же строками.
      */
-    async function buildCode(
-      what: string,
-      requirePlugins: boolean,
-    ): Promise<string | null> {
+    async function buildCode(what: string, keeps: boolean): Promise<CodeBuild> {
       if (!buildVersion) {
         warn(
           translate(
@@ -540,18 +551,27 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             `код ${what} здесь не собирается: у этой Ивы нет версий для сборки`,
           ),
         );
-        return null;
+        return { failure: null, built: false };
       }
       step(
-        translate(
-          `Building Iva with ${what}`,
-          `Собираю Иву с плагином: ${what}`,
-        ),
+        keeps
+          ? translate(
+              `Building Iva with ${what}`,
+              `Собираю Иву с плагином: ${what}`,
+            )
+          : translate(
+              `Rebuilding Iva without ${what}`,
+              `Пересобираю Иву без плагина: ${what}`,
+            ),
       );
-      const built = await buildVersion({ requirePlugins });
-      if (built.status === "failed") return built.reason;
-      if (built.status === "skipped") warn(built.reason);
-      return null;
+      const built = await buildVersion({ requirePlugins: keeps });
+      if (built.status === "failed")
+        return { failure: built.reason, built: false };
+      if (built.status === "skipped") {
+        warn(built.reason);
+        return { failure: null, built: false };
+      }
+      return { failure: null, built: true };
     }
 
     /**
@@ -865,7 +885,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       // сборка и рестарт. Доверие, которое не собралось, снимается обратно: иначе
       // владелец остался бы с записью «доверен» и без тулов в работающей версии.
       if (Object.keys(report.mcp).length && entry.enabled) {
-        const failure = await buildCode(entry.name, trusted);
+        const { failure } = await buildCode(entry.name, trusted);
         if (failure !== null) {
           if (trusted) {
             await locked(data, async () => {
@@ -967,12 +987,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       // Код плагина и его connection-файлы живут в версии, поэтому установка
       // заканчивается сборкой и рестартом. Сборка не прошла — установки не было: стор и
       // plugins.json возвращаются как были, работающая версия не тронута (ADR-0003).
+      let inRunningVersion = false;
       if (entry.enabled && inVersion(report, entry.trusted)) {
-        const failure = await buildCode(entry.name, true);
-        if (failure !== null) {
+        const outcome = await buildCode(entry.name, true);
+        if (outcome.failure !== null) {
           await undoInstalls(data, [undo]);
-          throw new Error(`${entry.name} was not installed: ${failure}`);
+          throw new Error(
+            `${entry.name} was not installed: ${outcome.failure}`,
+          );
         }
+        inRunningVersion = outcome.built;
       }
       dropDisplaced(undo);
       // Юниты — после сборки: прокси запускается из версии, которая уже собрана.
@@ -989,12 +1013,20 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             "скиллы работают со следующего хода: без сборки и рестарта",
           ),
         );
+      // Последняя строка говорит о том, что случилось, а не о том, что задумано: на
+      // development checkout версии собирать нечем, и «код собран» там было бы неправдой
+      // ровно после предупреждения, что собрать его придётся руками.
       if (report.code && entry.enabled)
         ok(
-          translate(
-            `code is built into the version that runs; its tools are prefixed ${pluginNamespace(entry.name)}__`,
-            `код собран в работающую версию; тулы идут с префиксом ${pluginNamespace(entry.name)}__`,
-          ),
+          inRunningVersion
+            ? translate(
+                `code is built into the version that runs; its tools are prefixed ${pluginNamespace(entry.name)}__`,
+                `код собран в работающую версию; тулы идут с префиксом ${pluginNamespace(entry.name)}__`,
+              )
+            : translate(
+                `code is not in the version that runs; its tools appear once it is built`,
+                `кода нет в работающей версии; тулы появятся после её сборки`,
+              ),
         );
       const wants =
         processCommands(report).length > 0 ||
@@ -1008,10 +1040,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         );
       if (Object.keys(report.mcp).length && entry.trusted)
         ok(
-          translate(
-            "its MCP tools reach the agent from the next turn",
-            "тулы его MCP-серверов доступны агенту со следующего хода",
-          ),
+          inRunningVersion
+            ? translate(
+                "its MCP tools reach the agent from the next turn",
+                "тулы его MCP-серверов доступны агенту со следующего хода",
+              )
+            : translate(
+                "its MCP tools reach the agent once the version is built",
+                "тулы его MCP-серверов появятся у агента после сборки версии",
+              ),
         );
     }
 
@@ -1132,7 +1169,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       // Включение, которое не собралось, возвращается в выключенное: иначе владелец
       // остался бы с записью «включён» и без кода в работающей версии.
       if (code) {
-        const failure = await buildCode(entry.name, enabled);
+        const { failure } = await buildCode(entry.name, enabled);
         if (failure !== null) {
           if (enabled) {
             await locked(data, async () => {
@@ -1180,7 +1217,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       });
       // Плагин удалён, а его код всё ещё в работающей версии: убирает его сборка.
       if (code) {
-        const failure = await buildCode(entry.name, false);
+        const { failure } = await buildCode(entry.name, false);
         if (failure !== null) warn(failure);
       }
       ok(
@@ -1341,7 +1378,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       // Одна сборка на весь прогон: версия собирается со всеми плагинами сразу, и
       // отдельная сборка на каждый стоила бы столько же рестартов, сколько плагинов.
       if (rebuilt.length) {
-        const failure = await buildCode(rebuilt.join(", "), true);
+        const { failure } = await buildCode(rebuilt.join(", "), true);
         if (failure !== null) {
           await undoInstalls(data, undone);
           throw new Error(`nothing was updated: ${failure}`);
