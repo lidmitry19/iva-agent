@@ -392,6 +392,23 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       const typed = request ? null : parsePluginSource(raw);
       const data = dataDirAbs();
 
+      /** Имя → источник и провенанс: списки лежат в том же состоянии, что плагины. */
+      async function throughMarketplace(
+        state: PluginsState,
+        wanted: { readonly name: string; readonly marketplace: string | null },
+      ): Promise<{
+        readonly source: PluginSource;
+        readonly provenance: Provenance;
+      }> {
+        const all = await loadMarketplaces(git, data, state.marketplaces, true);
+        for (const one of all) reportMarketplace(one);
+        const hit = resolveMarketplacePlugin(all, wanted);
+        return {
+          source: hit.source,
+          provenance: { marketplace: hit.marketplace, expect: hit.name },
+        };
+      }
+
       // Состояние читается и пишется ВНУТРИ лока: прочитать до лока значило бы
       // записать поверх чужого `disable`, который случился, пока шла установка.
       const { entry, report } = await locked(data, async () => {
@@ -400,20 +417,9 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
           warn(translate(RISK_EN, RISK_RU));
           log();
         }
-        let source = typed as PluginSource;
-        let provenance: Provenance | null = null;
-        if (request) {
-          const all = await loadMarketplaces(
-            git,
-            data,
-            state.marketplaces,
-            true,
-          );
-          for (const one of all) reportMarketplace(one);
-          const hit = resolveMarketplacePlugin(all, request);
-          source = hit.source;
-          provenance = { marketplace: hit.marketplace, expect: hit.name };
-        }
+        const { source, provenance } = request
+          ? await throughMarketplace(state, request)
+          : { source: typed as PluginSource, provenance: null };
         step(
           provenance
             ? `Installing ${provenance.expect} from ${provenance.marketplace} (${formatPluginSource(source)})`
@@ -515,8 +521,14 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         log(
           `${C.b}${entry.name}${C.x}  ${version}  ${sha}  ${flags}  ${components(report)}`,
         );
+        // Отслеживаемый ref дописывается только когда его не видно в самой строке
+        // источника: у запиненной записи Marketplace это был бы тот же sha дважды.
+        const tracked =
+          entry.ref && !entry.source.endsWith(`@${entry.ref}`)
+            ? ` @${entry.ref}`
+            : "";
         log(
-          `  ${C.d}${entry.source || translate("no source recorded", "источник не записан")}${entry.ref ? ` @${entry.ref}` : ""}${entry.marketplace ? ` · via ${entry.marketplace}` : ""}${C.x}`,
+          `  ${C.d}${entry.source || translate("no source recorded", "источник не записан")}${tracked}${entry.marketplace ? ` · via ${entry.marketplace}` : ""}${C.x}`,
         );
         for (const line of report.diagnostics) warn(`  ${line}`);
       }

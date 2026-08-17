@@ -1069,6 +1069,11 @@ test("marketplace add reads the list once, and add by name installs all three so
   printed.length = 0;
   await cmdPlugin(["list"]);
   assert.match(printed.join("\n"), /via iva-plugins/u);
+  // Строка источника уже несёт `@sha`: второй раз тот же sha печатать незачем.
+  assert.equal(
+    printed.join("\n").includes(`@${market.sha} @${market.sha}`),
+    false,
+  );
   printed.length = 0;
   await cmdPlugin(["list", "--available"]);
   assert.match(printed.join("\n"), /alpha .*installed/u);
