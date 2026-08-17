@@ -194,6 +194,32 @@ test("a marketplace may only point at a repository, never at a path on the disk"
   );
 });
 
+test("only an https GitHub URL folds into the shorthand; ssh keeps its transport", () => {
+  const subdir = (url: string): string => {
+    const market = marketplace([
+      {
+        name: "alpha",
+        source: { source: "git-subdir", url, path: "plugins/alpha" },
+      },
+    ]);
+    return formatPluginSource(marketplaceEntrySource(market.entries[0], REPO));
+  };
+  assert.equal(
+    subdir("https://github.com/smixs/iva-plugins.git"),
+    "smixs/iva-plugins/plugins/alpha",
+  );
+  // ssh и scp остаются собой: shorthand разворачивается в https, а это сменило бы
+  // транспорт и увело приватный репозиторий на запрос пароля.
+  assert.equal(
+    subdir("ssh://git@github.com/smixs/iva-plugins.git"),
+    "ssh://git@github.com/smixs/iva-plugins.git//plugins/alpha",
+  );
+  assert.equal(
+    subdir("git@github.com:smixs/iva-plugins.git"),
+    "git@github.com:smixs/iva-plugins.git//plugins/alpha",
+  );
+});
+
 test("a git URL that is not GitHub keeps the URL form of the subdirectory", () => {
   const market = marketplace([{ name: "alpha", source: "plugins/alpha" }]);
   assert.equal(

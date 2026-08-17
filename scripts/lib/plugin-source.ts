@@ -55,6 +55,23 @@ export function isScpLikeUrl(value: string): boolean {
   return SCP_LIKE.test(value.trim());
 }
 
+/**
+ * Nothing that came out of a source string may reach git looking like an option.
+ * The parser already refuses a leading dash everywhere, so this is the second lock
+ * on the same door - the one that stays shut if the first ever loosens. It lives
+ * here because both callers (the installer and the marketplace cache) build git
+ * arguments out of parsed sources, and one door needs one lock, not two copies.
+ */
+export function positional(values: readonly string[]): readonly string[] {
+  for (const value of values) {
+    if (value.startsWith("-"))
+      throw new Error(
+        `refusing to pass ${JSON.stringify(value)} to git: it would read as an option`,
+      );
+  }
+  return values;
+}
+
 function isLocal(raw: string): boolean {
   return (
     raw === "." ||

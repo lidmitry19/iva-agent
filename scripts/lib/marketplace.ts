@@ -34,6 +34,7 @@ import type { GitRunner } from "./plugin-install.ts";
 import {
   isScpLikeUrl,
   parsePluginSource,
+  positional,
   type PluginSource,
 } from "./plugin-source.ts";
 
@@ -406,17 +407,6 @@ function firstLine(output: string): string {
   );
 }
 
-/** Nothing that came out of a source string may reach git looking like an option. */
-function positional(values: readonly string[]): readonly string[] {
-  for (const value of values) {
-    if (value.startsWith("-"))
-      throw new Error(
-        `refusing to pass ${JSON.stringify(value)} to git: it would read as an option`,
-      );
-  }
-  return values;
-}
-
 /** What lies in the cache right now, without asking the network. */
 export function cachedMarketplaceSha(
   git: GitRunner,
@@ -479,8 +469,11 @@ export function refreshMarketplaceCache(
   return { path, sha, stale: false, problem: null };
 }
 
-const GITHUB_REPO =
-  /^(?:(?:https?|ssh):\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:)([^/]+)\/([^/]+?)(?:\.git)?\/?$/u;
+// Только https: `owner/repo` разворачивается обратно именно в него, поэтому свернуть
+// туда ssh- или scp-адрес значило бы молча сменить транспорт — и приватный репозиторий
+// после этого спрашивал бы пароль там, где владелец дал ключ.
+const GITHUB_HTTPS_REPO =
+  /^https:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/u;
 
 /**
  * `owner/repo` when the URL is a GitHub repository. The shorthand is what the
@@ -489,7 +482,7 @@ const GITHUB_REPO =
  * on what a shorthand may hold.
  */
 function withSubdir(url: string, path: string): string {
-  const match = GITHUB_REPO.exec(url);
+  const match = GITHUB_HTTPS_REPO.exec(url);
   if (match) {
     const candidate = `${match[1]}/${match[2]}/${path}`;
     try {

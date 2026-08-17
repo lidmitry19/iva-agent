@@ -1053,6 +1053,9 @@ test("marketplace add reads the list once, and add by name installs all three so
   // Форма 1: папка самого Marketplace — подпапка его репозитория на прочитанном sha.
   events.length = 0;
   await cmdPlugin(["add", "alpha"]);
+  // Диагностики файла печатаются там, где владелец просил список; повторять их на
+  // каждой установке — приучать их не читать.
+  assert.doesNotMatch(messages(events, "warn"), /packaged skipped/u);
   const afterAlpha = await readPluginsState(data);
   assert.deepEqual(
     { ...afterAlpha.plugins[0], digest: "", installedAt: "" },
@@ -1283,7 +1286,9 @@ test("a repository without a usable list is not a marketplace, and nothing is re
     /no marketplace offers a plugin named "alpha"/u,
   );
   // Имя маркетплейса живёт в его файле: файл сломан — в строке остаётся источник,
-  // из которого он взят. Другого имени взять негде, и выдумывать его нечем.
+  // из которого он взят. Другого имени взять негде, и выдумывать его нечем. Причину
+  // владелец видит именно здесь, на установке: без неё «плагина никто не предлагает»
+  // выглядело бы как «плагин пропал».
   assert.match(
     messages(events, "warn"),
     /remote\.git: \.agents\/plugins\/marketplace\.json is not valid JSON/u,

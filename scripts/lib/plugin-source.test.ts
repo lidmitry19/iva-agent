@@ -303,6 +303,39 @@ test("property: parse and format are inverse on every canonical source", () => {
   );
 });
 
+// Свой генератор именно на форму с подпапкой: roundtrip её не ловит — `//sub`,
+// оставшийся внутри url, пишется обратно тем же байтом. Ловит только требование,
+// чтобы подпапка ОКАЗАЛАСЬ в разобранном значении.
+const urlWithSubdir = fc
+  .tuple(
+    fc.constantFrom("https://", "ssh://", "file:///"),
+    segment,
+    segment,
+    fc.array(segment, { minLength: 1, maxLength: 3 }),
+    fc.option(ref),
+  )
+  .map(([scheme, host, path, sub, at]) => ({
+    raw: `${scheme}${host}/${path}.git//${sub.join("/")}${at === null ? "" : `@${at}`}`,
+    url: `${scheme}${host}/${path}.git`,
+    subdir: sub.join("/"),
+    ref: at,
+  }));
+
+test("property: a URL with `//` yields the repository and the subdirectory apart", () => {
+  fc.assert(
+    fc.property(urlWithSubdir, (expected) => {
+      const parsed = parsePluginSource(expected.raw);
+      assert.equal(parsed.kind, "git");
+      if (parsed.kind !== "git") return;
+      assert.equal(parsed.url, expected.url, expected.raw);
+      assert.equal(parsed.subdir, expected.subdir, expected.raw);
+      assert.equal(parsed.ref, expected.ref, expected.raw);
+      assert.equal(formatPluginSource(parsed), expected.raw);
+    }),
+    RUNS,
+  );
+});
+
 test("property: any string is a source or a plain Error, never a crash", () => {
   fc.assert(
     fc.property(

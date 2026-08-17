@@ -374,8 +374,13 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       }
     }
 
-    /** Что с Marketplace не так — вслух, до того как его список пойдёт в работу. */
-    function reportMarketplace(one: LoadedMarketplace): void {
+    /**
+     * Что с Marketplace не так — вслух, до того как его список пойдёт в работу.
+     * Диагностики самого файла печатаются там, где владелец просил список
+     * (`list --available`, `marketplace add|list`): повторять их на каждой установке
+     * значит приучить их не читать.
+     */
+    function reportMarketplace(one: LoadedMarketplace, listing = true): void {
       if (one.problem)
         (one.stale ? warn : bad)(
           one.stale
@@ -383,9 +388,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
                 `${one.label} could not be refreshed (${one.problem}) — using the cached list, it may be stale`,
                 `${one.label} не обновился (${one.problem}) — беру список из кэша, он может быть устаревшим`,
               )
-            : `${one.label} could not be read: ${one.problem}`,
+            : translate(
+                `${one.label} could not be read: ${one.problem}`,
+                `${one.label} не читается: ${one.problem}`,
+              ),
         );
-      for (const line of one.market.diagnostics) warn(`${one.label}: ${line}`);
+      // Отказ файлу целиком — причина, по которой имя не нашлось: она нужна и там,
+      // где владелец просил не список, а установку.
+      if (listing || one.market.name === null)
+        for (const line of one.market.diagnostics)
+          warn(`${one.label}: ${line}`);
     }
 
     async function add(): Promise<void> {
@@ -409,8 +421,8 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         readonly provenance: Provenance;
       }> {
         const all = await loadMarketplaces(git, data, state.marketplaces, true);
-        for (const one of all) reportMarketplace(one);
-        const hit = resolveMarketplacePlugin(all, wanted);
+        for (const one of all) reportMarketplace(one, false);
+        const hit = resolveMarketplacePlugin(all, wanted, translate);
         return {
           source: hit.source,
           provenance: { marketplace: hit.marketplace, expect: hit.name },

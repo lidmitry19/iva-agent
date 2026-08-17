@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { chmod, copyFile, mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { walkPluginTree } from "#lib/plugin-reader.ts";
+import { positional } from "./plugin-source.ts";
 
 export type GitResult = {
   readonly code: number;
@@ -28,21 +29,6 @@ export type GitResult = {
 export type GitRunner = (args: readonly string[], cwd?: string) => GitResult;
 
 export const SHA = /^[a-f0-9]{40,64}$/u;
-
-/**
- * Nothing that came from a source string may reach git looking like an option.
- * The parser already refuses a leading dash, so this is the second lock on the
- * same door - the one that stays shut if the first ever loosens.
- */
-function positional(values: readonly string[]): readonly string[] {
-  for (const value of values) {
-    if (value.startsWith("-"))
-      throw new Error(
-        `refusing to pass ${JSON.stringify(value)} to git: it would read as an option`,
-      );
-  }
-  return values;
-}
 
 function must(result: GitResult, what: string): string {
   if (result.code !== 0)
