@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 225;
+const EXPECTED_PRODUCTION_COUNT = 226;
 const EXPECTED_INVENTORY_SHA256 =
-  "fae22bfdda8e2a5c5b110902629fd0c717b432676f8f014e491425f41668c50a";
+  "db614ac58f1d6fdb8f703322bb68c05726fc67a01c2354f39ed8ddeb95cf3cd1";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -91,6 +91,16 @@ const EXPECTED_INVENTORY_SHA256 =
 // The journal's second reader came next, one path: `scripts/cli/trace.ts`. Scoped coverage
 // over `scripts/cli/trace.test.ts` reports it at 98.71% lines, 90.57% branches and 96.25%
 // functions, so the blind spot stays 26.
+// The plugin units (ADR-0009) came last, one path: `scripts/lib/plugin-units.ts`. Scoped
+// coverage over `scripts/lib/plugin-units.test.ts`, `plugin-build.test.ts`,
+// `plugin-build-eve.test.ts`, `version-update.test.ts`, `scripts/cli/plugin.test.ts`,
+// `scripts/cli/doctor.test.ts`, `scripts/update-finish.test.ts` and the three
+// `agent/lib/plugin-*.test.ts` reports it at 98.32% lines, and the modules it changed
+// beside it at 96-100% (`plugin-build.ts` 96.38%, `plugin-config.ts` 100%,
+// `plugin-store.ts` 99.55%, `plugin-reader.ts` 99.17%, `scripts/cli/plugin.ts` 96.11%),
+// so the blind spot stays 26. The MCP proxy itself (`services/mcp-proxy/*.ts`) is outside
+// this inventory: the walk covers `agent/` and `scripts/` only, and the proxy is a service
+// of its own, proved end to end by `services/mcp-proxy/proxy.test.ts`.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",
