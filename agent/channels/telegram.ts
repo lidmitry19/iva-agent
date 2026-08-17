@@ -16,6 +16,7 @@ import {
 // запись в Vault, медиа со зрением и транскрипцией, inbound-Gate и контекст хода.
 // Канал приносит ему эффекты и сам про разбор входящего ничего не знает.
 import { runTelegramInbound } from "../lib/telegram-inbound.js";
+import { traceOutbox } from "../lib/trace.js";
 import { describeImage } from "../vision.js";
 import { transcribe } from "../transcribe.js";
 // Статус-сообщение хода («Работаю…», кнопка Стоп, уборка в терминале) и служебное
@@ -266,6 +267,7 @@ const telegram = telegramChannel({
     // хотя бы одно сообщение и ни одно не потерялось.
     async "message.completed"(data, channel, ctx) {
       if (data.finishReason === "tool-calls" || !data.message) return;
+      const message = data.message;
       const recordDelivery = (delivered: boolean) =>
         emitTelegramTurnLatency({
           chatKey: chatKeyOf(
@@ -278,11 +280,17 @@ const telegram = telegramChannel({
           getStatusImpl: getChatStatus,
           setStatusIfImpl: setChatStatusIf,
         });
-      const result = await sendThroughOutbox(
-        data.message,
-        outboxTransport(channel.telegram),
-        // Ключ хода — только для журнала: шов сам про ход ничего не знает (ADR-0010).
-        { turn: data.turnId, session: ctx.session.id },
+      // Trace: одна отправка — одно событие журнала, каким бы путём шов её ни увёз
+      // (rich, HTML, plain-фолбэк). Обёртка же ставит контекст хода, поэтому вердикт
+      // outbound-Gate внутри шва уезжает с тем же ключом (ADR-0010).
+      const result = await traceOutbox(
+        {
+          turn: data.turnId,
+          session: ctx.session.id,
+          source: "telegram",
+        },
+        message,
+        () => sendThroughOutbox(message, outboxTransport(channel.telegram)),
       );
       if (result.delivered > 0 && result.ok) recordDelivery(true);
     },

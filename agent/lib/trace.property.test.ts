@@ -57,8 +57,36 @@ const wildText = fc.oneof(
     .map(([size, seed]) => (seed || "x").repeat(size)),
 );
 
+// Объекты, которых генератор fast-check не делает, а чужой payload приносит: цикл,
+// падающий геттер, падающий toJSON. Фабрика вызывается на каждом прогоне, поэтому
+// экземпляр всегда свежий.
+const hostileObject = fc
+  .constantFrom<() => unknown>(
+    () => {
+      const cycle: Record<string, unknown> = { name: "cycle" };
+      cycle.self = cycle;
+      return cycle;
+    },
+    () => ({
+      get boom(): unknown {
+        throw new Error("getter");
+      },
+    }),
+    () => ({
+      toJSON() {
+        throw new Error("toJSON");
+      },
+    }),
+    () => Buffer.alloc(4096),
+    () => new Date("2026-08-17T10:20:30.000Z"),
+    () => new Error("provider refused"),
+    () => new Map([["a", 1]]),
+  )
+  .map((make) => make());
+
 const wildValue = fc.oneof(
   wildText,
+  hostileObject,
   fc.anything({
     withBigInt: true,
     withDate: true,
@@ -81,8 +109,25 @@ const event = fc.record({
   session: fc.option(wildText, { nil: undefined }),
   source: fc.option(wildText, { nil: undefined }),
   data: fc.option(record, { nil: undefined }),
+  // До 8 полей содержимого по 6000 знаков: событие заведомо перерастает потолок строки,
+  // и ветка «пересобрать без содержимого» получает свои прогоны.
   content: fc.option(
-    fc.dictionary(fc.string({ maxLength: 12 }), wildText, { maxKeys: 3 }),
+    fc.dictionary(
+      fc.string({ maxLength: 12 }),
+      fc.oneof(
+        { weight: 3, arbitrary: wildText },
+        {
+          weight: 1,
+          arbitrary: fc
+            .tuple(
+              fc.integer({ min: 1000, max: 6000 }),
+              fc.constantFrom("я", "x", "🙂"),
+            )
+            .map(([size, unit]) => unit.repeat(size)),
+        },
+      ),
+      { maxKeys: 8 },
+    ),
     {
       nil: undefined,
     },
@@ -109,7 +154,7 @@ test("property: любое событие даёт одну валидную JSO
       const line = traceLine(input, { now: AT, captureContent: true });
 
       assert.equal(line.includes("\n"), false);
-      assert.ok(line.length <= TRACE_LINE_LIMIT);
+      assert.ok(Buffer.byteLength(line, "utf8") <= TRACE_LINE_LIMIT);
       const parsed = parse(line);
       assert.deepEqual(Object.keys(parsed), SCHEMA);
       assert.equal(parsed.ts, "2026-08-17T10:20:30.000Z");
@@ -144,10 +189,22 @@ test("property: содержимое обрезано по потолку и п�
       for (const text of strings(data))
         assert.ok(text.length <= TRACE_CONTENT_LIMIT);
 
+      // Эталон: то же событие без содержимого вовсе. Ключ содержимого может совпасть с
+      // ключом data — тогда значение в строке законно и приходит из data, а не из
+      // выброшенного содержимого.
+      const bare = parse(
+        traceLine(
+          { ...input, content: undefined },
+          { now: AT, captureContent: true },
+        ),
+      ).data as Record<string, unknown>;
+
       for (const [key, value] of Object.entries(input.content ?? {})) {
         // Событие, не влезшее в строку даже после обрезки полей, едет без содержимого.
+        // Размеры при этом остаются: имена, тайминги и размеры выбрасываются последними.
         if (data.traceTrimmed === true) {
-          assert.equal(key in data, false);
+          assert.deepEqual(data[key], bare[key]);
+          assert.equal(data[`${key}Chars`], value.length);
           continue;
         }
         assert.equal(data[`${key}Chars`], value.length);

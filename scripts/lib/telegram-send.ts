@@ -20,6 +20,7 @@ import {
   type OutboxAck,
   type OutboxTransport,
 } from "../../agent/lib/outbox.ts";
+import { traceOutbox, type TraceScope } from "../../agent/lib/trace.ts";
 import { classifyDeliverStatus } from "./deliver-policy.ts";
 
 type TelegramRequest = Record<string, unknown>;
@@ -36,6 +37,12 @@ export type TelegramSendOptions = {
   readonly retryTransient?: boolean;
   readonly sleep?: Sleep;
   readonly fetchImpl?: FetchImpl;
+  /**
+   * Чей это ход — для журнала (ADR-0010). Ночной отчёт уходит тем же швом, что и ответ
+   * в диалоге, и без своего имени вьюер прочитал бы rollup как разговор в Telegram.
+   * Сессию знает вызывающий скрипт (`response.sessionId` клиента eve), сам шов — нет.
+   */
+  readonly trace?: TraceScope;
 };
 
 const MAX_ATTEMPTS = 3;
@@ -135,6 +142,7 @@ export async function sendTelegramHtml(
     retryTransient = false,
     sleep = realSleep,
     fetchImpl = fetch,
+    trace,
   }: TelegramSendOptions = {},
 ): Promise<{ ok: boolean; fellBack: boolean; error: string }> {
   const sendPost = retryTransient
@@ -162,10 +170,13 @@ export async function sendTelegramHtml(
     },
   };
   try {
-    const { ok, delivered, fellBack, error } = await sendThroughOutbox(
-      md as string,
-      transport,
-      { limit: caption ? 1024 : 4096 },
+    const { ok, delivered, fellBack, error } = await traceOutbox(
+      { source: "cron", ...trace },
+      String(md),
+      () =>
+        sendThroughOutbox(md as string, transport, {
+          limit: caption ? 1024 : 4096,
+        }),
     );
     // Пустой отчёт шов наружу не несёт — Telegram такой текст всё равно отвергает.
     // Но и тишиной это не прикрываем: ночной скрипт должен упасть ненулевым кодом,

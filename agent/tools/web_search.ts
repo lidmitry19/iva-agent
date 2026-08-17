@@ -6,6 +6,8 @@ import {
   reportWebGate,
   type WebGateOutcome,
 } from "../lib/web-gate.ts";
+import { traceEnterScope } from "../lib/trace.ts";
+import { parentTurnId } from "../lib/usage.ts";
 
 // Веб-поиск с выбором провайдера (SEARCH_PROVIDER: tavily|brave|exa|parallel).
 // Скрейпинг DuckDuckGo выкинут: с серверного IP он отдаёт капчу и возвращает пусто.
@@ -195,7 +197,14 @@ export default defineTool({
       .optional()
       .describe("Сколько результатов (по умолчанию 5)"),
   }),
-  async execute({ query, count }) {
+  async execute({ query, count }, ctx) {
+    // Trace: тот же контекст хода, что и у web_fetch — вердикт gate.web без ключа хода
+    // читателю не к чему прицепить (ADR-0010).
+    traceEnterScope({
+      turn: parentTurnId(ctx.session.turn),
+      session: ctx.session.id,
+      source: "web",
+    });
     const n = Math.min(count ?? 5, 10);
     const provider = pickProvider();
     const key = (process.env[provider.keyEnv] || "").trim();

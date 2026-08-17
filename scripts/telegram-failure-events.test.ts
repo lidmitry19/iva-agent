@@ -68,6 +68,7 @@ type FailureAdapter = {
   "action.partial": ChannelEventHandler;
   "action.result": ChannelEventHandler;
   "message.appended": ChannelEventHandler;
+  "message.completed": ChannelEventHandler;
 };
 
 const apiCalls: ApiCall[] = [];
@@ -706,6 +707,7 @@ test("Trace: исход «Стопа» ложится в журнал хода",
   assert.equal(stops.length, 1);
   assert.equal(stops[0].name, "requested");
   assert.equal(stops[0].turn, "turn_11");
+  assert.equal(stops[0].session, "trace-stop-session");
   assert.deepEqual(stops[0].data, { chatKey: key, outcome: "requested" });
 });
 
@@ -826,5 +828,48 @@ test("a crashed turn's stale status is not stoppable in webhook mode either", as
   assert.equal(
     callsSince(before, "answerCallbackQuery")[0].body!.text,
     "Nothing is running right now.",
+  );
+});
+
+test("Trace: ответ модели уходит в журнал ключом своего хода", async () => {
+  const chatId = "741";
+  const key = chatKeyOf(chatId);
+  setChatStatus(key, {
+    status: "running",
+    sessionId: "trace-outbox-session",
+    turnId: "turn_12",
+    firstOutputAt: 1,
+  });
+  const before = traceEvents().length;
+  const context = eventContext({
+    chatId,
+    sessionId: "trace-outbox-session",
+  });
+
+  await contextStorage.run(context.ctx, () =>
+    adapter["message.completed"](
+      {
+        finishReason: "stop",
+        message: "готово, отпуск в июле",
+        sequence: 4,
+        stepIndex: 1,
+        turnId: "turn_12",
+      },
+      context.value,
+    ),
+  );
+
+  const added = traceEvents().slice(before);
+  const outbox = added.find((event) => event.kind === "outbox");
+  const gate = added.find((event) => event.kind === "gate");
+  // Ключ хода и сессия приходят из канала: без них последнее звено цепочки повисло бы.
+  assert.equal(outbox?.name, "delivered");
+  assert.equal(outbox?.turn, "turn_12");
+  assert.equal(outbox?.session, "trace-outbox-session");
+  assert.equal(outbox?.source, "telegram");
+  assert.equal(gate?.turn, "turn_12");
+  assert.equal(
+    (gate?.data as Record<string, unknown>).text,
+    "готово, отпуск в июле",
   );
 });

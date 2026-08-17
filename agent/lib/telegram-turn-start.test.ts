@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -781,10 +787,50 @@ void test("Trace: старт хода связывает ключ апдейта
   });
 
   const added = traceEvents().slice(before);
-  assert.equal(added.length, 1);
+  const bound = added.filter((event) => event.kind === "turn");
+  assert.equal(bound.length, 1);
   assert.equal(added[0].kind, "turn");
   assert.equal(added[0].name, "bound");
   assert.equal(added[0].turn, "turn_2");
   assert.equal(added[0].session, "wrun_31");
   assert.deepEqual(added[0].data, { chatKey, updateKey: "tg:931:12" });
+});
+
+void test("Trace: старт хода снимает состав памяти, которая уедет в промпт", async (t) => {
+  const vault = mkdtempSync(join(tmpdir(), "iva-turn-start-vault-"));
+  const previous = process.env.ASSISTANT_VAULT_DIR;
+  process.env.ASSISTANT_VAULT_DIR = vault;
+  writeFileSync(join(vault, "CORE.md"), "ядро памяти");
+  writeFileSync(join(vault, "MOC.md"), "карта тем");
+  t.after(() => {
+    if (previous === undefined) delete process.env.ASSISTANT_VAULT_DIR;
+    else process.env.ASSISTANT_VAULT_DIR = previous;
+    rmSync(vault, { recursive: true, force: true });
+  });
+  const status = statusStore();
+  const before = traceEvents().length;
+
+  await publishTelegramTurnStarted({
+    chatKey: "941:",
+    continuationToken: "telegram:941::",
+    sessionId: "wrun_41",
+    turnId: "turn_5",
+    getStatusImpl: status.get,
+    setStatusIfImpl: status.cas,
+  });
+
+  const parts = traceEvents()
+    .slice(before)
+    .filter((event) => event.kind === "context");
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].name, "parts");
+  assert.equal(parts[0].turn, "turn_5");
+  assert.equal(parts[0].session, "wrun_41");
+  const data = parts[0].data as Record<string, unknown>;
+  // Размеры в БАЙТАХ тех же файлов, которые прочитают динамические инструкции eve.
+  assert.equal(data.core, 21);
+  assert.equal(data.moc, 17);
+  assert.equal(data.persona, 0); // квиз не пройден — файла нет
+  assert.equal(data.unit, "bytes");
+  assert.equal(data.approximate, true);
 });

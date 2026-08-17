@@ -480,26 +480,32 @@ await test("noticeSender переживает пустую и многостро
   assert.deepEqual(sent, ["", "строка\nвторая [REDACTED]\nтретья"]);
 });
 
-await test("Trace: гейт и доставка ложатся в журнал хода", async () => {
-  const { transport } = stub();
+await test("Trace: вердикт гейта и доставка ложатся в журнал одного хода", async () => {
+  const { sent, transport } = stub();
   const before = traceEvents().length;
 
-  const result = await sendThroughOutbox("готово", transport, {
-    turn: "turn_5",
-    session: "wrun_2",
-  });
+  const result = await trace.traceOutbox(
+    { turn: "turn_5", session: "wrun_2", source: "telegram" },
+    "готово",
+    () => sendThroughOutbox("готово", transport),
+  );
 
   assert.equal(result.delivered, 1);
+  assert.equal(sent.length, 1);
   const added = traceEvents().slice(before);
   assert.deepEqual(
     added.map((event) => `${String(event.kind)}.${String(event.name)}`),
     ["gate.outbound", "outbox.delivered"],
   );
+  // Вердикт гейта уезжает с ключом хода, хотя сигнатура redactNotice его не знает.
   assert.equal(added[0].turn, "turn_5");
+  assert.equal(added[0].session, "wrun_2");
   assert.deepEqual(added[0].data, {
     clean: true,
     findings: [],
     chars: 6,
+    textChars: 6,
+    text: "готово",
   });
   const outbox = added[1];
   assert.equal(outbox.turn, "turn_5");
@@ -507,9 +513,33 @@ await test("Trace: гейт и доставка ложатся в журнал �
   const data = outbox.data as Record<string, unknown>;
   assert.equal(data.ok, true);
   assert.equal(data.delivered, 1);
-  assert.equal(data.text, "готово");
-  assert.equal(data.textChars, 6);
+  assert.equal(data.chars, 6);
   assert.equal(typeof data.ms, "number");
+});
+
+await test("Trace: rich-путь даёт ровно одно событие доставки", async () => {
+  const { sent, transport } = stub({ rich: () => ({ ok: true }) });
+  const before = traceEvents().length;
+
+  // Таблица уходит нативным rich-сообщением — своим путём, мимо HTML-чанков.
+  const table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+  const result = await trace.traceOutbox(
+    { turn: "turn_7", session: "wrun_3", source: "telegram" },
+    table,
+    () => sendThroughOutbox(table, transport),
+  );
+
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(
+    sent.map((item) => item.kind),
+    ["rich"],
+  );
+  const added = traceEvents().slice(before);
+  assert.deepEqual(
+    added.map((event) => `${String(event.kind)}.${String(event.name)}`),
+    ["gate.outbound", "outbox.delivered"],
+  );
+  assert.equal(added[1].turn, "turn_7");
 });
 
 await test("Trace: находка гейта и провал доставки видны в журнале", async (t) => {
@@ -519,19 +549,37 @@ await test("Trace: находка гейта и провал доставки в
   });
   const before = traceEvents().length;
 
-  await sendThroughOutbox(`ключ: ${SECRET}`, transport, { turn: "turn_6" });
+  await trace.traceOutbox(
+    { turn: "turn_6", session: "wrun_2", source: "telegram" },
+    `ключ: ${SECRET}`,
+    () => sendThroughOutbox(`ключ: ${SECRET}`, transport),
+  );
 
   const added = traceEvents().slice(before);
-  assert.deepEqual(added[0].data, {
-    clean: false,
-    // Превью находки в журнал не едет: там кусок самого секрета.
-    findings: ["api_key:openai"],
-    chars: 33,
-  });
+  const gate = added[0].data as Record<string, unknown>;
+  assert.equal(gate.clean, false);
+  // Превью находки в журнал не едет: там кусок самого секрета.
+  assert.deepEqual(gate.findings, ["api_key:openai"]);
+  assert.equal(gate.chars, 33);
+  // В журнал попадает текст ПОСЛЕ редактуры — вымаранный секрет назад не возвращается.
+  assert.equal(String(gate.text).includes(SECRET), false);
+  assert.ok(String(gate.text).includes("[REDACTED]"));
   assert.equal(added[1].name, "failed");
   const data = added[1].data as Record<string, unknown>;
   assert.equal(data.ok, false);
   assert.equal(data.delivered, 0);
   assert.equal(data.error, "flood control");
-  assert.equal(String(data.text).includes(SECRET), false);
+  assert.equal(JSON.stringify(added[1]).includes(SECRET), false);
+});
+
+await test("Trace: отправка вне хода журнал не трогает", async () => {
+  const { transport } = stub();
+  const before = traceEvents().length;
+
+  // Ни cron без контекста, ни юнит-тест шва не имеют права писать в журнал: событие
+  // без ключа хода читателю бесполезно, а файл растёт.
+  await sendThroughOutbox("просто текст", transport);
+  redactNotice("служебная реплика");
+
+  assert.equal(traceEvents().length, before);
 });

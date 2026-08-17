@@ -287,3 +287,53 @@ void test("captureContent=false оставляет от события имен�
   });
   assert.equal(JSON.stringify(event).includes("секрет"), false);
 });
+
+void test("хук не роняет ход ни на каком событии", (t) => {
+  const errors: unknown[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => errors.push(args);
+  t.after(() => {
+    console.error = original;
+  });
+  const before = journal().length;
+
+  const hostile: [string, unknown, unknown][] = [
+    // Чужой геттер в payload.
+    [
+      "throwing getter",
+      {
+        type: "action.result",
+        data: {
+          get result(): unknown {
+            throw new Error("getter");
+          },
+        },
+      },
+      ctx,
+    ],
+    // subagent.event без вложенного события.
+    [
+      "subagent without event",
+      { type: "subagent.event", data: { callId: "c", subagentName: "p" } },
+      ctx,
+    ],
+    ["subagent without data", { type: "subagent.event" }, ctx],
+    // Контекст без канала и без сессии.
+    [
+      "context without channel",
+      { type: "turn.started", data: { turnId: "turn_1" } },
+      { session: { id: "wrun_1", turn: { id: "turn_1" } } },
+    ],
+    ["empty context", { type: "turn.started", data: { turnId: "turn_1" } }, {}],
+    // Событие без данных вовсе.
+    ["event without data", { type: "turn.completed" }, ctx],
+    ["no event at all", null, ctx],
+  ];
+
+  for (const [label, event, context] of hostile) {
+    assert.doesNotThrow(() => feed(event, context), label);
+  }
+  // Что смогло — записано, что не смогло — объяснено в логе службы, ход жив.
+  assert.ok(journal().length >= before);
+  for (const line of journal()) assert.equal(typeof line.kind, "string");
+});

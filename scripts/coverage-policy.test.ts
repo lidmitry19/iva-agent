@@ -65,8 +65,10 @@ const EXPECTED_INVENTORY_SHA256 =
 // spot stays 26.
 // The turn journal (ADR-0010) came next: `agent/lib/trace.ts` and `agent/hooks/trace.ts`.
 // Scoped coverage over `agent/lib/trace.test.ts`, `agent/lib/trace.property.test.ts` and
-// `agent/hooks/trace.test.ts` reports them at 97.54% and 98.24% lines, so the blind spot
-// stays 26 - unlike `agent/hooks/transcript.ts`, this hook is loaded by its own test.
+// `agent/lib/trace-hook.test.ts` reports them at 97% and 98% lines, so the blind spot
+// stays 26 - unlike `agent/hooks/transcript.ts`, this hook is loaded by its own test. That
+// test lives in `agent/lib/`, not beside the hook: eve treats every file under
+// `agent/hooks/` as a hook, and `trace.test` is not a legal hook name.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

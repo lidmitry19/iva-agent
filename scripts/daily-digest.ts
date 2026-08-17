@@ -44,7 +44,10 @@ if (result.status === "failed" || !result.message) {
 }
 
 // The markdown → Telegram-HTML conversion + self-heal live in a shared helper.
-const r = await sendTelegramHtml(BOT, CHAT, result.message);
+// Ночной ход зовётся своим именем и сшивается по сессии: журнал хода (ADR-0010).
+const r = await sendTelegramHtml(BOT, CHAT, result.message, {
+  trace: { session: response.sessionId, source: "digest" },
+});
 if (r.fellBack) {
   await session.send(
     `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +

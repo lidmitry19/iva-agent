@@ -30,7 +30,7 @@
 // и голым node (cron → scripts/lib/telegram-send.ts), где «./x.js» → «./x.ts» никто
 // не переписывает.
 import { scanOutbound } from "./security-gate.ts";
-import { traceOutboundGate, traceOutboxResult } from "./trace.ts";
+import { traceOutboundGate } from "./trace.ts";
 import {
   htmlToPlain,
   needsRichMessage,
@@ -65,12 +65,7 @@ export type OutboxResult = {
 // Outbound-гейт: редактим утёкшие секреты и эксфил-URL ДО отправки. Fail-open —
 // нашли что-то, шлём отредактированное и громко логируем (блокировать текст целиком
 // хуже редкой утечки для единственного владельца инсталляции).
-export function redactNotice(
-  text: string,
-  // Ход и сессия — только для журнала: у ответа модели они есть, у служебной реплики
-  // канала их нет, и это честнее, чем приписать вердикт чужому ходу.
-  { turn = "", session = "" }: { turn?: string; session?: string } = {},
-): string {
+export function redactNotice(text: string): string {
   const guard = scanOutbound(text);
   if (!guard.clean)
     console.error(
@@ -78,9 +73,10 @@ export function redactNotice(
       guard.findings.map((f) => `${f.type}:${f.name}`).join(", "),
     );
   // Trace: вердикт outbound-Gate. Стоит на самом вызове гейта, поэтому в журнал попадает
-  // и ответ модели через шов, и служебная реплика канала через noticeSender. Превью
-  // находки НЕ пишем: там кусок утёкшего секрета (ADR-0010).
-  traceOutboundGate(turn, session, guard.clean, guard.findings, text.length);
+  // и ответ модели через шов, и служебная реплика канала через noticeSender. Ключ хода
+  // берётся из контекста хода (его ставит traceOutbox вокруг отправки), вне хода событие
+  // не пишется вовсе — сигнатура шва при этом не меняется (ADR-0010).
+  traceOutboundGate(guard.clean, guard.findings, text.length, guard.text);
   return guard.text;
 }
 
@@ -104,27 +100,15 @@ export function noticeSender(
 export async function sendThroughOutbox(
   message: string,
   transport: OutboxTransport,
-  // turn/session нужны только журналу: шов — последнее звено цепочки хода, и без ключа
-  // хода доставка повисла бы в журнале рядом, а не внутри своего хода (ADR-0010).
-  {
-    limit = 4096,
-    turn = "",
-    session = "",
-  }: { limit?: number; turn?: string; session?: string } = {},
+  { limit = 4096 }: { limit?: number } = {},
 ): Promise<OutboxResult> {
-  const startedAt = Date.now();
-  const text = redactNotice(message, { turn, session });
+  const text = redactNotice(message);
 
   const result: OutboxResult = {
     ok: true,
     delivered: 0,
     fellBack: false,
     error: "",
-  };
-  // Trace: один исход на одну отправку, каким бы путём она ни ушла.
-  const done = (outcome: OutboxResult): OutboxResult => {
-    traceOutboxResult(turn, session, text, outcome, Date.now() - startedAt);
-    return outcome;
   };
 
   // Rich-путь рендерит нативно то, чего parse_mode=HTML не умеет. Любой отказ —
@@ -133,7 +117,7 @@ export async function sendThroughOutbox(
     const rich = await transport.sendRich(text);
     if (rich.ok) {
       result.delivered = 1;
-      return done(result);
+      return result;
     }
   }
 
@@ -169,5 +153,5 @@ export async function sendThroughOutbox(
     fail(`plain retry ${plain.error}`);
     if (plain.stop) break;
   }
-  return done(result);
+  return result;
 }

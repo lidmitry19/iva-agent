@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { toChannelLocalToken } from "./telegram-continuation-token.ts";
-import { traceTurnBound } from "./trace.ts";
+import { traceContextParts, traceTurnBound } from "./trace.ts";
+import { localStamp } from "./vault-daily.ts";
 
 type ChatStatus = Record<string, unknown> | null;
 type GetStatus = (chatKey: string) => ChatStatus;
@@ -209,7 +210,14 @@ export async function publishTelegramTurnStarted({
 }: PublishTelegramTurnStartedOptions): Promise<boolean> {
   // Trace: ключ апдейта ↔ ход. Единственное место, где события «до хода» (Bridge,
   // Inbound pipeline, Gate) сшиваются с событиями eve — раньше turnId не существует.
+  // Рядом — состав памяти, которая уедет в системный промпт этого хода.
   traceTurnBound(chatKey, sessionId, turnId);
+  traceContextParts(
+    turnId,
+    sessionId,
+    process.env.ASSISTANT_VAULT_DIR || "vault",
+    localStamp().date,
+  );
   // Обработчики событий eve отдают токен с именем канала впереди. В статусе он должен
   // лежать только channel-local: reset-роут клеит имя канала сам (#110).
   const continuationToken = toChannelLocalToken(rawContinuationToken);

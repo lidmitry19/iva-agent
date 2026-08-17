@@ -131,16 +131,18 @@ void test("captureContent=false оставляет имена, тайминги 
   assert.equal(JSON.stringify(event).includes("секретный"), false);
 });
 
-void test("тумблер captureContent читается из data/settings.json", () => {
+void test("тумблер captureContent читается из settings.json РЯДОМ с журналом", () => {
   const dir = world();
   // Значение по умолчанию — включено: файла настроек ещё нет.
-  assert.equal(trace.captureContentEnabled(), true);
+  assert.equal(trace.captureContentEnabled(dir), true);
 
+  // Настройки читаются по тому же каталогу данных, в который идёт запись: у моста,
+  // агента и теста каталоги разные, и тумблер обязан следовать за журналом.
   writeFileSync(
-    join(DATA, "settings.json"),
+    join(dir, "settings.json"),
     JSON.stringify({ captureContent: false }),
   );
-  assert.equal(trace.captureContentEnabled(), false);
+  assert.equal(trace.captureContentEnabled(dir), false);
   trace.appendTrace(
     { kind: "eve", name: "message.completed", content: { message: "текст" } },
     { dir, now: AT },
@@ -148,10 +150,18 @@ void test("тумблер captureContent читается из data/settings.jso
   assert.deepEqual(lines(dir, "2026-08-17")[0].data, { messageChars: 5 });
 
   writeFileSync(
-    join(DATA, "settings.json"),
+    join(dir, "settings.json"),
     JSON.stringify({ captureContent: true }),
   );
-  assert.equal(trace.captureContentEnabled(), true);
+  assert.equal(trace.captureContentEnabled(dir), true);
+  trace.appendTrace(
+    { kind: "eve", name: "message.completed", content: { message: "текст" } },
+    { dir, now: AT },
+  );
+  assert.deepEqual(lines(dir, "2026-08-17")[1].data, {
+    messageChars: 5,
+    message: "текст",
+  });
 });
 
 void test("журнал не создаёт каталог данных там, где его нет", () => {
@@ -290,7 +300,7 @@ void test("мост пишет свои события тем же ключом 
     update_id: 900,
     message: { message_id: 5, chat: { id: 77 } },
   };
-  trace.traceBridgeAdmission(update, "own");
+  trace.traceBridgeAdmission(update, "owned");
   trace.traceBridgeDelivery(update, true, 42);
   trace.traceBridgeAdmission(
     {
@@ -307,7 +317,7 @@ void test("мост пишет свои события тем же ключом 
   const delivered = events.find((event) => event.name === "delivered");
   const callback = last(
     events,
-    (event) => event.kind === "bridge" && event.name === "admitted",
+    (event) => event.kind === "bridge" && event.name === "dropped",
   );
   assert.equal(admitted?.turn, "tg:77:5");
   assert.equal(admitted?.source, "bridge");
@@ -316,7 +326,7 @@ void test("мост пишет свои события тем же ключом 
     chatId: 77,
     messageId: "5",
     kind: "message",
-    decision: "own",
+    decision: "owned",
   });
   assert.deepEqual(delivered?.data, {
     updateId: 900,
@@ -327,46 +337,73 @@ void test("мост пишет свои события тем же ключом 
     ms: 42,
   });
   assert.equal(callback?.turn, "tg:77:cb:cb1");
+  assert.deepEqual(
+    (callback?.data as Record<string, unknown>).decision,
+    "terminal-drop",
+  );
 });
 
-void test("вердикты гейтов и Стоп пишутся своими событиями", () => {
+void test("вердикт гейта пишется только внутри хода", async () => {
+  const before = lines(DATA, trace.traceDay()).length;
+
+  // Вне хода журнал молчит: чистый примитив ничего не кладёт на диск.
   trace.traceInboundGate(
     "telegram",
-    {
-      blocked: true,
-      reason: "Prompt injection",
-      flags: ["overrides=3"],
-      truncatedChars: 4,
+    { blocked: false, reason: "clean", flags: [], truncatedChars: 0 },
+    10,
+  );
+  trace.traceOutboundGate(true, [], 10, "чисто");
+  assert.equal(lines(DATA, trace.traceDay()).length, before);
+
+  // Внутри хода — с ключом хода из контекста.
+  await trace.traceWithScope(
+    { turn: "tg:77:5", session: "wrun_1", source: "telegram" },
+    () => {
+      trace.traceInboundGate(
+        "telegram",
+        {
+          blocked: true,
+          reason: "Prompt injection",
+          flags: ["overrides=3"],
+          truncatedChars: 4,
+        },
+        120,
+      );
+      trace.traceInboundGate(
+        "web",
+        {
+          blocked: false,
+          reason: "clean",
+          flags: ["lookalikes=2"],
+          truncatedChars: 0,
+        },
+        900,
+      );
+      trace.traceOutboundGate(
+        false,
+        [{ type: "api_key", name: "openai" }],
+        55,
+        "ключ: [REDACTED]",
+      );
+      return Promise.resolve();
     },
-    120,
   );
-  trace.traceOutboundGate(
-    "turn_3",
-    "wrun_1",
-    false,
-    [{ type: "api_key", name: "openai" }],
-    55,
-  );
-  trace.traceOutboxResult(
-    "turn_3",
-    "wrun_1",
-    "ответ",
-    { ok: true, delivered: 1, fellBack: false, error: "" },
-    17,
-  );
-  trace.traceStop("77", "turn_3", "requested");
 
   const events = lines(DATA, trace.traceDay());
   const inbound = last(
     events,
     (event) => event.kind === "gate" && event.name === "inbound",
   );
+  const web = last(
+    events,
+    (event) => event.kind === "gate" && event.name === "web",
+  );
   const outbound = last(
     events,
     (event) => event.kind === "gate" && event.name === "outbound",
   );
-  const outbox = last(events, (event) => event.kind === "outbox");
-  const stop = last(events, (event) => event.kind === "stop");
+  assert.equal(inbound?.turn, "tg:77:5");
+  assert.equal(inbound?.session, "wrun_1");
   assert.deepEqual(inbound?.data, {
     surface: "telegram",
     blocked: true,
@@ -375,21 +412,227 @@ void test("вердикты гейтов и Стоп пишутся своими
     truncatedChars: 4,
     chars: 120,
   });
+  assert.equal(web?.source, "web");
+  assert.equal(web?.turn, "tg:77:5");
   assert.deepEqual(outbound?.data, {
     clean: false,
     findings: ["api_key:openai"],
     chars: 55,
+    textChars: 16,
+    text: "ключ: [REDACTED]",
   });
-  assert.equal(outbox?.name, "delivered");
-  assert.deepEqual(outbox?.data, {
+});
+
+void test("одна отправка — одно событие Outbox, каким бы путём она ни ушла", async () => {
+  const before = lines(DATA, trace.traceDay()).length;
+
+  const result = await trace.traceOutbox(
+    { turn: "turn_3", session: "wrun_1", source: "rollup" },
+    "ответ",
+    () => {
+      // Внутри отправки контекст хода виден — на нём держится вердикт гейта.
+      trace.traceOutboundGate(true, [], 5, "ответ");
+      return Promise.resolve({
+        ok: true,
+        delivered: 1,
+        fellBack: false,
+        error: "",
+      });
+    },
+  );
+
+  assert.deepEqual(result, {
     ok: true,
     delivered: 1,
     fellBack: false,
     error: "",
-    ms: 17,
-    textChars: 5,
-    text: "ответ",
   });
+  const added = lines(DATA, trace.traceDay()).slice(before);
+  assert.deepEqual(
+    added.map((event) => `${String(event.kind)}.${String(event.name)}`),
+    ["gate.outbound", "outbox.delivered"],
+  );
+  // Источник не зашит: ночной ход называется своим именем, а не «telegram».
+  assert.equal(added[0].source, "rollup");
+  assert.equal(added[1].source, "rollup");
+  assert.equal(added[1].turn, "turn_3");
+  const data = added[1].data as Record<string, unknown>;
+  assert.equal(data.ok, true);
+  assert.equal(data.chars, 5);
+  assert.equal(typeof data.ms, "number");
+  // Текст «как ушёл» лежит в событии гейта — уже после редактуры.
+  assert.equal((added[0].data as Record<string, unknown>).text, "ответ");
+});
+
+void test("Стоп несёт ход и сессию из статуса чата", () => {
+  trace.traceStop(
+    "77:",
+    { turnId: "turn_3", sessionId: "wrun_1" },
+    "requested",
+  );
+  trace.traceStop("78:", null, "idle");
+
+  const events = lines(DATA, trace.traceDay());
+  const idle = last(events, (event) => event.name === "idle");
+  const stop = last(
+    events,
+    (event) => event.kind === "stop" && event.name === "requested",
+  );
   assert.equal(stop?.turn, "turn_3");
-  assert.deepEqual(stop?.data, { chatKey: "77", outcome: "requested" });
+  assert.equal(stop?.session, "wrun_1");
+  assert.deepEqual(stop?.data, { chatKey: "77:", outcome: "requested" });
+  assert.equal(idle?.turn, "");
+  assert.deepEqual(idle?.data, { chatKey: "78:", outcome: "idle" });
+});
+
+void test("состав контекста снимается с файлов памяти в момент старта хода", (t) => {
+  const vault = mkdtempSync(join(root, "vault-"));
+  mkdirSync(join(vault, "daily"), { recursive: true });
+  writeFileSync(join(vault, "CORE.md"), "ядро");
+  writeFileSync(join(vault, "PERSONA.md"), "персона!");
+  writeFileSync(join(vault, "daily", "2026-08-17.md"), "день");
+  t.after(() => rmSync(vault, { recursive: true, force: true }));
+
+  trace.traceContextParts("turn_9", "wrun_9", vault, "2026-08-17");
+
+  const event = last(
+    lines(DATA, trace.traceDay()),
+    (e) => e.kind === "context",
+  );
+  assert.equal(event?.name, "parts");
+  assert.equal(event?.turn, "turn_9");
+  assert.deepEqual(event?.data, {
+    core: 8, // «ядро» в utf-8 — 8 байт
+    persona: 15,
+    moc: 0, // файла нет — в промпт ничего не уедет
+    daily: 8,
+    unit: "bytes",
+    approximate: true,
+  });
+});
+
+void test("строка режется по БАЙТАМ, а содержимое уходит первым", () => {
+  // Кириллица стоит 2 байта на знак: по знакам это 20 000 (влезло бы), по байтам 40 000.
+  const content: Record<string, string> = {};
+  for (let i = 0; i < 6; i++) content[`out${i}`] = "я".repeat(2000);
+  const body = Object.values(content).join("");
+  // По знакам событие влезло бы в потолок, по байтам — нет. На этой разнице и ловится
+  // подмена Buffer.byteLength на .length.
+  assert.ok(body.length < trace.TRACE_LINE_LIMIT);
+  assert.ok(Buffer.byteLength(body, "utf8") > trace.TRACE_LINE_LIMIT);
+  const line = trace.traceLine(
+    {
+      kind: "eve",
+      name: "action.result",
+      turn: "turn_1",
+      data: { toolName: "bash" },
+      content,
+    },
+    { captureContent: true },
+  );
+
+  assert.ok(Buffer.byteLength(line, "utf8") <= trace.TRACE_LINE_LIMIT);
+  const event = JSON.parse(line) as { data: Record<string, unknown> };
+  // Имя тула и размеры содержимого пережили обрезку, само содержимое — нет.
+  assert.equal(event.data.toolName, "bash");
+  assert.equal(event.data.out0Chars, 2000);
+  assert.equal(event.data.out5Chars, 2000);
+  assert.equal(event.data.traceTrimmed, true);
+  for (let i = 0; i < 6; i++) assert.equal(`out${i}` in event.data, false);
+});
+
+void test("чужие типы в data не разворачиваются поэлементно", () => {
+  const line = trace.traceLine(
+    {
+      kind: "eve",
+      name: "action.result",
+      data: {
+        buffer: Buffer.alloc(5_000_000),
+        typed: new Uint8Array(1024),
+        when: new Date("2026-08-17T10:20:30.000Z"),
+        boom: new Error("provider refused"),
+        map: new Map([["a", 1]]),
+        set: new Set([1, 2]),
+      },
+    },
+    { captureContent: true },
+  );
+
+  const event = JSON.parse(line) as { data: Record<string, unknown> };
+  assert.deepEqual(event.data.buffer, { bytes: 5_000_000 });
+  assert.deepEqual(event.data.typed, { bytes: 1024 });
+  assert.equal(event.data.when, "2026-08-17T10:20:30.000Z");
+  assert.equal(event.data.boom, "Error: provider refused");
+  assert.deepEqual(event.data.map, [["a", 1]]);
+  assert.deepEqual(event.data.set, [1, 2]);
+});
+
+void test("обрезанный по числу полей объект помечен, как и массив", () => {
+  const wide: Record<string, number> = {};
+  for (let i = 0; i < 40; i++) wide[`k${i}`] = i;
+  const line = trace.traceLine(
+    { kind: "eve", name: "action.result", data: { wide } },
+    { captureContent: true },
+  );
+
+  const event = JSON.parse(line) as {
+    data: { wide: Record<string, unknown> };
+  };
+  assert.equal(Object.keys(event.data.wide).length, 31); // 30 полей и пометка
+  assert.equal(event.data.wide["…[keys]"], 40);
+});
+
+void test("ключ __proto__ в чужих данных остаётся полем, а не прототипом", () => {
+  const line = trace.traceLine(
+    {
+      kind: "eve",
+      name: "actions.requested",
+      // Именно так поле приезжает из чужого JSON: собственный ключ "__proto__", а не
+      // синтаксис литерала (тот меняет прототип и никакого поля не создаёт).
+      data: {
+        args: JSON.parse('{"__proto__":{"polluted":true},"ok":1}') as unknown,
+      },
+      content: { text: "…" },
+    },
+    { captureContent: true },
+  );
+
+  assert.equal(line.includes("__proto__"), true);
+  const event = JSON.parse(line) as {
+    data: { args: Record<string, unknown> };
+  };
+  assert.deepEqual(Object.keys(event.data.args), ["__proto__", "ok"]);
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(event.data.args, "__proto__")?.value,
+    { polluted: true },
+  );
+});
+
+void test("протухшая метка хода не приписывает вердикт чужому ходу", () => {
+  const before = lines(DATA, trace.traceDay()).length;
+
+  trace.traceEnterScope({ turn: "tg:77:5", source: "telegram" });
+  trace.traceInboundGate(
+    "telegram",
+    { blocked: false, reason: "clean", flags: [], truncatedChars: 0 },
+    10,
+  );
+  const fresh = lines(DATA, trace.traceDay()).slice(before);
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0].turn, "tg:77:5");
+
+  // Метка живёт в асинхронном контексте дольше самого шва: спустя TTL она уже не
+  // описывает происходящее, и событие не пишется вовсе.
+  const realNow = Date.now;
+  Date.now = () => realNow() + trace.TRACE_SCOPE_TTL_MS + 1;
+  try {
+    trace.traceInboundGate(
+      "telegram",
+      { blocked: false, reason: "clean", flags: [], truncatedChars: 0 },
+      10,
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(lines(DATA, trace.traceDay()).length, before + 1);
 });

@@ -17,12 +17,14 @@
 //
 // Модуль живёт в authored tree, потому что пишут журнал и агент, и мост
 // (scripts/poller/* через алиас `#lib/trace.ts`) — как у agent/lib/usage.ts.
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { join } from "node:path";
 import { dataDir } from "./data-dir.ts";
@@ -67,13 +69,19 @@ export type TraceOptions = {
 export const TRACE_CONTENT_LIMIT = 2000;
 // Короткие поля-идентификаторы: ход, сессия, источник, группа, имя события.
 export const TRACE_ID_LIMIT = 200;
-// Потолок строки. Одна запись — один write(2) в O_APPEND, поэтому строка обязана быть
-// заведомо маленькой: так параллельные писатели (агент и мост) не рвут строки друг другу.
+// Потолок строки В БАЙТАХ UTF-8 — считать надо ровно то, что уйдёт в write(2). Одна
+// запись = один write в O_APPEND, поэтому строка обязана быть заведомо маленькой: так
+// параллельные писатели (агент и мост) не рвут строки друг другу. Кириллица и эмодзи
+// стоят 2-4 байта на знак, поэтому лимит по code units врал бы втрое.
 export const TRACE_LINE_LIMIT = 16 * 1024;
 // Сколько дней журнала держим: сегодняшний файл и 13 предыдущих.
 export const TRACE_RETENTION_DAYS = 14;
 export const TRACE_TRUNCATION_MARKER = "…[truncated]";
 export const TRACE_DEPTH_MARKER = "…[deep]";
+// Ключ-пометка обрезанного объекта: сколько полей было на самом деле.
+export const TRACE_TRUNCATED_KEY = "…[keys]";
+// Значение, которое не удалось прочитать (геттер бросил, прокси отказал).
+export const TRACE_UNREADABLE_MARKER = "…[unreadable]";
 
 const MAX_DEPTH = 4;
 const MAX_ITEMS = 20;
@@ -99,8 +107,14 @@ export function traceDay(now: Date = new Date()): string {
   }).format(now);
 }
 
-export function captureContentEnabled(): boolean {
-  return readSettings().captureContent !== false;
+/**
+ * Тумблер содержимого. Настройки читаются по ТОМУ ЖЕ каталогу данных, что и журнал:
+ * `settings.ts` фиксирует свой путь на импорте, а писатель резолвит каталог на каждой
+ * записи (агент, мост и тесты живут в разных каталогах) — иначе тумблер и журнал
+ * разъехались бы по разным установкам.
+ */
+export function captureContentEnabled(dir: string = dataDir()): boolean {
+  return readSettings(join(dir, "settings.json")).captureContent !== false;
 }
 
 // Обрезка строки по потолку с явной пометкой. Пара суррогатов пополам не режется:
@@ -113,6 +127,20 @@ export function capTraceString(value: string, limit: number): string {
   return value.slice(0, keep) + TRACE_TRUNCATION_MARKER;
 }
 
+// Значения, которые в чужом payload встречаются, а в JSON не ложатся: их разбираем
+// ЯВНО и по-своему. Иначе Object.entries обходит 5-мегабайтный Buffer поэлементно
+// (замер: 2.9 с в горячем пути хода), Date превращается в {}, а Error — в пустой объект.
+function capForeign(value: object, limit: number): unknown {
+  if (ArrayBuffer.isView(value)) return { bytes: value.byteLength };
+  if (value instanceof ArrayBuffer) return { bytes: value.byteLength };
+  if (value instanceof Date)
+    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+  if (value instanceof Error)
+    return capTraceString(`${value.name}: ${value.message}`, limit);
+  if (value instanceof Map || value instanceof Set) return undefined;
+  return undefined;
+}
+
 // Любое значение → JSON-безопасное и ограниченное: строки по потолку, массивы и объекты
 // по числу элементов, вложенность по глубине. Циклы обрываются той же глубиной, поэтому
 // JSON.stringify ниже не может уйти в бесконечность.
@@ -121,25 +149,50 @@ function capValue(value: unknown, limit: number, depth: number): unknown {
   if (typeof value === "number" || typeof value === "boolean" || value === null)
     return value;
   if (typeof value === "bigint") return capTraceString(value.toString(), limit);
-  if (Array.isArray(value)) {
-    if (depth >= MAX_DEPTH) return TRACE_DEPTH_MARKER;
-    const items: unknown[] = value
-      .slice(0, MAX_ITEMS)
-      .map((item) => capValue(item, limit, depth + 1) ?? null);
-    if (value.length > MAX_ITEMS) items.push(TRACE_TRUNCATION_MARKER);
-    return items;
-  }
+  if (Array.isArray(value)) return capList(value, limit, depth);
   if (typeof value === "object") {
     if (depth >= MAX_DEPTH) return TRACE_DEPTH_MARKER;
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value).slice(0, MAX_KEYS)) {
+    const foreign = capForeign(value, limit);
+    if (foreign !== undefined) return foreign;
+    if (value instanceof Map)
+      return capList([...value.entries()], limit, depth);
+    if (value instanceof Set) return capList([...value], limit, depth);
+    // Чужой объект умеет кусаться: геттер с исключением, прокси, отравленный toJSON.
+    // Читателю журнала это не интересно — поле помечается и едет дальше.
+    let entries: [string, unknown][];
+    try {
+      entries = Object.entries(value);
+    } catch {
+      return TRACE_UNREADABLE_MARKER;
+    }
+    // Object.create(null), а не {}: ключ "__proto__" в чужих аргументах тула присвоением
+    // в обычный объект МЕНЯЕТ ПРОТОТИП вместо поля — значение молча исчезает из журнала,
+    // а на его месте оказывается прототип. У объекта без прототипа такой ловушки нет.
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const [key, item] of entries.slice(0, MAX_KEYS)) {
       const capped = capValue(item, limit, depth + 1);
       if (capped !== undefined)
         out[capTraceString(key, TRACE_ID_LIMIT)] = capped;
     }
+    // Обрезанный объект помечаем так же, как обрезанный массив: читатель обязан видеть,
+    // что полей было больше, а не гадать.
+    if (entries.length > MAX_KEYS) out[TRACE_TRUNCATED_KEY] = entries.length;
     return out;
   }
   return undefined; // undefined, функция, symbol — в JSON им места нет
+}
+
+function capList(
+  value: readonly unknown[],
+  limit: number,
+  depth: number,
+): unknown {
+  if (depth >= MAX_DEPTH) return TRACE_DEPTH_MARKER;
+  const items: unknown[] = value
+    .slice(0, MAX_ITEMS)
+    .map((item) => capValue(item, limit, depth + 1) ?? null);
+  if (value.length > MAX_ITEMS) items.push(TRACE_TRUNCATION_MARKER);
+  return items;
 }
 
 function capRecord(
@@ -160,6 +213,23 @@ function header(input: TraceInput, now: Date) {
   };
 }
 
+// Сериализация одного варианта строки. Всё, что могло сломаться на чужих данных, уже
+// сломалось в capValue и помечено; здесь остаётся последний предохранитель, чтобы
+// событие всегда становилось строкой, а не исключением посреди хода.
+function stringify(
+  head: ReturnType<typeof header>,
+  data: Record<string, unknown>,
+): string {
+  try {
+    return JSON.stringify({
+      ...head,
+      data: capRecord(data, TRACE_CONTENT_LIMIT),
+    });
+  } catch {
+    return JSON.stringify({ ...head, data: { traceUnreadable: true } });
+  }
+}
+
 /**
  * Событие → одна строка JSONL (без перевода строки). Чистая функция: writer вызывает
  * её, а тесты проверяют схему и потолки без файловой системы.
@@ -174,27 +244,25 @@ export function traceLine(
   options: TraceOptions = {},
 ): string {
   const now = options.now ?? new Date();
-  const capture = options.captureContent ?? captureContentEnabled();
+  const capture =
+    options.captureContent ?? captureContentEnabled(options.dir ?? dataDir());
   const content = input.content ?? {};
   const sizes: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(content)) {
     if (typeof value === "string") sizes[`${key}Chars`] = value.length;
   }
+  // Порядок ключей — это и порядок выживания: сначала data, потом размеры, и только
+  // потом само содержимое. Обрезка по числу ключей и падение в ветку без содержимого
+  // отнимают ХВОСТ, поэтому имена, тайминги и размеры остаются в любом случае.
   const base = { ...(input.data ?? {}), ...sizes };
   const full = capture ? { ...base, ...content } : base;
 
   const head = header(input, now);
-  const line = JSON.stringify({
-    ...head,
-    data: capRecord(full, TRACE_CONTENT_LIMIT),
-  });
-  if (line.length <= TRACE_LINE_LIMIT) return line;
+  const line = stringify(head, full);
+  if (Buffer.byteLength(line, "utf8") <= TRACE_LINE_LIMIT) return line;
 
-  const trimmed = JSON.stringify({
-    ...head,
-    data: capRecord({ ...base, traceTrimmed: true }, TRACE_CONTENT_LIMIT),
-  });
-  if (trimmed.length <= TRACE_LINE_LIMIT) return trimmed;
+  const trimmed = stringify(head, { ...base, traceTrimmed: true });
+  if (Buffer.byteLength(trimmed, "utf8") <= TRACE_LINE_LIMIT) return trimmed;
   return JSON.stringify({ ...head, data: { traceTrimmed: true } });
 }
 
@@ -213,7 +281,7 @@ function ensureTraceDir(dir: string): boolean {
 
 let prunedFor = "";
 function pruneOnNewDay(dir: string, day: string): void {
-  const marker = `${dir} ${day}`;
+  const marker = `${dir}\0${day}`;
   if (prunedFor === marker) return;
   prunedFor = marker;
   pruneTrace(dir, day);
@@ -275,8 +343,28 @@ export function appendTrace(
     );
     pruneOnNewDay(dir, day);
   } catch (error) {
-    console.error("[trace] событие не записано:", error);
+    reportTraceFailure(error);
   }
+}
+
+// Диск кончился — про это надо сказать один раз, а не залить journal службы строкой на
+// каждое событие хода. Одна жалоба в минуту плюс счётчик пропущенных.
+const FAILURE_LOG_INTERVAL_MS = 60_000;
+let lastFailureLoggedAt = 0;
+let suppressedFailures = 0;
+function reportTraceFailure(error: unknown): void {
+  const at = Date.now();
+  if (at - lastFailureLoggedAt < FAILURE_LOG_INTERVAL_MS) {
+    suppressedFailures += 1;
+    return;
+  }
+  const skipped = suppressedFailures;
+  lastFailureLoggedAt = at;
+  suppressedFailures = 0;
+  console.error(
+    `[trace] событие не записано${skipped > 0 ? ` (ещё ${skipped} за минуту)` : ""}:`,
+    error,
+  );
 }
 
 // Швы зовут журнал одной строкой, поэтому сборка события тоже обязана быть безопасной:
@@ -357,6 +445,56 @@ export function traceBoundUpdate(chatKey: string): string {
   return bindings.get(chatKey) ?? "";
 }
 
+// --- Контекст хода в процессе ---
+
+/**
+ * Кто сейчас «в ходе». Нужен местам, которые сами про ход ничего не знают, а событие
+ * без ключа хода бесполезно: санитайзер входа (agent/lib/security-gate.ts) и
+ * outbound-Gate внутри Outbox зовутся из глубины и получают только текст.
+ *
+ * Контекста нет — событие НЕ ПИШЕТСЯ вовсе. Это же правило убирает побочный эффект из
+ * чистых примитивов: юнит-тест гейта и любой сторонний скрипт ничего на диск не кладут.
+ */
+export type TraceScope = {
+  readonly turn?: string;
+  readonly session?: string;
+  readonly source?: string;
+  /** Когда метку поставили через enterWith. См. TRACE_SCOPE_TTL_MS. */
+  readonly enteredAt?: number;
+};
+
+// Сколько живёт метка, поставленная enterWith. Она остаётся в асинхронном контексте и
+// ПОСЛЕ того, как шов отработал: если из того же контекста позже позовут гейт, вердикт
+// уехал бы с чужим, давно закрытым ходом. Пустой ключ хода честнее вранья, а все
+// настоящие вызовы гейта случаются в секундах от метки, не в минутах.
+export const TRACE_SCOPE_TTL_MS = 60_000;
+
+const scopeStore = new AsyncLocalStorage<TraceScope>();
+
+function activeScope(): TraceScope | undefined {
+  const scope = scopeStore.getStore();
+  if (scope?.enteredAt === undefined) return scope; // traceWithScope — область точная
+  return Date.now() - scope.enteredAt > TRACE_SCOPE_TTL_MS ? undefined : scope;
+}
+
+/**
+ * Пометить текущий асинхронный контекст ходом. `enterWith`, потому что вызывающий шов
+ * обёртку вокруг себя поставить не может (одна строка в inbound-пайплайне, одна в туле).
+ * Область — текущий асинхронный контекст и всё, что из него порождается.
+ */
+export function traceEnterScope(scope: TraceScope): void {
+  scopeStore.enterWith({ ...scope, enteredAt: Date.now() });
+}
+
+/** То же, но с честной областью: блок кода, который мы держим в руках. */
+export function traceWithScope<T>(scope: TraceScope, run: () => T): T {
+  return scopeStore.run(scope, run);
+}
+
+export function traceScope(): TraceScope | undefined {
+  return activeScope();
+}
+
 // --- Швы Ивы ---
 
 type InboundMessageLike = {
@@ -376,10 +514,14 @@ export function traceInboundReceived(message: InboundMessageLike): void {
   emit(() => {
     const userId = message.from?.id ?? "";
     const text = message.text || message.caption || "";
+    const turn = traceUpdateKey(message.chat.id, message.messageId);
+    // С этого момента и до конца разбора апдейта известно, чей это ход: вердикт
+    // inbound-Gate поедет с тем же ключом, хотя сам гейт про апдейты ничего не знает.
+    traceEnterScope({ turn, source: "telegram" });
     return {
       kind: "inbound",
       name: "received",
-      turn: traceUpdateKey(message.chat.id, message.messageId),
+      turn,
       source: "telegram",
       data: {
         chatId: message.chat.id,
@@ -425,7 +567,14 @@ export function traceInboundOutcome(
   });
 }
 
-/** Шов inbound-Gate: вердикт санитайзера входа. */
+/**
+ * Шов inbound-Gate: вердикт санитайзера входа. Пишется ТОЛЬКО внутри хода — ключ берётся
+ * из контекста (traceEnterScope), потому что сам гейт про ходы ничего не знает. Нет
+ * контекста (юнит-тест, скрипт, чужой вызов) — нет и события: вердикт без хода в ленте
+ * не к чему прицепить, а запись на диск из чистого примитива — чистый вред.
+ *
+ * Имя события следует поверхности: телеграм — `gate.inbound`, веб — `gate.web`.
+ */
 export function traceInboundGate(
   surface: string,
   verdict: {
@@ -436,9 +585,13 @@ export function traceInboundGate(
   },
   chars: number,
 ): void {
+  const scope = activeScope();
+  if (!scope) return;
   emit(() => ({
     kind: "gate",
-    name: "inbound",
+    name: surface === "web" ? "web" : "inbound",
+    turn: scope.turn,
+    session: scope.session,
     source: surface,
     data: {
       surface,
@@ -449,6 +602,47 @@ export function traceInboundGate(
       chars,
     },
   }));
+}
+
+/**
+ * Состав контекста хода: сколько байт памяти уехало в системный промпт.
+ *
+ * ПРИБЛИЖЕНИЕ, и это важно знать читателю. CORE, PERSONA и время инжектят динамические
+ * инструкции eve (`agent/instructions/*.ts`), а им authored-модули проекта недоступны
+ * (гоча eve 0.11.4: зависеть можно только от eve, `@iva/*` и node), поэтому изнутри они
+ * отчитаться не могут. Здесь снимается РАЗМЕР ТЕХ ЖЕ ФАЙЛОВ на диске в момент старта
+ * хода — то, что инструкция прочитает мгновением позже. Расхождение возможно, только
+ * если файл переписали между этими двумя мгновениями (ночной Rollup в момент хода).
+ */
+export function traceContextParts(
+  turnId: string,
+  sessionId: string,
+  vaultDir: string,
+  day: string,
+): void {
+  emit(() => {
+    const parts: Record<string, unknown> = {};
+    for (const [name, path] of [
+      ["core", join(vaultDir, "CORE.md")],
+      ["persona", join(vaultDir, "PERSONA.md")],
+      ["moc", join(vaultDir, "MOC.md")],
+      ["daily", join(vaultDir, "daily", `${day}.md`)],
+    ] as const) {
+      try {
+        parts[name] = statSync(path).size;
+      } catch {
+        parts[name] = 0; // файла нет — в промпт ничего и не уедет
+      }
+    }
+    return {
+      kind: "context",
+      name: "parts",
+      turn: turnId,
+      session: sessionId,
+      source: "telegram",
+      data: { ...parts, unit: "bytes", approximate: true },
+    };
+  });
 }
 
 /**
@@ -471,77 +665,113 @@ export function traceTurnBound(
   }));
 }
 
-/** Шов outbound-Gate: что нашёл сканер в тексте, уходящем в чат. */
+/**
+ * Шов outbound-Gate: что нашёл сканер в тексте, уходящем в чат. Ключ хода — из контекста
+ * (его ставит traceOutbox вокруг отправки), поэтому сигнатура redactNotice не меняется, а
+ * вне хода событие не пишется вовсе. Превью находки НЕ пишем: там кусок самого секрета.
+ */
 export function traceOutboundGate(
-  turn: string,
-  session: string,
   clean: boolean,
   findings: readonly { readonly type: string; readonly name: string }[],
   chars: number,
+  redacted: string,
 ): void {
+  const scope = activeScope();
+  if (!scope) return;
   emit(() => ({
     kind: "gate",
     name: "outbound",
-    turn,
-    session,
-    source: "telegram",
+    turn: scope.turn,
+    session: scope.session,
+    source: scope.source,
     data: {
       clean,
       findings: findings.map((finding) => `${finding.type}:${finding.name}`),
       chars,
     },
+    // Текст берём ПОСЛЕ редактуры: журнал не имеет права хранить то, что гейт только что
+    // вымарал по дороге в чат. Это же единственное место, где виден текст «как ушёл».
+    content: { text: redacted },
   }));
 }
 
-/** Шов Outbox: что ушло в чат и чем кончилась доставка. */
-export function traceOutboxResult(
-  turn: string,
-  session: string,
+type OutboxResultLike = {
+  readonly ok: boolean;
+  readonly delivered: number;
+  readonly fellBack: boolean;
+  readonly error: string;
+};
+
+/**
+ * Шов Outbox: одна отправка — одно событие. Обёртка вокруг вызова шва, а не строчки
+ * внутри него: у Outbox три пути наружу (rich, HTML, plain-фолбэк), и событие обязано
+ * быть одно на любой из них. Заодно ставит контекст хода — вердикт outbound-Gate внутри
+ * шва уезжает с тем же ключом.
+ *
+ * `source` НЕ зашит: ночной ход (rollup, дайджест) уходит тем же швом и обязан
+ * называться своим именем, иначе вьюер считает его разговором в Telegram.
+ */
+export async function traceOutbox<T extends OutboxResultLike>(
+  scope: TraceScope,
   text: string,
-  result: {
-    readonly ok: boolean;
-    readonly delivered: number;
-    readonly fellBack: boolean;
-    readonly error: string;
-  },
-  ms: number,
-): void {
+  send: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  const result = await traceWithScope(scope, send);
   emit(() => ({
     kind: "outbox",
     name: result.ok ? "delivered" : "failed",
-    turn,
-    session,
-    source: "telegram",
-    data: { ...result, ms },
-    content: { text },
+    turn: scope.turn,
+    session: scope.session,
+    source: scope.source,
+    // Сам текст здесь НЕ пишем: сюда он приходит до outbound-Gate, а хранить вымаранный
+    // секрет обратно в журнале — ровно та утечка, которую гейт и закрывает. Текст «как
+    // ушёл» лежит в gate.outbound, текст модели — в eve.message.completed.
+    data: {
+      ok: result.ok,
+      delivered: result.delivered,
+      fellBack: result.fellBack,
+      error: result.error,
+      chars: text.length,
+      ms: Date.now() - startedAt,
+    },
   }));
+  return result;
 }
 
 /** Шов «Стоп»: чем кончилась просьба остановить ход. */
 export function traceStop(
   chatKey: string,
-  turnId: unknown,
+  status: { readonly turnId?: unknown; readonly sessionId?: unknown } | null,
   outcome: string,
 ): void {
   emit(() => ({
     kind: "stop",
     name: outcome,
-    turn: typeof turnId === "string" ? turnId : "",
+    turn: scalarText(status?.turnId),
+    session: scalarText(status?.sessionId),
     source: "telegram",
     data: { chatKey, outcome },
   }));
 }
 
-/** Шов Bridge: апдейт принят мостом (или отброшен его политикой). */
+/**
+ * Исход приёма апдейта мостом — ровно словарь scripts/poller/inbox.ts
+ * (`InboxAdmissionResult`), без синонимов: одно решение — одно слово в журнале.
+ */
+export type TraceBridgeDecision =
+  "owned" | "terminal-drop" | "unownable" | "write-failed";
+
+/** Шов Bridge: апдейт принят мостом или отброшен. Имя события следует исходу. */
 export function traceBridgeAdmission(
   update: TelegramUpdateLike,
-  decision: string,
+  decision: TraceBridgeDecision,
 ): void {
   emit(() => {
     const facts = updateFacts(update);
     return {
       kind: "bridge",
-      name: "admitted",
+      name: decision === "owned" ? "admitted" : "dropped",
       turn: traceUpdateKey(facts.chatId, facts.messageId),
       source: "bridge",
       data: { ...facts, decision },

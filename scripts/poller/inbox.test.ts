@@ -434,9 +434,10 @@ void test("Trace: мост пишет вердикт приёма своим к�
   });
 
   const added = traceEvents().slice(before);
+  // Имя события следует исходу: принятый апдейт и отброшенный — разные строки ленты.
   assert.deepEqual(
     added.map((event) => `${String(event.kind)}.${String(event.name)}`),
-    ["bridge.admitted", "bridge.admitted"],
+    ["bridge.admitted", "bridge.dropped"],
   );
   // Ключ апдейта — тот же, что напишет ядро: чат и сообщение, а не update_id.
   assert.equal(added[0].turn, "tg:1:701");
@@ -468,6 +469,7 @@ void test("Trace: сбой записи в inbox виден в журнале о
 
   const added = traceEvents().slice(before);
   assert.equal(added.length, 1);
+  assert.equal(added[0].name, "dropped");
   assert.equal(
     (added[0].data as Record<string, unknown>).decision,
     "write-failed",

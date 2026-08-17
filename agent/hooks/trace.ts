@@ -140,7 +140,7 @@ function record(
       ? subagentTurnId(ctx.session.turn, subagent.name, text(data.turnId))
       : text(data.turnId) || parentTurnId(ctx.session.turn),
     session: ctx.session.id,
-    source: ctx.channel.kind ?? "unknown",
+    source: ctx.channel?.kind ?? "unknown",
     data: subagent
       ? {
           ...projected.data,
@@ -157,14 +157,22 @@ export default defineHook({
     // `*` ловит каждое принятое событие рантайма — отдельная подписка на конкретный тип
     // здесь запрещена: она пришла бы вместе с подстановочной и удвоила строку.
     "*": (event, ctx) => {
-      if (event.type === "subagent.event") {
-        record(event.data.event, ctx, {
-          name: event.data.subagentName,
-          callId: event.data.callId,
-        });
-        return;
+      // Один try на весь обработчик: журнал не имеет права уронить ход НИ НА ЧЁМ —
+      // ни на чужом геттере в payload, ни на обрезанном subagent.event, ни на
+      // контексте без канала. Писатель внутри тоже глотает свои ошибки, но событие
+      // ещё надо собрать, а собирается оно из чужих данных.
+      try {
+        if (event.type === "subagent.event") {
+          record(event.data.event, ctx, {
+            name: event.data.subagentName,
+            callId: event.data.callId,
+          });
+          return;
+        }
+        record(event, ctx);
+      } catch (error) {
+        console.error("[trace] событие eve не записано:", error);
       }
-      record(event, ctx);
     },
   },
 });
