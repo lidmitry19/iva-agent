@@ -11,7 +11,6 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -225,157 +224,73 @@ test("property: any directory tree yields a report, never an exception", async (
   );
 });
 
-test("property: every accepted skill path stays inside the plugin root", async () => {
-  await fc.assert(
-    fc.asyncProperty(fc.array(entry, { maxLength: 8 }), async (entries) => {
-      const dir = mkdtempSync(join(world(), "contained-"));
-      write(
-        dir,
-        "plugin.json",
-        JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: "demo" }),
-      );
-      plant(dir, entries);
-
-      const report = await readPlugin(dir);
-      for (const skill of report.skills) {
-        const inside = relative(report.root, resolve(report.root, skill.path));
-        assert.ok(
-          inside && !inside.startsWith(".."),
-          `${skill.path} escapes the root`,
-        );
-        const markdown = join(report.root, skill.path, "SKILL.md");
-        assert.ok(
-          lstatSync(markdown).isFile(),
-          `${skill.path} has no SKILL.md`,
-        );
-      }
-    }),
-    RUNS,
-  );
-});
-
-const command = fc.oneof(
-  fc.constantFrom(
-    "node",
-    "./bin/server",
-    "./../outside/bin",
-    "./a/../../b",
-    "./sub/./ok",
-    "node server.js",
-    "${PLUGIN_ROOT}/bin",
-    "/usr/bin/node",
-  ),
-  fc.string({ maxLength: 8 }),
+const skillName = fc.constantFrom(
+  "alpha",
+  "beta",
+  "at.tach",
+  "привет",
+  "-lead",
 );
 
-const cwd = fc.constantFrom(
-  "./tools",
-  "./../outside",
-  "${PLUGIN_ROOT}",
-  "${PLUGIN_ROOT}/x",
-  "${PLUGIN_DATA}/x",
-  "tools",
+const skillShape = fc.constantFrom(
+  "valid",
+  "noFrontmatter",
+  "noDescription",
+  "noName",
+  "directory",
+  "absent",
 );
 
-const url = fc.constantFrom(
-  "https://a.test/mcp",
-  "http://a.test/mcp",
-  "http://localhost:1/mcp",
-  "https://u:p@a.test/mcp",
-  "not a url",
-);
+type PlantedSkill = { readonly name: string; readonly shape: string };
 
-// Записи генерятся по форме транспорта, а не одним общим объектом: закрытая схема
-// отвергает чужое поле раньше всех прочих проверок, и «универсальная» запись почти
-// никогда не доходила бы до принятия — свойство стало бы пустым.
-const stdioEntry = fc.record(
-  {
-    type: fc.constantFrom("stdio", "stdio", "grpc"),
-    command,
-    args: fc.oneof(
-      fc.array(fc.string({ maxLength: 6 }), { maxLength: 2 }),
-      fc.string(),
-    ),
-    env: fc.oneof(
-      fc.dictionary(fc.string({ maxLength: 6 }), fc.string({ maxLength: 6 }), {
-        maxKeys: 2,
-      }),
-      fc.constant({ PLUGIN_ROOT: "/tmp" }),
-    ),
-    cwd,
-  },
-  { requiredKeys: ["type", "command"] },
-);
-
-const remoteEntry = fc.record(
-  {
-    type: fc.constantFrom("streamable-http", "sse", "http"),
-    url,
-    headers: fc.oneof(
-      fc.dictionary(fc.string({ maxLength: 6 }), fc.string({ maxLength: 6 }), {
-        maxKeys: 2,
-      }),
-      fc.constant({ "X-A": "1", "x-a": "2" }),
-    ),
-  },
-  { requiredKeys: ["type", "url"] },
-);
-
-const mcpEntry = fc.oneof(
-  stdioEntry,
-  remoteEntry,
-  fc.string(),
-  fc.constant(null),
-  fc.record({ type: fc.constant("stdio"), command: fc.string(), url }),
-);
-
-test("property: any mcp.json yields servers or reasons, and every accepted path is contained", async () => {
+test("property: a skill is accepted exactly when the Agent Skills rules are met", async () => {
   await fc.assert(
     fc.asyncProperty(
-      fc.oneof(
-        fc.json().map((raw) => JSON.parse(raw) as unknown),
-        fc
-          .record(
-            {
-              $schema: fc.constantFrom(MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL, 2),
-              mcpServers: fc.oneof(
-                fc.dictionary(fc.string({ maxLength: 6 }), mcpEntry, {
-                  maxKeys: 4,
-                }),
-                fc.array(mcpEntry, { maxLength: 2 }),
-              ),
-              extra: fc.integer(),
-            },
-            { requiredKeys: ["$schema"] },
-          )
-          .map((value) => value as unknown),
-      ),
-      async (document) => {
-        const dir = mkdtempSync(join(world(), "mcp-"));
+      fc.uniqueArray(fc.record({ name: skillName, shape: skillShape }), {
+        maxLength: 6,
+        selector: (item: PlantedSkill) => item.name,
+      }),
+      async (planted) => {
+        const dir = mkdtempSync(join(world(), "skills-"));
         write(
           dir,
           "plugin.json",
           JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: "demo" }),
         );
-        writeFileSync(join(dir, "mcp.json"), JSON.stringify(document));
+        for (const { name, shape } of planted) {
+          const path = `skills/${name}/SKILL.md`;
+          if (shape === "valid")
+            write(dir, path, "---\nname: s\ndescription: d\n---\n\nbody\n");
+          if (shape === "noFrontmatter") write(dir, path, "body only\n");
+          if (shape === "noDescription")
+            write(dir, path, "---\nname: s\n---\n\nbody\n");
+          if (shape === "noName")
+            write(dir, path, "---\ndescription: d\n---\n\nbody\n");
+          if (shape === "directory") write(dir, `${path}/inside.txt`, "x\n");
+          if (shape === "absent") write(dir, `skills/${name}/notes.md`, "x\n");
+        }
 
         const report = await readPlugin(dir);
-        // Битый mcp.json не валит плагин: манифест остаётся принятым.
-        assert.notEqual(report.manifest, null);
-        for (const [name, server] of Object.entries(report.mcp)) {
-          assert.equal(typeof name, "string");
-          if (server.type !== "stdio") {
-            assert.match(server.url, /^https?:\/\//u);
-            continue;
-          }
-          if (!server.command.startsWith("./")) continue;
-          const target = resolve(report.root, server.command);
-          const inside = relative(report.root, target);
-          assert.ok(
-            inside && !inside.startsWith(".."),
-            `${server.command} escapes the root`,
-          );
-        }
+        const expected = planted
+          .filter(
+            ({ name, shape }) =>
+              shape === "valid" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(name),
+          )
+          .map(({ name }) => name)
+          .sort();
+        assert.deepEqual(
+          report.skills.map((skill) => skill.name).sort(),
+          expected,
+        );
+        // На каждый пропуск — своя строка: молча терять скилл нельзя.
+        for (const { name, shape } of planted)
+          if (shape !== "valid" || !expected.includes(name))
+            assert.ok(
+              report.diagnostics.some((line) =>
+                line.includes(`skills/${name}:`),
+              ),
+              `no diagnostic for ${name}`,
+            );
       },
     ),
     RUNS,

@@ -21,7 +21,7 @@ import { parseFrontmatter } from "./frontmatter.ts";
 // уже у себя, и ход останется вообще без динамических скиллов.
 export const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-export const PLUGIN_SKILLS_DIR = "skills";
+const SKILLS_DIR = "skills";
 
 export type PluginSkillRef = {
   readonly name: string;
@@ -31,7 +31,7 @@ export type PluginSkillRef = {
   readonly dir: string;
 };
 
-export type PluginSkillListing = {
+type PluginSkillListing = {
   readonly skills: readonly PluginSkillRef[];
   readonly diagnostics: readonly string[];
 };
@@ -70,7 +70,7 @@ function skillProblem(markdown: string): string | null {
 export async function listPluginSkills(
   root: string,
 ): Promise<PluginSkillListing> {
-  const skillsDir = join(root, PLUGIN_SKILLS_DIR);
+  const skillsDir = join(root, SKILLS_DIR);
   const diagnostics: string[] = [];
   let stat;
   try {
@@ -129,7 +129,7 @@ export async function listPluginSkills(
     }
     skills.push({
       name: entry.name,
-      path: `${PLUGIN_SKILLS_DIR}/${entry.name}`,
+      path: `${SKILLS_DIR}/${entry.name}`,
       dir,
     });
   }

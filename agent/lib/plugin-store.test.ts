@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
+import { pluginNameProblem } from "./plugin-reader.ts";
 import {
   EMPTY_PLUGINS_STATE,
   enabledPlugins,
@@ -184,9 +185,11 @@ const rawState = fc.oneof(
         fc.oneof(
           fc.record(
             {
+              // Алфавит имён нарочно крошечный: повторы должны выпадать часто,
+              // иначе дедупликация никогда бы не проверялась.
               name: fc.oneof(
-                fc.constantFrom("demo", "a.b", "Bad Name", ""),
-                fc.string(),
+                fc.constantFrom("demo", "alpha", "demo", "a.b", "Bad Name", ""),
+                fc.string({ maxLength: 4 }),
               ),
               source: fc.oneof(fc.string(), fc.integer()),
               ref: fc.string(),
@@ -196,7 +199,9 @@ const rawState = fc.oneof(
               trusted: fc.oneof(fc.boolean(), fc.string()),
               installedAt: fc.string(),
             },
-            { requiredKeys: [] },
+            // Имя есть всегда: запись без имени выпадает раньше всех прочих
+            // проверок, и генератор без имён проверял бы одну ветку из пяти.
+            { requiredKeys: ["name"] },
           ),
           fc.string(),
           fc.constant(null),
@@ -214,13 +219,18 @@ test("property: any JSON becomes a state, and normalizing twice changes nothing"
       const state = normalizePluginsState(raw);
       for (const market of state.marketplaces)
         assert.equal(typeof market, "string");
+      const names = state.plugins.map((item) => item.name);
+      // Имя записи — имя папки: всё, что сюда доехало, обязано быть годным именем,
+      // единственным и отсортированным, иначе `sync` полез бы не в ту папку.
       for (const item of state.plugins) {
-        assert.equal(typeof item.name, "string");
+        assert.equal(pluginNameProblem(item.name), null);
         assert.equal(typeof item.enabled, "boolean");
         assert.equal(typeof item.trusted, "boolean");
         assert.equal(typeof item.sha, "string");
         assert.equal(typeof item.digest, "string");
       }
+      assert.deepEqual(names, [...new Set(names)], "names must be unique");
+      assert.deepEqual(names, [...names].sort(), "names must be sorted");
       assert.deepEqual(normalizePluginsState(state), state);
     }),
     RUNS,

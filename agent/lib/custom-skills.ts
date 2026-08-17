@@ -16,7 +16,7 @@
 // одной строкой в лог, остальные скиллы отдаются.
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { dataDir } from "./data-dir.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { listPluginSkills, SAFE_SKILL_NAME } from "./plugin-skills.ts";
@@ -275,8 +275,8 @@ export async function readLiveSkills(
   const skills: Record<string, CustomSkill> = { ...own };
   const owner = new Map<string, string>();
   for (const plugin of enabledPlugins(state)) {
-    const skillsDir = join(pluginRoot(data, plugin.name), "skills");
-    const listing = await listPluginSkills(pluginRoot(data, plugin.name));
+    const root = pluginRoot(data, plugin.name);
+    const listing = await listPluginSkills(root);
     for (const line of listing.diagnostics)
       log(`[skills] plugin ${plugin.name}: ${line}`);
     for (const ref of listing.skills) {
@@ -295,7 +295,7 @@ export async function readLiveSkills(
       }
       owner.set(ref.name, plugin.name);
       const skill = await readOne(
-        skillsDir,
+        dirname(ref.dir),
         ref.name,
         "package",
         ref.name,
