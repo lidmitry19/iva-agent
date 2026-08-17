@@ -161,9 +161,15 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.3.25 · 17.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.3.26 · 17.08.2026 — expand the latest releases</b></summary>
 
 ### 17.08.2026
+
+#### v0.3.26
+
+- Plugins by name from a Marketplace: `iva plugin add trace` finds the plugin in an `.agents/plugins/marketplace.json` list (the Codex convention — a path string or `local | url | git-subdir`; `npm` and `policy` entries are skipped aloud) and installs it through the same path as a folder or a git URL. `iva plugin marketplace add | remove | list` manage your lists, `iva plugin list --available` shows what is on offer; the default list is `smixs/iva-plugins`. Lists are cached under `data/marketplace-cache/`; offline, the cache is used and marked as possibly stale. Only `https://`, `ssh://` and `git@host:` are accepted — `file://` and local paths from a foreign list are refused, and plugin git never waits for a password in the terminal. A name offered by two lists is refused with an `add <name>@<list>` hint.
+- Plugin code is built into the version: a plugin with an eve Extension under `sh.iva/` now rides the update rails — a copy inside the version, `npm ci`, `eve extension build` with the very eve that runs Iva, a mount under its own namespace, then probe, flip and restart. The plugin's config is read from `data/custom/plugins/<name>.config.json` at start, never baked into the build. A failed build on `add | update | enable` rolls the install back and leaves the running version alone; on `iva update` the version is built without that plugin, the plugin is switched off and one Alert says what to do. `iva doctor` reports whether each plugin's code is built into the current version. Verified against the real eve 0.30.8, not only fakes.
+- `iva trace` reads the turn journal: `iva trace tail` streams events live (`--since N` prints the last N lines first), `iva trace show` lists the last 20 turns, `iva trace show <turn_12 | tg:<chat>:<message> | session id | last>` prints one turn with its steps, tools and subagent (`--full` without the cap, `--json` raw lines), `iva trace open` prints the viewer address and a ready ssh tunnel command. Control characters in content never reach the terminal. The contract in `docs/trace.md` now says how night turns stitch: inside one session, turns are split by `turn_N`, and a line without a turn key belongs to the most recent open turn of its session.
 
 #### v0.3.25
 
