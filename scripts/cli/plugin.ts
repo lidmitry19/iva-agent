@@ -343,12 +343,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       }
       step(`Installing ${formatPluginSource(source)}`);
 
-      const { entry, report } = await locked(data, () =>
-        install(data, state, source, null),
-      );
-      await writePluginsState(data, {
-        ...upsertPlugin(state, entry),
-        riskNoticeShownAt: state.riskNoticeShownAt ?? now().toISOString(),
+      // Установка и запись состояния — под одним локом: между ними вторая копия
+      // команды успела бы записать своё, и одна из двух записей пропала бы.
+      const { entry, report } = await locked(data, async () => {
+        const installed = await install(data, state, source, null);
+        await writePluginsState(data, {
+          ...upsertPlugin(state, installed.entry),
+          riskNoticeShownAt: state.riskNoticeShownAt ?? now().toISOString(),
+        });
+        return installed;
       });
 
       ok(`${entry.name} installed`);
