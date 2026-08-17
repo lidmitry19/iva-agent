@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { leftoverPluginDirs } from "./plugin.ts";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
+import {
+  installedPluginUnits,
+  mcpUnitName,
+  serviceUnitName,
+} from "../lib/plugin-units.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
 import { readMemoryMaintenanceReport } from "../lib/memory-maintenance.ts";
@@ -34,6 +39,9 @@ type RollupEntry = {
 };
 
 type RollupStatus = Record<string, RollupEntry | null | undefined>;
+
+/** Сколько ждём `/health` прокси: он на loopback, и медленный ответ — уже симптом. */
+const HEALTH_TIMEOUT_MS = 1500;
 
 export function createDoctorCommand(
   runtime: CliRuntime,
@@ -475,6 +483,27 @@ export function createDoctorCommand(
       );
     }
 
+    /**
+     * Отвечает ли MCP proxy на `/health`. Юнит может быть active и при мёртвом
+     * сервере за ним — прокси уходит вслед за ребёнком, но между падением и рестартом
+     * есть окно, и «active» о нём не знает. Bearer здесь не нужен: `/health` отвечает
+     * без него именно для этой проверки.
+     */
+    async function proxyHealthy(port: number): Promise<boolean> {
+      try {
+        const answer = await fetch(`http://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        });
+        if (!answer.ok) return false;
+        const body: unknown = await answer.json();
+        return (
+          typeof body === "object" && body !== null && "ok" in body && !!body.ok
+        );
+      } catch {
+        return false;
+      }
+    }
+
     async function checkPlugins(): Promise<void> {
       // Плагины читает authored tree, а доктор обязан работать и на установке, где
       // его нет (ADR-0003) — отсюда загрузка по требованию и честная строка вместо
@@ -561,6 +590,71 @@ export function createDoctorCommand(
         }
       }
 
+      // Юниты плагинов: те, что должны быть, и те, что лежат лишними. Список
+      // ожидаемых берётся из `plugins.json` — что получило порт, то имеет юнит.
+      const expected = new Map<string, { plugin: string; port?: number }>();
+      for (const entry of state.plugins) {
+        if (!entry.enabled || !entry.trusted) continue;
+        for (const [server, ports] of Object.entries(entry.mcp ?? {}))
+          expected.set(mcpUnitName(entry.name, server), {
+            plugin: entry.name,
+            port: ports.port,
+          });
+        for (const service of Object.keys(entry.services ?? {}))
+          expected.set(serviceUnitName(entry.name, service), {
+            plugin: entry.name,
+          });
+      }
+      if (hasSystemd()) {
+        for (const [unit, about] of [...expected].sort(([a], [b]) =>
+          a < b ? -1 : 1,
+        )) {
+          if (!existsSync(join(UNIT_DIR, unit))) {
+            warn(
+              `plugin ${about.plugin}: ${unit} is missing — run: iva plugin sync`,
+            );
+            warnN++;
+            continue;
+          }
+          if (!systemd.isActive(unit)) {
+            bad(
+              `plugin ${about.plugin}: ${unit} is not running — check: journalctl --user -u ${unit} -n 100 --no-pager`,
+            );
+            badN++;
+            continue;
+          }
+          // Живой прокси обязан ещё и отвечать: юнит active говорит только о процессе.
+          if (about.port !== undefined) {
+            if (await proxyHealthy(about.port)) {
+              ok(
+                `plugin ${about.plugin}: ${unit} answers on 127.0.0.1:${about.port}`,
+              );
+              okN++;
+            } else {
+              warn(
+                `plugin ${about.plugin}: ${unit} runs but does not answer on 127.0.0.1:${about.port} — check: journalctl --user -u ${unit} -n 100 --no-pager`,
+              );
+              warnN++;
+            }
+            continue;
+          }
+          ok(`plugin ${about.plugin}: ${unit} running`);
+          okN++;
+        }
+        for (const unit of installedPluginUnits(UNIT_DIR)) {
+          if (expected.has(unit)) continue;
+          warn(
+            `${unit} belongs to no enabled and trusted plugin — run: iva plugin sync`,
+          );
+          warnN++;
+        }
+      } else if (expected.size > 0) {
+        warn(
+          `${expected.size} plugin unit(s) are not checked: systemd is not available here`,
+        );
+        warnN++;
+      }
+
       for (const name of folders) {
         if (state.plugins.some((entry) => entry.name === name)) continue;
         warn(
@@ -576,8 +670,9 @@ export function createDoctorCommand(
       }
     }
 
-    // Plugins (ADR-0009) идут последними и в обоих выходах доктора: манифесты и
-    // plugins.json. Сборка кода плагина и юниты MCP proxy добавятся вместе с ними.
+    // Plugins (ADR-0009) идут последними и в обоих выходах доктора: манифесты,
+    // plugins.json, сборка кода в работающей версии и юниты — MCP proxy с его
+    // `/health` и сервисы плагина.
     async function finish(): Promise<void> {
       await checkPlugins();
       log();

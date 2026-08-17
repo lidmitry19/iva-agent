@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -631,11 +632,20 @@ test("doctor says whether an enabled plugin's code is in the version that runs",
   store.complete(name);
   store.activate(name);
   const data = join(home, "data");
-  plantStorePlugin(data, "carrier");
+  // Заявка на namespace плюс `sh.iva/package.json` — это и есть код (ADR-0009).
+  plantStorePlugin(
+    data,
+    "carrier",
+    JSON.stringify({
+      $schema: PLUGIN_SCHEMA_URL,
+      name: "carrier",
+      extensions: { "sh.iva": {} },
+    }),
+  );
   mkdirSync(join(pluginRoot(data, "carrier"), "sh.iva"), { recursive: true });
   writeFileSync(
-    join(pluginRoot(data, "carrier"), "sh.iva/index.ts"),
-    "export {};\n",
+    join(pluginRoot(data, "carrier"), "sh.iva/package.json"),
+    "{}\n",
   );
   await writePluginsState(data, {
     marketplaces: [],
@@ -673,5 +683,105 @@ test("doctor says whether an enabled plugin's code is in the version that runs",
   assert.deepEqual(await pluginEvents(dir), [
     ["ok", "plugin carrier: 1 skills, code"],
     ["ok", "plugin carrier: built into current version: yes"],
+  ]);
+});
+
+test("doctor checks the plugin units and the health of every MCP proxy", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const data = join(root, "data");
+  plantStorePlugin(data, "trace");
+  const unitDir = join(root, "systemd");
+  mkdirSync(unitDir, { recursive: true });
+  // Живой прокси: настоящий сервер на loopback, отвечающий как `/health` прокси.
+  const alive = createServer((request, response) => {
+    response
+      .writeHead(request.url === "/health" ? 200 : 404, {
+        "content-type": "application/json",
+      })
+      .end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((settle) => alive.listen(0, "127.0.0.1", settle));
+  t.after(() => new Promise<void>((settle) => alive.close(() => settle())));
+  const answering = (alive.address() as { port: number }).port;
+  // Порт, на котором никто не слушает: юнит active, а сервера за ним нет.
+  const silent = createServer();
+  await new Promise<void>((settle) => silent.listen(0, "127.0.0.1", settle));
+  const dead = (silent.address() as { port: number }).port;
+  await new Promise<void>((settle) => silent.close(() => settle()));
+
+  await writePluginsState(data, {
+    marketplaces: [],
+    plugins: [
+      {
+        name: "trace",
+        source: "./trace",
+        ref: "",
+        sha: "",
+        digest: "",
+        enabled: true,
+        trusted: true,
+        installedAt: "2026-08-17T12:00:00.000Z",
+        mcp: { alive: { port: answering }, quiet: { port: dead } },
+        services: { web: { port: 8726 }, gone: { port: 8727 } },
+      },
+    ],
+  });
+  for (const unit of [
+    "iva-mcp-trace-alive.service",
+    "iva-mcp-trace-quiet.service",
+    "iva-plugin-trace-web.service",
+    // Юнит без записи: остался от снятого плагина.
+    "iva-mcp-orphan-srv.service",
+  ])
+    writeFileSync(join(unitDir, unit), "[Service]\n");
+
+  const events: Array<[string, string]> = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    UNIT_DIR: unitDir,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    hasSystemd: () => true,
+    systemd: {
+      ...createCliRuntime(root).systemd,
+      isActive: (unit: string) => unit !== "iva-plugin-trace-web.service",
+      isEnabled: () => true,
+    },
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+
+  const said = events.filter(([, message]) =>
+    /plugin|iva-mcp|iva-plugin/u.test(message),
+  );
+  assert.deepEqual(said, [
+    ["ok", "plugin trace: 1 skills"],
+    [
+      "ok",
+      `plugin trace: iva-mcp-trace-alive.service answers on 127.0.0.1:${answering}`,
+    ],
+    [
+      "warn",
+      `plugin trace: iva-mcp-trace-quiet.service runs but does not answer on 127.0.0.1:${dead} — check: journalctl --user -u iva-mcp-trace-quiet.service -n 100 --no-pager`,
+    ],
+    [
+      "warn",
+      "plugin trace: iva-plugin-trace-gone.service is missing — run: iva plugin sync",
+    ],
+    [
+      "bad",
+      "plugin trace: iva-plugin-trace-web.service is not running — check: journalctl --user -u iva-plugin-trace-web.service -n 100 --no-pager",
+    ],
+    [
+      "warn",
+      "iva-mcp-orphan-srv.service belongs to no enabled and trusted plugin — run: iva plugin sync",
+    ],
   ]);
 });
