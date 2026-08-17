@@ -168,20 +168,23 @@ test("property: содержимое обрезано по потолку и п�
 test("property: captureContent=false не пропускает содержимое, но оставляет размеры", () => {
   fc.assert(
     fc.property(event, (input) => {
-      const parsed = parse(
-        traceLine(input, { now: AT, captureContent: false }),
-      );
-      const data = parsed.data as Record<string, unknown>;
+      const data = parse(traceLine(input, { now: AT, captureContent: false }))
+        .data as Record<string, unknown>;
 
-      for (const [key, value] of Object.entries(input.content ?? {})) {
-        assert.equal(data[`${key}Chars`], value.length);
-        // Содержимое могло совпасть с полем data — сравниваем именно со значением.
-        if (key in data)
-          assert.notEqual(
-            data[key],
-            capTraceString(value, TRACE_CONTENT_LIMIT),
-          );
-      }
+      // Событие без содержимого вовсе — эталон. Выключенный тумблер обязан дать ровно
+      // его же плюс размеры: сравнение с эталоном ловит и утечку значения, и случай,
+      // когда ключ содержимого совпал с ключом data (тогда значение из data — законно).
+      const bare = parse(
+        traceLine(
+          { ...input, content: undefined },
+          { now: AT, captureContent: false },
+        ),
+      ).data as Record<string, unknown>;
+      const expected: Record<string, unknown> = { ...bare };
+      for (const [key, value] of Object.entries(input.content ?? {}))
+        expected[`${key}Chars`] = value.length;
+
+      assert.deepEqual(data, expected);
     }),
     RUNS,
   );
