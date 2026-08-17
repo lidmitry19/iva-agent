@@ -311,6 +311,7 @@ test("customSkillsDir follows ASSISTANT_DATA_DIR", () => {
 });
 
 // --- Живые скиллы: свой Custom layer плюс включённые плагины (ADR-0009) ---------
+// Папка плагинов одна — data/custom/plugins/; состояние одно — plugins.json.
 
 function pluginEntry(name: string, enabled = true): PluginEntry {
   return {
@@ -325,7 +326,7 @@ function pluginEntry(name: string, enabled = true): PluginEntry {
   };
 }
 
-/** Временный data-каталог: плагины в сторе, состояние в plugins.json. */
+/** Временный data-каталог: плагины в своей папке, состояние в plugins.json. */
 async function liveWorld(
   plugins: readonly PluginEntry[],
   plant: (data: string) => void,
@@ -570,4 +571,26 @@ test("the skill that loses its name costs the turn no reads at all", async () =>
   assert.deepEqual(log, [
     "[skills] plugin skill viewer from beta skipped: alpha already provides it",
   ]);
+});
+
+test("a plugin's own complaint is logged once per process, not once per turn", async () => {
+  const data = await liveWorld([pluginEntry("noisy")], (dir) => {
+    write(
+      dir,
+      "custom/plugins/noisy/skills/good/SKILL.md",
+      "---\nname: good\ndescription: Good.\n---\n\nBody.\n",
+    );
+    write(dir, "custom/plugins/noisy/skills/_shared/helpers.md", "no skill\n");
+  });
+
+  const first = await live(data);
+  assert.deepEqual(Object.keys(first.skills), ["good"]);
+  assert.deepEqual(first.log, [
+    "[skills] plugin noisy: skills/_shared: skipped: name must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+  ]);
+
+  // Диск не изменился — значит и сказать нечего: строка ушла в лог один раз.
+  const second = await live(data);
+  assert.deepEqual(Object.keys(second.skills), ["good"]);
+  assert.deepEqual(second.log, []);
 });

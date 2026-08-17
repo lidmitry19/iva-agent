@@ -185,8 +185,11 @@ export async function copyPluginTree(
  */
 export function swapIntoStore(staged: string, store: string): void {
   mkdirSync(dirname(store), { recursive: true });
+  // Имя временной папки начинается с точки, а имя плагина по спеке начинается с
+  // буквы или цифры: пересечься они не могут, поэтому уборка недоделок никогда не
+  // унесёт установленный плагин (`helper.replaced-x` — законное имя плагина).
   const displaced = existsSync(store)
-    ? `${store}.replaced-${randomUUID().slice(0, 8)}`
+    ? join(dirname(store), `.replaced-${randomUUID().slice(0, 8)}`)
     : null;
   if (displaced) renameSync(store, displaced);
   try {

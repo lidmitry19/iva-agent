@@ -61,7 +61,7 @@ const EXPECTED_INVENTORY_SHA256 =
 // `scripts/lib/plugin-core.ts`, `scripts/lib/plugin-install.ts` and
 // `scripts/lib/plugin-source.ts`. Their scoped suite (the reader anchors and properties,
 // the store, the source parser, the install seam, and the `iva plugin` and doctor CLI
-// tests) reports all seven, 97.41% lines together and no file under 93%, so the blind
+// tests) reports all seven, 97.61% lines together and no file under 93%, so the blind
 // spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [

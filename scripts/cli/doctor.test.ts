@@ -604,16 +604,16 @@ test("doctor sees the leftovers of an interrupted install that its dot filter hi
   writeFileSync(join(root, ".env"), "present=true\n");
   const data = join(root, "data");
   mkdirSync(join(pluginRoot(data, ".staging-xyz")), { recursive: true });
-  mkdirSync(join(pluginRoot(data, "demo.replaced-ab12")), { recursive: true });
+  mkdirSync(join(pluginRoot(data, ".replaced-ab12")), { recursive: true });
 
   assert.deepEqual(await pluginEvents(root), [
     [
       "warn",
-      "plugin folder .staging-xyz is a leftover of an interrupted install — run: iva plugin sync",
+      "plugin folder .replaced-ab12 is a leftover of an interrupted install — run: iva plugin sync",
     ],
     [
       "warn",
-      "plugin folder demo.replaced-ab12 is a leftover of an interrupted install — run: iva plugin sync",
+      "plugin folder .staging-xyz is a leftover of an interrupted install — run: iva plugin sync",
     ],
   ]);
 });

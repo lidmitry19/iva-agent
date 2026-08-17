@@ -155,6 +155,67 @@ export async function readPluginsStateFile(
   }
 }
 
+/**
+ * Тот же текст без лишних запятых: дубли, висячая перед `}`/`]` и ведущая сразу
+ * после `[`/`{`. Сканер идёт по символам и знает про строки, поэтому запятая внутри
+ * `"a,,b"` остаётся на месте — чинить надо разметку, а не данные владельца.
+ */
+function withoutStrayCommas(raw: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < raw.length; index++) {
+    const character = raw[index];
+    if (inString) {
+      out += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      out += character;
+      continue;
+    }
+    if (character === ",") {
+      let next = index + 1;
+      while (next < raw.length && /\s/u.test(raw[next])) next++;
+      if (raw[next] === "," || raw[next] === "}" || raw[next] === "]") continue;
+      let previous = out.length - 1;
+      while (previous >= 0 && /\s/u.test(out[previous])) previous--;
+      if (previous < 0 || out[previous] === "[" || out[previous] === "{")
+        continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
+/**
+ * Спасти состояние из файла, который уже не читается как JSON. Сначала честный
+ * разбор, затем один проход починки разметки. Ничего не вышло — `null`, и решать,
+ * что делать дальше, вызывающему.
+ */
+export async function salvagePluginsStateFile(
+  file: string,
+): Promise<PluginsState | null> {
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+  for (const text of [raw, withoutStrayCommas(raw)]) {
+    try {
+      return normalizePluginsState(JSON.parse(text));
+    } catch {
+      // Следующая попытка; последняя вернёт null.
+    }
+  }
+  return null;
+}
+
 /** То же для инсталляции: `data/custom/plugins.json`. */
 export function readPluginsStateSafe(
   dataDir: string,

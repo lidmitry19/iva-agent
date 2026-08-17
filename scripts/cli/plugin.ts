@@ -18,14 +18,15 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  renameSync,
   rmSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { PluginManifest, PluginReport } from "#lib/plugin-reader.ts";
 import type { PluginEntry, PluginsState } from "#lib/plugin-store.ts";
-import { loadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
+import { tryLoadPluginCore, type PluginCore } from "../lib/plugin-core.ts";
 import {
   formatPluginSource,
   parsePluginSource,
@@ -51,9 +52,10 @@ type Staged = {
   readonly ref: string;
 };
 
-/** Префиксы наших временных папок; всё остальное в каталоге плагинов не наше. */
+// Префиксы наших временных папок. Обе начинаются с точки, а имя плагина по спеке
+// начинается с буквы или цифры (§5.5) — значит уборка не может задеть плагин.
 const STAGING_PREFIX = ".staging-";
-const REPLACED_MARK = ".replaced-";
+const REPLACED_PREFIX = ".replaced-";
 
 /** Пришло из ADR-0008 «Принятый риск»: показывается один раз, перед первой установкой. */
 const RISK_EN =
@@ -73,7 +75,7 @@ export function leftoverPluginDirs(pluginsDirectory: string): string[] {
       (entry) =>
         entry.isDirectory() &&
         (entry.name.startsWith(STAGING_PREFIX) ||
-          entry.name.includes(REPLACED_MARK)),
+          entry.name.startsWith(REPLACED_PREFIX)),
     )
     .map((entry) => entry.name)
     .sort();
@@ -133,8 +135,8 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       pluginsDir,
       pluginsStateFile,
       readPluginsState,
-      readPluginsStateFile,
       readPluginsStateSafe,
+      salvagePluginsStateFile,
       removePlugin,
       upsertPlugin,
       writePluginsState,
@@ -342,17 +344,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         );
       const source = parsePluginSource(raw);
       const data = dataDirAbs();
-      const state = await readPluginsState(data);
 
-      if (!state.riskNoticeShownAt) {
-        warn(translate(RISK_EN, RISK_RU));
-        log();
-      }
-      step(`Installing ${formatPluginSource(source)}`);
-
-      // Установка и запись состояния — под одним локом: между ними вторая копия
-      // команды успела бы записать своё, и одна из двух записей пропала бы.
+      // Состояние читается и пишется ВНУТРИ лока: прочитать до лока значило бы
+      // записать поверх чужого `disable`, который случился, пока шла установка.
       const { entry, report } = await locked(data, async () => {
+        const state = await readPluginsState(data);
+        if (!state.riskNoticeShownAt) {
+          warn(translate(RISK_EN, RISK_RU));
+          log();
+        }
+        step(`Installing ${formatPluginSource(source)}`);
         const installed = await install(data, state, source, null);
         await writePluginsState(data, {
           ...upsertPlugin(state, installed.entry),
@@ -431,13 +432,20 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     async function toggle(enabled: boolean): Promise<void> {
       const data = dataDirAbs();
-      const state = await readPluginsState(data);
-      const entry = mustFind(state, args[0]);
+      const entry = await locked(data, async () => {
+        const state = await readPluginsState(data);
+        const found = mustFind(state, args[0]);
+        if (found.enabled !== enabled)
+          await writePluginsState(
+            data,
+            upsertPlugin(state, { ...found, enabled }),
+          );
+        return found;
+      });
       if (entry.enabled === enabled) {
         ok(`${entry.name} is already ${enabled ? "enabled" : "disabled"}`);
         return;
       }
-      await writePluginsState(data, upsertPlugin(state, { ...entry, enabled }));
       ok(
         enabled
           ? translate(
@@ -453,11 +461,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     async function remove(): Promise<void> {
       const data = dataDirAbs();
-      const state = await readPluginsState(data);
-      const entry = mustFind(state, args[0]);
-      await locked(data, async () => {
-        rmSync(pluginRoot(data, entry.name), { recursive: true, force: true });
-        await writePluginsState(data, removePlugin(state, entry.name));
+      const entry = await locked(data, async () => {
+        const state = await readPluginsState(data);
+        const found = mustFind(state, args[0]);
+        rmSync(pluginRoot(data, found.name), { recursive: true, force: true });
+        await writePluginsState(data, removePlugin(state, found.name));
+        return found;
       });
       ok(
         translate(
@@ -474,15 +483,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     async function editedInPlace(
       root: string,
       entry: PluginEntry,
-    ): Promise<string | null> {
+    ): Promise<{
+      readonly kind: "edited" | "unreadable";
+      readonly why: string;
+    } | null> {
       if (!entry.digest || !existsSync(root)) return null;
       try {
         const current = await pluginTreeDigest(root);
-        return current === entry.digest
-          ? null
-          : "the folder was edited in place";
+        return current === entry.digest ? null : { kind: "edited", why: root };
       } catch (error) {
-        return `the folder is unreadable: ${(error as Error).message}`;
+        return { kind: "unreadable", why: (error as Error).message };
       }
     }
 
@@ -502,10 +512,15 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       const changed = force ? null : await editedInPlace(root, entry);
       if (changed) {
         warn(
-          translate(
-            `${entry.name}: ${changed} (${root}) — not touching it; add --force to replace it`,
-            `${entry.name}: ${changed} (${root}) — не трогаю; заменить принудительно: --force`,
-          ),
+          changed.kind === "edited"
+            ? translate(
+                `${entry.name}: the folder was edited in place (${changed.why}) — not touching it; add --force to replace it`,
+                `${entry.name}: папку правили руками (${changed.why}) — не трогаю; заменить принудительно: --force`,
+              )
+            : translate(
+                `${entry.name}: the folder cannot be read (${changed.why}) — not touching it; add --force to replace it`,
+                `${entry.name}: папка не читается (${changed.why}) — не трогаю; заменить принудительно: --force`,
+              ),
         );
         return state;
       }
@@ -527,14 +542,16 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 
     async function update(): Promise<void> {
       const data = dataDirAbs();
-      const state = await readPluginsState(data);
-      const targets = args[0] ? [mustFind(state, args[0])] : [...state.plugins];
-      if (targets.length === 0) {
-        ok("no plugins to update");
-        return;
-      }
       const failed: string[] = [];
       await locked(data, async () => {
+        const state = await readPluginsState(data);
+        const targets = args[0]
+          ? [mustFind(state, args[0])]
+          : [...state.plugins];
+        if (targets.length === 0) {
+          ok("no plugins to update");
+          return;
+        }
         let next = state;
         for (const entry of targets) {
           try {
@@ -550,10 +567,24 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         throw new Error(`could not update: ${failed.join(", ")}`);
     }
 
-    /** Что удалось спасти из повреждённого plugins.json и его бэкапов. */
+    /**
+     * Повреждённый файл сначала уезжает в бэкап и только потом переписывается.
+     * Порядок именно такой: `sync` восстанавливает состояние по папкам, а имена
+     * папок не помнят ни источник, ни sha, ни доверие — стереть единственную копию
+     * этих полей и отчитаться зелёной галочкой было бы худшим исходом из всех.
+     */
+    function backUpDamaged(data: string): string {
+      const file = pluginsStateFile(data);
+      const stamp = now().toISOString().replace(/[:.]/gu, "-");
+      const backup = `${file}.corrupt-${stamp}`;
+      renameSync(file, backup);
+      return backup;
+    }
+
+    /** Что удалось спасти из повреждённого plugins.json и прежних его копий. */
     async function salvageState(data: string): Promise<PluginsState> {
       const file = pluginsStateFile(data);
-      const directory = join(file, "..");
+      const directory = dirname(file);
       const backups = existsSync(directory)
         ? readdirSync(directory)
             .filter((name) => name.startsWith(`${basename(file)}.corrupt-`))
@@ -561,24 +592,29 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
             .reverse()
         : [];
       for (const backup of backups) {
-        const { state, damaged } = await readPluginsStateFile(
-          join(directory, backup),
-        );
-        if (!damaged && state.plugins.length) {
-          ok(`recovered ${state.plugins.length} entries from ${backup}`);
-          return state;
+        const salvaged = await salvagePluginsStateFile(join(directory, backup));
+        if (salvaged?.plugins.length) {
+          ok(
+            `recovered ${salvaged.plugins.length} plugin(s) and ${salvaged.marketplaces.length} marketplace(s) from ${backup}`,
+          );
+          return salvaged;
         }
       }
+      warn(
+        "nothing could be read out of the damaged file — rebuilding from data/custom/plugins/, so sources, refs and trust flags are lost",
+      );
       return { marketplaces: [], plugins: [] };
     }
 
     async function sync(): Promise<void> {
       const data = dataDirAbs();
-      const read = await readPluginsStateSafe(data);
       await locked(data, async () => {
+        const read = await readPluginsStateSafe(data);
         let next = read.state;
         if (read.damaged) {
           warn(read.damaged.message);
+          const backup = backUpDamaged(data);
+          warn(`kept the damaged file as ${basename(backup)}`);
           next = await salvageState(data);
         }
 
@@ -662,6 +698,11 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         if (!next.riskNoticeShownAt && next.plugins.length)
           next = { ...next, riskNoticeShownAt: now().toISOString() };
         await writePluginsState(data, next);
+        const sourceless = next.plugins.filter((entry) => !entry.source);
+        if (sourceless.length)
+          warn(
+            `no source recorded for ${sourceless.map((entry) => entry.name).join(", ")} — reinstall each with: iva plugin add <source>`,
+          );
         if (!read.damaged && failed.length === 0)
           ok(
             translate(
@@ -701,7 +742,12 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
     await resolveTranslate();
     if (sub === undefined || sub === "help" || sub === "--help" || sub === "-h")
       return help();
-    return run(await loadPluginCore(), sub, rest);
+    const core = await tryLoadPluginCore();
+    if (!core)
+      throw new Error(
+        "plugins are not available: the agent tree is missing — run: iva update",
+      );
+    return run(core, sub, rest);
   }
 
   return { cmdPlugin };

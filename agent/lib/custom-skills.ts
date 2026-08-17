@@ -237,9 +237,11 @@ export async function readCustomSkills(
   return skills;
 }
 
-// Один битый plugins.json не должен превращаться в строку лога на каждом ходу:
-// сказать о нём стоит один раз за жизнь процесса.
+// Одна и та же жалоба не должна повторяться на каждом ходу: и про битый
+// plugins.json, и про кривой скилл плагина достаточно сказать один раз за жизнь
+// процесса. Набор маленький и ограничен числом скиллов на диске.
 let damagedStateReported = false;
+const reportedDiagnostics = new Set<string>();
 
 /**
  * Все скиллы, которые агент видит с диска на этом ходу: свой Custom layer плюс
@@ -277,8 +279,12 @@ export async function readLiveSkills(
   for (const plugin of enabledPlugins(state)) {
     const root = pluginRoot(data, plugin.name);
     const listing = await listPluginSkills(root);
-    for (const line of listing.diagnostics)
+    for (const line of listing.diagnostics) {
+      const once = `${plugin.name}\u0000${line}`;
+      if (reportedDiagnostics.has(once)) continue;
+      reportedDiagnostics.add(once);
       log(`[skills] plugin ${plugin.name}: ${line}`);
+    }
     for (const ref of listing.skills) {
       if (Object.hasOwn(own, ref.name)) {
         log(

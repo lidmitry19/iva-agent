@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -413,7 +414,12 @@ test("update moves the pinned sha and prints old → new", async () => {
   );
 });
 
-test("update refuses an edited folder for every kind of source, until --force", async () => {
+// Источник-подпапка здесь не проверяется намеренно: подпапку выражает только форма
+// `owner/repo/sub`, а она резолвится в github.com — до локального bare-репозитория
+// такому источнику не дойти. Подпапка целиком закрыта в scripts/lib/plugin-install.test.ts
+// («a subdirectory source checks out only that subdirectory»), а правило грязного
+// дерева от вида источника не зависит: отпечаток снимается с папки, а не с git.
+test("update refuses an edited git checkout until --force", async () => {
   const source = remote("demo");
   const root = home();
   const { cmdPlugin, events, data } = commands(root);
@@ -621,16 +627,37 @@ test("leftovers of an interrupted install are reported, then swept under the loc
   const { cmdPlugin, events, data } = commands(root);
   const plugins = join(data, "custom/plugins");
   mkdirSync(join(plugins, ".staging-abc"), { recursive: true });
-  mkdirSync(join(plugins, "half.replaced-9f"), { recursive: true });
+  mkdirSync(join(plugins, ".replaced-9f"), { recursive: true });
+  // Законное имя плагина, которое сметало бы вместе с недоделками, если бы уборка
+  // смотрела на `.replaced-` где угодно в имени, а не в его начале.
+  plantPlugin(join(plugins, "helper.replaced-x"), "helper.replaced-x", "beta");
 
   await cmdPlugin(["list"]);
   assert.match(messages(events, "warn"), /\.staging-abc is a leftover/u);
-  assert.match(messages(events, "warn"), /half\.replaced-9f is a leftover/u);
+  assert.match(messages(events, "warn"), /\.replaced-9f is a leftover/u);
+  assert.doesNotMatch(
+    messages(events, "warn"),
+    /helper\.replaced-x is a leftover/u,
+  );
 
   events.length = 0;
   await cmdPlugin(["add", folder]);
   assert.match(messages(events, "warn"), /cleaned 2 leftover folder\(s\)/u);
   assert.deepEqual(leftoverPluginDirs(plugins), []);
+  assert.ok(
+    existsSync(join(plugins, "helper.replaced-x", "plugin.json")),
+    "a plugin whose name contains .replaced- must survive",
+  );
+
+  await cmdPlugin(["sync"]);
+  assert.ok(existsSync(join(plugins, "helper.replaced-x", "plugin.json")));
+  const named = await readPluginsState(data);
+  assert.ok(
+    named.plugins.some((entry) => entry.name === "helper.replaced-x"),
+    "sync takes the plugin back, it does not sweep it",
+  );
+  await cmdPlugin(["update"]);
+  assert.ok(existsSync(join(plugins, "helper.replaced-x", "plugin.json")));
 });
 
 test("a folder without an entry is adopted by add instead of dead-ending", async () => {
@@ -722,7 +749,7 @@ test("sync recovers entries from a backup an older version left behind", async (
   writeFileSync(pluginsStateFile(data), "{ broken");
 
   await cmdPlugin(["sync"]);
-  assert.match(messages(events, "ok"), /recovered 1 entries/u);
+  assert.match(messages(events, "ok"), /recovered 1 plugin\(s\)/u);
   const repaired = await readPluginsState(data);
   assert.equal(repaired.plugins[0].source, source.url);
   assert.equal(repaired.plugins[0].sha, source.sha);
@@ -748,4 +775,91 @@ test("the components are on screen before anything moves into place", async () =
     chmodSync(plugins, 0o700);
   }
   assert.deepEqual((await readPluginsState(data)).plugins, []);
+});
+
+test("a single stray comma costs nothing: sync keeps the file and recovers every field", async () => {
+  const source = remote("demo");
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root);
+
+  await cmdPlugin(["add", source.url]);
+  await cmdPlugin(["disable", "demo"]);
+  const before = await readPluginsState(data);
+  const file = pluginsStateFile(data);
+  const marketplaced = JSON.stringify({
+    ...before,
+    marketplaces: ["smixs/iva-plugins"],
+    plugins: [{ ...before.plugins[0], trusted: true }],
+  });
+  // Ровно одна лишняя запятая: JSON уже не читается, данные ещё все на месте.
+  writeFileSync(file, marketplaced.replace('"plugins":[', '"plugins":[,'));
+
+  events.length = 0;
+  await cmdPlugin(["sync"]);
+
+  const after = await readPluginsState(data);
+  assert.deepEqual(after.marketplaces, ["smixs/iva-plugins"]);
+  assert.deepEqual(after.plugins, [{ ...before.plugins[0], trusted: true }]);
+  assert.equal(after.riskNoticeShownAt, before.riskNoticeShownAt);
+
+  // Повреждённая копия сохранена, а не переписана поверх.
+  const backups = readdirSync(join(data, "custom")).filter((name) =>
+    name.startsWith("plugins.json.corrupt-"),
+  );
+  assert.equal(backups.length, 1);
+  assert.equal(
+    readFileSync(join(data, "custom", backups[0]), "utf8"),
+    marketplaced.replace('"plugins":[', '"plugins":[,'),
+  );
+  assert.match(messages(events, "warn"), /kept the damaged file as/u);
+  assert.match(
+    messages(events, "ok"),
+    /recovered 1 plugin\(s\) and 1 marketplace\(s\)/u,
+  );
+  assert.equal(messages(events, "warn").includes("no source recorded"), false);
+});
+
+test("a plugin folder whose manifest disagrees with its name is never taken back", async () => {
+  const root = home();
+  const { cmdPlugin, events, data } = commands(root);
+  // Папку переименовали руками: имя в манифесте осталось прежним.
+  plantPlugin(join(data, "custom/plugins/wrong-name"), "real-name");
+
+  await cmdPlugin(["sync"]);
+
+  assert.match(
+    messages(events, "bad"),
+    /wrong-name: the manifest calls this plugin "real-name"/u,
+  );
+  assert.deepEqual((await readPluginsState(data)).plugins, []);
+});
+
+test("a disable issued during a slow install is refused, not swallowed", async () => {
+  const source = remote("demo");
+  const root = home();
+  const concurrent: Array<Promise<void>> = [];
+  const second = commands(root);
+  const { cmdPlugin, data } = commands(root, (command, args, result) => {
+    // Момент, когда установка уже держит лок и ещё не дописала состояние.
+    if (command === "git" && args[0] === "fetch" && concurrent.length === 0)
+      concurrent.push(
+        assert.rejects(
+          second.cmdPlugin(["disable", "demo"]),
+          /an update is running/u,
+        ),
+      );
+    return result;
+  });
+
+  await cmdPlugin(["add", source.url]);
+  assert.equal(concurrent.length, 1, "the concurrent command never started");
+  await Promise.all(concurrent);
+
+  // Установка не откатила чужую запись — её просто не было; тумблер работает сразу
+  // после того, как лок отпущен, и переживает следующее чтение.
+  assert.equal((await readPluginsState(data)).plugins[0].enabled, true);
+  await second.cmdPlugin(["disable", "demo"]);
+  assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
+  await second.cmdPlugin(["update", "demo"]);
+  assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
 });
