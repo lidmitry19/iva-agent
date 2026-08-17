@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 221;
+const EXPECTED_PRODUCTION_COUNT = 222;
 const EXPECTED_INVENTORY_SHA256 =
-  "fc70804cfbbc2f61fb41e9624da474ddb5869b1fade307e7f14267b40afa09f6";
+  "bdd76dc63afa4852533f8809f31111c3145c52634096896458b35e50199134af";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -63,6 +63,11 @@ const EXPECTED_INVENTORY_SHA256 =
 // the store, the source parser, the install seam, and the `iva plugin` and doctor CLI
 // tests) reports all seven, 97.61% lines together and no file under 93%, so the blind
 // spot stays 26.
+// The Marketplace came after them, one path: `scripts/lib/marketplace.ts`. Scoped
+// coverage over its own anchors and properties plus the `iva plugin` CLI suite reports
+// it at 99.68% lines, 93.51% branches and 100% functions - the one uncovered pair is
+// the guard that refuses to hand git an argument starting with a dash, which a parsed
+// source can no longer produce. Nothing new is unreported, so the blind spot stays 26.
 // The turn journal (ADR-0010) came next: `agent/lib/trace.ts` and `agent/hooks/trace.ts`.
 // Scoped coverage over `agent/lib/trace.test.ts`, `agent/lib/trace.property.test.ts` and
 // `agent/lib/trace-hook.test.ts` reports them at 97% and 98% lines, so the blind spot
