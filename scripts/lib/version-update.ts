@@ -672,11 +672,14 @@ function deferredNotice(): string {
  */
 export function pluginsOffNotice(failures: readonly PluginFailure[]): string {
   const named = failures.map((failure) => failure.name).join(", ");
+  const one = failures.length === 1;
   return (
-    `these plugins do not build with this version, so they are switched off: ${named}. ` +
-    `Their code and their skills are out until they are fixed. Update one and turn it ` +
-    `back on: iva plugin update <name>, then iva plugin enable <name> - one at a time, ` +
-    `so the one that breaks the build is the one you see.\n${failures[0]?.reason.slice(-1500) ?? ""}`
+    `${one ? "this plugin does" : "these plugins do"} not build with this version, so ` +
+    `${one ? "it is" : "they are"} switched off: ${named}. ` +
+    `${one ? "Its" : "Their"} code and skills are out until fixed. Update and turn back ` +
+    `on: iva plugin update <name>, then iva plugin enable <name>` +
+    `${one ? "" : " - one at a time, so the one that breaks the build is the one you see"}.` +
+    `\n${failures[0]?.reason.slice(-1500) ?? ""}`
   );
 }
 

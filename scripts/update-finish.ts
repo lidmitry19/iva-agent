@@ -415,8 +415,9 @@ function sendToChat(
  * reaches an owner who ordered the update from Telegram and never sees a terminal.
  *
  * An Alert, so it obeys ADR-0007: it says what broke, what it costs and what to do,
- * and it repeats at most once a week for the same plugin. The digest is the essence -
- * a plugin whose content changed is a new problem and speaks at once.
+ * and it repeats at most once a week for the same set of plugins. The essence is what
+ * each of them contained - a plugin the owner has changed since is a different problem
+ * and speaks at once.
  */
 export async function alertOwnerAboutPlugins(
   layout: ReturnType<typeof layoutFor>,
