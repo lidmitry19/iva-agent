@@ -8,8 +8,10 @@
  * restored.
  *
  * Pure: no filesystem, no network, no `~` expansion (the caller owns the home
- * directory it belongs to). A marketplace name is not a form here - it becomes
- * one when the marketplace itself arrives.
+ * directory it belongs to). A plugin name from a Marketplace is still not a form
+ * here: the name is resolved into one of these forms before the parser sees it
+ * (`scripts/lib/plugin-marketplace.ts`), so what `plugins.json` records and what
+ * `sync` replays stays a source string with a repository behind it.
  */
 
 export type PluginSource =
@@ -20,7 +22,13 @@ export type PluginSource =
       readonly url: string;
       /** `owner/repo` when written in shorthand - kept so the string round-trips. */
       readonly shorthand: string | null;
-      /** Subdirectory inside the repository holding the plugin root. */
+      /**
+       * Subdirectory inside the repository holding the plugin root. Written as a
+       * plain path segment after the shorthand (`owner/repo/sub`) and after a
+       * go-getter `//` on a URL (`https://host/repo.git//sub`) - a URL has no
+       * shorthand boundary, so without the separator there is nothing telling the
+       * repository apart from the path inside it.
+       */
       readonly subdir: string | null;
       /** Branch, tag or sha being tracked; null means the remote's HEAD. */
       readonly ref: string | null;
@@ -72,6 +80,28 @@ function splitRef(
   return { base: raw.slice(0, at), ref };
 }
 
+/**
+ * Split a trailing `//subdir` off a URL, searching from where its path starts.
+ *
+ * The FIRST `//` past that point wins, and the segments that follow obey the same
+ * rule as everywhere else, so `//..`, `//` alone and a leading dash never become a
+ * subdirectory. Searching from the path start is what keeps the `//` of the scheme
+ * itself out of the way.
+ */
+function splitSubdir(
+  base: string,
+  searchFrom: number,
+): { readonly url: string; readonly subdir: string | null } {
+  const at = base.indexOf("//", searchFrom);
+  if (at === -1) return { url: base, subdir: null };
+  const subdir = base.slice(at + 2);
+  if (!subdir || !subdir.split("/").every((part) => SEGMENT.test(part)))
+    throw new Error(
+      `plugin source has an unusable subdirectory: ${JSON.stringify(subdir)}`,
+    );
+  return { url: base.slice(0, at), subdir };
+}
+
 /** Parse one source string. Anything unrecognized is an Error, never a guess. */
 export function parsePluginSource(raw: string): PluginSource {
   const value = raw.trim();
@@ -82,16 +112,16 @@ export function parsePluginSource(raw: string): PluginSource {
   if (scheme) {
     // Past the authority: a path slash, or nothing at all when the URL has no path.
     const pathStart = value.indexOf("/", scheme[0].length);
-    const { base, ref } = splitRef(
-      value,
-      pathStart === -1 ? value.length : pathStart,
-    );
-    return { kind: "git", url: base, shorthand: null, subdir: null, ref };
+    const searchFrom = pathStart === -1 ? value.length : pathStart;
+    const { base, ref } = splitRef(value, searchFrom);
+    const { url, subdir } = splitSubdir(base, searchFrom);
+    return { kind: "git", url, shorthand: null, subdir, ref };
   }
   const scp = SCP_LIKE.exec(value);
   if (scp) {
     const { base, ref } = splitRef(value, scp[0].length);
-    return { kind: "git", url: base, shorthand: null, subdir: null, ref };
+    const { url, subdir } = splitSubdir(base, scp[0].length);
+    return { kind: "git", url, shorthand: null, subdir, ref };
   }
 
   const { base, ref } = splitRef(value, 0);
@@ -114,7 +144,8 @@ export function parsePluginSource(raw: string): PluginSource {
 export function formatPluginSource(source: PluginSource): string {
   if (source.kind === "local") return source.path;
   const base = source.shorthand ?? source.url;
-  const subdir = source.subdir ? `/${source.subdir}` : "";
+  const separator = source.shorthand ? "/" : "//";
+  const subdir = source.subdir ? `${separator}${source.subdir}` : "";
   const ref = source.ref ? `@${source.ref}` : "";
   return `${base}${subdir}${ref}`;
 }

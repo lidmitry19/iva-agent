@@ -88,6 +88,48 @@ test("every written form parses into one value and writes back unchanged", () =>
         ref: null,
       },
     ],
+    // `//` — разделитель подпапки go-getter: единственная форма, которой Marketplace
+    // может назвать подпапку в репозитории на чужом хостинге (shorthand там нет).
+    [
+      "https://gitlab.example.test/team/plugin.git//plugins/trace",
+      {
+        kind: "git",
+        url: "https://gitlab.example.test/team/plugin.git",
+        shorthand: null,
+        subdir: "plugins/trace",
+        ref: null,
+      },
+    ],
+    [
+      "https://gitlab.example.test/team/plugin.git//plugins/trace@v1.2",
+      {
+        kind: "git",
+        url: "https://gitlab.example.test/team/plugin.git",
+        shorthand: null,
+        subdir: "plugins/trace",
+        ref: "v1.2",
+      },
+    ],
+    [
+      "file:///srv/mirror/plugin.git//trace@0123456789abcdef0123456789abcdef01234567",
+      {
+        kind: "git",
+        url: "file:///srv/mirror/plugin.git",
+        shorthand: null,
+        subdir: "trace",
+        ref: "0123456789abcdef0123456789abcdef01234567",
+      },
+    ],
+    [
+      "git@gitlab.example.test:team/plugin.git//trace@main",
+      {
+        kind: "git",
+        url: "git@gitlab.example.test:team/plugin.git",
+        shorthand: null,
+        subdir: "trace",
+        ref: "main",
+      },
+    ],
     [
       "https://gitlab.example.test/team/plugin.git@release",
       {
@@ -167,6 +209,15 @@ test("an unrecognized source is refused by name, never guessed", () => {
     "owner/repo/-sub",
     "owner/repo@/leading",
     "owner/repo@trailing/",
+    // Подпапка после `//` живёт по тем же правилам сегмента, что и всё остальное:
+    // пустой сегмент, подъём наружу и ведущий дефис отвергаются здесь же.
+    "https://host.test/team/plugin.git//",
+    "https://host.test/team/plugin.git//a//b",
+    "https://host.test/team/plugin.git//../etc",
+    "https://host.test/team/plugin.git//.",
+    "https://host.test/team/plugin.git//-sub",
+    "https://host.test/team/plugin.git//sub@",
+    "git@host.test:team/plugin.git//",
   ]) {
     assert.throws(
       () => parsePluginSource(raw),
@@ -210,6 +261,31 @@ const canonical = fc.oneof(
     .map(
       ([scheme, host, path, at]) =>
         `${scheme}${host}/${path}.git${at === null ? "" : `@${at}`}`,
+    ),
+  // Тот же URL с подпапкой через `//`: форма приезжает из Marketplace, значит
+  // roundtrip обязан держать и её.
+  fc
+    .tuple(
+      fc.constantFrom("https://", "http://", "ssh://", "file:///"),
+      segment,
+      segment,
+      fc.array(segment, { minLength: 1, maxLength: 3 }),
+      fc.option(ref),
+    )
+    .map(
+      ([scheme, host, path, sub, at]) =>
+        `${scheme}${host}/${path}.git//${sub.join("/")}${at === null ? "" : `@${at}`}`,
+    ),
+  fc
+    .tuple(
+      segment,
+      segment,
+      fc.array(segment, { maxLength: 2 }),
+      fc.option(ref),
+    )
+    .map(
+      ([user, host, sub, at]) =>
+        `${user}@${host}:team/plugin.git${sub.length ? `//${sub.join("/")}` : ""}${at === null ? "" : `@${at}`}`,
     ),
   fc
     .tuple(fc.constantFrom("./", "../", "/", "~/"), segment, segment)
