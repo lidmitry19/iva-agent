@@ -89,7 +89,7 @@ export function createPluginInstallCommands(
     buildCode,
     mustFind,
   } = context;
-  const { marketplace } = groups;
+  const { marketplace, trust } = groups;
   const {
     grantPorts,
     grantPortsToTrusted,
@@ -97,7 +97,7 @@ export function createPluginInstallCommands(
     processCommands,
     reconcileUnits,
     restartMoved,
-  } = groups.trust;
+  } = trust;
   const { ok, warn, bad, step, confirm, dataDirAbs } = runtime;
   const { pluginTreeDigest, readPlugin } = core.reader;
   const {
