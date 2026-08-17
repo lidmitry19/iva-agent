@@ -215,7 +215,8 @@ test("property: any directory tree yields a report, never an exception", async (
 
         const report = await readPlugin(dir);
         assert.equal(report.root, resolve(dir));
-        assert.ok(Array.isArray(report.diagnostics));
+        for (const line of report.diagnostics)
+          assert.equal(typeof line, "string");
         if (!withManifest) assert.equal(report.manifest, null);
       },
     ),

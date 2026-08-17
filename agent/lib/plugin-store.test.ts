@@ -190,8 +190,8 @@ test("property: any JSON becomes a state, and normalizing twice changes nothing"
   fc.assert(
     fc.property(rawState, (raw) => {
       const state = normalizePluginsState(raw);
-      assert.ok(Array.isArray(state.plugins));
-      assert.ok(Array.isArray(state.marketplaces));
+      for (const market of state.marketplaces)
+        assert.equal(typeof market, "string");
       for (const item of state.plugins) {
         assert.equal(typeof item.name, "string");
         assert.equal(typeof item.enabled, "boolean");
