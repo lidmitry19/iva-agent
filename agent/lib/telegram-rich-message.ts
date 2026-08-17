@@ -470,6 +470,9 @@ export function readRichMessage(value: unknown): RichMessageReading {
 
   function handleBlock(node: unknown): void {
     if (typeof node === "string") return run(lineSeq(node));
+    // Массив вместо блока схемой не предусмотрен, но разворачивается как список
+    // блоков: терять текст из-за лишней пары скобок не за что.
+    if (Array.isArray(node)) return run(tasks(take(node), blockTask));
     if (!isRecord(node)) return;
     const found = blockMedia(node);
     if (found !== null) media.push(found);

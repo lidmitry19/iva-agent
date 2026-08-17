@@ -1443,6 +1443,12 @@ test("a message that is not a blocks array is still read", () => {
     readRichMessage([{ type: "paragraph", text: "TOP" }]).text,
     "TOP",
   );
+  // Лишняя пара скобок вокруг блоков — не повод терять текст.
+  assert.equal(
+    readRichMessage({ blocks: [[{ type: "paragraph", text: "WRAPPED" }]] })
+      .text,
+    "WRAPPED",
+  );
 });
 
 // Потолок глубины стоит ради цены склейки, а не ради безопасности: за ним беднеет
