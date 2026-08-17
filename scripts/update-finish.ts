@@ -38,6 +38,8 @@ import {
   type UpdateOutcome,
 } from "./lib/version-update.ts";
 import type { PluginFailure } from "./lib/plugin-build.ts";
+import { tryLoadPluginCore } from "./lib/plugin-core.ts";
+import { mcpUnitName, serviceUnitName } from "./lib/plugin-units.ts";
 import type { createCliRuntime } from "./cli/runtime.ts";
 
 type Say = (message: string) => void;
@@ -448,6 +450,47 @@ export async function alertOwnerAboutPlugins(
 }
 
 /**
+ * After the flip: an MCP proxy and a plugin service run code out of the version that
+ * `current` points at, so the flip alone does not move them - a restart does.
+ *
+ * Only what is running is restarted, and a unit that refuses is one line in the log: an
+ * update that is otherwise finished must not fail over a plugin, and `iva doctor` says
+ * which unit is down.
+ */
+export async function restartPluginUnits(
+  runtime: Pick<CliRuntime, "systemd" | "UNIT_DIR">,
+  dataDir: string,
+  log: Say,
+): Promise<void> {
+  const core = await tryLoadPluginCore();
+  if (!core) return;
+  const { state, damaged } = await core.store.readPluginsStateSafe(dataDir);
+  if (damaged) return;
+  const units: string[] = [];
+  for (const entry of state.plugins) {
+    if (!entry.enabled || !entry.trusted) continue;
+    for (const server of Object.keys(entry.mcp ?? {}))
+      units.push(mcpUnitName(entry.name, server));
+    for (const service of Object.keys(entry.services ?? {}))
+      units.push(serviceUnitName(entry.name, service));
+  }
+  const live = units.filter(
+    (unit) =>
+      existsSync(join(runtime.UNIT_DIR, unit)) &&
+      runtime.systemd.isActive(unit),
+  );
+  if (live.length === 0) return;
+  try {
+    runtime.systemd.restart(live);
+    log(`restarted ${live.length} plugin unit(s) onto the new version`);
+  } catch (error) {
+    log(
+      `some plugin units did not restart: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * The second half of an update, run by the version being installed: install,
  * build, probe, flip, migrate, restart and retire the old checkout all belong to
  * the new code, so a fix to any of them ships in the release carrying it.
@@ -547,6 +590,9 @@ export async function main(argv: readonly string[]): Promise<number> {
             deferMemoryMigration: true,
           });
           runtime.systemd.activate([runtime.UPDATE_TIMER]);
+          // The code of every plugin proxy is in the version this flip just made
+          // current; nothing else brings them onto it.
+          await restartPluginUnits(runtime, layout.data, log);
           if (capturedUserbot?.active === true)
             reinstallUserbot(runtime, services, notify, {
               knownActive: true,

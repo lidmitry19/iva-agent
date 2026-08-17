@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   alertOwnerAboutPlugins,
   captureOptionalWriterState,
+  restartPluginUnits,
   restoreMigratedWriterState,
   restoreOptionalWriterState,
   restoreWriterOwnership,
@@ -722,4 +723,95 @@ test("an Alert that could not be sent says so and is not remembered", async (t) 
 
   assert.match(said.join("\n"), /could not tell you in Telegram about trace/u);
   assert.equal(existsSync(join(layout.data, "alert-state.json")), false);
+});
+
+test("the flip restarts the plugin units that were running, and only those", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "iva-plugin-restart-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const data = layoutFor(home).data;
+  mkdirSync(join(data, "custom"), { recursive: true });
+  writeFileSync(
+    join(data, "custom/plugins.json"),
+    JSON.stringify({
+      marketplaces: [],
+      plugins: [
+        {
+          name: "trace",
+          source: "/tmp/trace",
+          ref: "",
+          sha: "",
+          digest: "",
+          enabled: true,
+          trusted: true,
+          installedAt: "2026-08-17T00:00:00.000Z",
+          mcp: { viewer: { port: 8730 }, gone: { port: 8731 } },
+          services: { web: { port: 8726 } },
+        },
+        {
+          name: "untrusted",
+          source: "/tmp/untrusted",
+          ref: "",
+          sha: "",
+          digest: "",
+          enabled: true,
+          trusted: false,
+          installedAt: "2026-08-17T00:00:00.000Z",
+          mcp: { srv: { port: 8732 } },
+        },
+      ],
+    }),
+  );
+  const unitDir = join(home, "systemd");
+  mkdirSync(unitDir, { recursive: true });
+  // `gone` числится в состоянии, но юнита на диске нет: рестартовать нечего.
+  for (const unit of [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+    "iva-mcp-untrusted-srv.service",
+  ])
+    writeFileSync(join(unitDir, unit), "[Service]\n");
+
+  const restarted: string[][] = [];
+  const asked: string[] = [];
+  const runtime = {
+    UNIT_DIR: unitDir,
+    systemd: {
+      isActive(unit: string) {
+        asked.push(unit);
+        // Сервис плагина стоит: его владелец и не просил поднимать.
+        return unit !== "iva-plugin-trace-web.service";
+      },
+      restart(units: readonly string[]) {
+        restarted.push([...units]);
+      },
+    },
+  } as unknown as Parameters<typeof restartPluginUnits>[0];
+  const said: string[] = [];
+
+  await restartPluginUnits(runtime, data, (message) => said.push(message));
+
+  // Только то, что живо, доверено и лежит на диске.
+  assert.deepEqual(restarted, [["iva-mcp-trace-viewer.service"]]);
+  assert.deepEqual(asked, [
+    "iva-mcp-trace-viewer.service",
+    "iva-plugin-trace-web.service",
+  ]);
+  assert.match(said.join("\n"), /restarted 1 plugin unit\(s\)/u);
+
+  // Отказ рестарта — строка в журнал, а не провал уже прошедшего апдейта.
+  const broken = {
+    UNIT_DIR: unitDir,
+    systemd: {
+      isActive: () => true,
+      restart() {
+        throw new Error("job failed");
+      },
+    },
+  } as unknown as Parameters<typeof restartPluginUnits>[0];
+  said.length = 0;
+  await restartPluginUnits(broken, data, (message) => said.push(message));
+  assert.match(
+    said.join("\n"),
+    /some plugin units did not restart: job failed/u,
+  );
 });
