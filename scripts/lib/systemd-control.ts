@@ -1,5 +1,28 @@
 const UNIT_RE = /^[A-Za-z0-9_.@:-]+$/;
 
+/**
+ * One `ExecStart=` argument, quoted the way systemd reads it. `$` and `%` are doubled
+ * because systemd expands both before the process ever starts, and a path with a NUL or
+ * a newline in it is refused: the unit file is line-based, and a value that breaks the
+ * line writes a directive nobody authored.
+ */
+export function systemdExecArgument(value: string): string {
+  if (/[\0\r\n]/u.test(value))
+    throw new Error("systemd argument contains NUL or a newline");
+  let escaped = "";
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (character === "\\") escaped += "\\\\";
+    else if (character === '"') escaped += '\\"';
+    else if (character === "$") escaped += "$$";
+    else if (character === "%") escaped += "%%";
+    else if (code < 0x20 || code === 0x7f)
+      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
+    else escaped += character;
+  }
+  return `"${escaped}"`;
+}
+
 interface CommandResult {
   readonly code?: number | null;
   readonly status?: number | null;

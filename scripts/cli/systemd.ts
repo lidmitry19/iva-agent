@@ -20,11 +20,18 @@ import {
   LEGACY_BRAIN_UNITS,
   LEGACY_MEMORY_UNITS,
 } from "../lib/legacy-memory-units.ts";
-import { cleanupSystemdUnits } from "../lib/systemd-control.ts";
+import {
+  cleanupSystemdUnits,
+  systemdExecArgument,
+} from "../lib/systemd-control.ts";
 import { resolveTimeZone, validateTimeZone } from "../lib/timezone.ts";
 import type { createCliRuntime } from "./runtime.ts";
 
 type CliRuntime = ReturnType<typeof createCliRuntime>;
+
+// The escaper lives in the systemd seam now, beside the unit-name rule; it is re-exported
+// here because that is where every caller already looks for it.
+export { systemdExecArgument };
 
 type QuietOptions = {
   readonly quiet?: boolean;
@@ -51,23 +58,6 @@ type MemoryCleanupOptions = {
 type BrainCleanupOptions = {
   readonly activateNewTimer?: boolean;
 };
-
-export function systemdExecArgument(value: string): string {
-  if (/[\0\r\n]/u.test(value))
-    throw new Error("systemd argument contains NUL or a newline");
-  let escaped = "";
-  for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (character === "\\") escaped += "\\\\";
-    else if (character === '"') escaped += '\\"';
-    else if (character === "$") escaped += "$$";
-    else if (character === "%") escaped += "%%";
-    else if (code < 0x20 || code === 0x7f)
-      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
-    else escaped += character;
-  }
-  return `"${escaped}"`;
-}
 
 export function createCliSystemd(runtime: CliRuntime) {
   const {

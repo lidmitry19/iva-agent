@@ -362,6 +362,60 @@ export async function writePluginsState(
   await saveJsonAtomic(file, normalizePluginsState(state));
 }
 
+/**
+ * Hand `name` a port for every MCP server and service it declares, keeping the ones it
+ * already has. Pure: the caller writes the state it gets back.
+ *
+ * A proxy gets the first free port from 8730 up. A service gets the port its
+ * `service.json` asks for when nothing else holds it, and the first free one otherwise -
+ * the author's number is a preference, not a claim on the machine.
+ *
+ * Ports already handed out are never moved and never dropped, not even for a server the
+ * plugin no longer declares: the number lives in a generated connection and in a unit
+ * file, and taking it back would mean rewriting both to gain one port.
+ */
+export function assignPluginPorts(
+  state: PluginsState,
+  wanted: {
+    readonly name: string;
+    /** MCP servers that need a proxy port, by name. */
+    readonly mcp: readonly string[];
+    /** Services that need a port, by name, with the port each one asks for. */
+    readonly services: Readonly<Record<string, number>>;
+  },
+): PluginsState {
+  const entry = findPlugin(state, wanted.name);
+  if (!entry) return state;
+  const taken = takenPluginPorts(state);
+  const mcp: Record<string, { port: number }> = { ...(entry.mcp ?? {}) };
+  const services: Record<string, { port: number }> = {
+    ...(entry.services ?? {}),
+  };
+  for (const server of [...wanted.mcp].sort()) {
+    if (mcp[server]) continue;
+    const port = freePluginPort(taken);
+    taken.add(port);
+    mcp[server] = { port };
+  }
+  for (const service of Object.keys(wanted.services).sort()) {
+    if (services[service]) continue;
+    const asked = wanted.services[service];
+    const usable =
+      Number.isInteger(asked) &&
+      asked >= 1 &&
+      asked <= MAX_PORT &&
+      !taken.has(asked);
+    const port = usable ? asked : freePluginPort(taken);
+    taken.add(port);
+    services[service] = { port };
+  }
+  return upsertPlugin(state, {
+    ...entry,
+    ...(Object.keys(mcp).length ? { mcp } : {}),
+    ...(Object.keys(services).length ? { services } : {}),
+  });
+}
+
 export function findPlugin(
   state: PluginsState,
   name: string,

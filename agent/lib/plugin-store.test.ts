@@ -18,8 +18,10 @@ import { join } from "node:path";
 import fc from "fast-check";
 import { pluginNameProblem } from "./plugin-reader.ts";
 import {
+  assignPluginPorts,
   EMPTY_PLUGINS_STATE,
   enabledPlugins,
+  FIRST_PLUGIN_PORT,
   findPlugin,
   normalizePluginsState,
   pluginDataDir,
@@ -29,9 +31,12 @@ import {
   readPluginsState,
   readPluginsStateSafe,
   removePlugin,
+  RESERVED_PLUGIN_PORTS,
+  takenPluginPorts,
   upsertPlugin,
   writePluginsState,
   type PluginEntry,
+  type PluginsState,
 } from "./plugin-store.ts";
 
 const worlds: string[] = [];
@@ -258,6 +263,115 @@ test("property: any JSON becomes a state, and normalizing twice changes nothing"
       assert.deepEqual(names, [...names].sort(), "names must be sorted");
       assert.deepEqual(normalizePluginsState(state), state);
     }),
+    RUNS,
+  );
+});
+
+test("ports are handed out from 8730 up, once, and never over Iva's own", () => {
+  let state: PluginsState = {
+    marketplaces: [],
+    plugins: [entry({ name: "alpha" }), entry({ name: "beta" })],
+  };
+  state = assignPluginPorts(state, {
+    name: "alpha",
+    mcp: ["viewer", "api"],
+    services: {},
+  });
+  // Первый свободный от 8730 вверх, в порядке имён серверов.
+  assert.deepEqual(findPlugin(state, "alpha")?.mcp, {
+    api: { port: 8730 },
+    viewer: { port: 8731 },
+  });
+
+  // Второй плагин получает следующие свободные, а не те же.
+  state = assignPluginPorts(state, {
+    name: "beta",
+    mcp: ["only"],
+    // Сервис просит свой порт: он свободен, значит достаётся ему.
+    services: { viewer: 9000, taken: 8730, reserved: 8723 },
+  });
+  const beta = findPlugin(state, "beta");
+  assert.deepEqual(beta?.mcp, { only: { port: 8732 } });
+  assert.deepEqual(beta?.services, {
+    // Порты выдаются в порядке имён сервисов. Порт самой Ивы не выдаётся никогда...
+    reserved: { port: 8733 },
+    // ...и просимый порт, уже занятый другим плагином, тоже: берётся следующий свободный.
+    taken: { port: 8734 },
+    viewer: { port: 9000 },
+  });
+
+  // Повторный вызов ничего не двигает: порт стабилен до `remove`.
+  const again = assignPluginPorts(state, {
+    name: "alpha",
+    mcp: ["viewer", "api", "third"],
+    services: {},
+  });
+  assert.deepEqual(findPlugin(again, "alpha")?.mcp, {
+    api: { port: 8730 },
+    viewer: { port: 8731 },
+    third: { port: 8735 },
+  });
+  assert.equal(
+    assignPluginPorts(state, { name: "absent", mcp: ["x"], services: {} }),
+    state,
+    "a plugin that is not installed gets nothing",
+  );
+});
+
+test("property: every handed-out port is unique and never one of Iva's own", () => {
+  const names = fc.constantFrom("alpha", "beta", "gamma", "a.b");
+  fc.assert(
+    fc.property(
+      fc.array(
+        fc.record({
+          name: names,
+          mcp: fc.array(fc.stringMatching(/^[a-z]{1,4}$/u), { maxLength: 3 }),
+          services: fc.dictionary(
+            fc.stringMatching(/^[a-z]{1,4}$/u),
+            fc.oneof(
+              fc.integer({ min: 1, max: 70000 }),
+              fc.constantFrom(...RESERVED_PLUGIN_PORTS),
+            ),
+            { maxKeys: 3 },
+          ),
+        }),
+        { maxLength: 6 },
+      ),
+      (rounds) => {
+        let state: PluginsState = {
+          marketplaces: [],
+          plugins: ["alpha", "beta", "gamma", "a.b"].map((name) =>
+            entry({ name }),
+          ),
+        };
+        for (const round of rounds) state = assignPluginPorts(state, round);
+        const ports: number[] = [];
+        for (const item of state.plugins)
+          for (const map of [item.mcp, item.services])
+            for (const value of Object.values(map ?? {}))
+              ports.push(value.port);
+        // Уникальны между собой и не пересекаются с портами самой Ивы.
+        assert.deepEqual([...new Set(ports)].length, ports.length);
+        for (const port of ports) {
+          assert.equal(RESERVED_PLUGIN_PORTS.includes(port), false);
+          assert.ok(Number.isInteger(port) && port >= 1 && port <= 65535);
+        }
+        // Всё, что попросили в этом прогоне, теперь выдано.
+        for (const round of rounds) {
+          const item = findPlugin(state, round.name);
+          for (const server of round.mcp)
+            assert.ok(item?.mcp?.[server], `${round.name}/${server}`);
+          for (const service of Object.keys(round.services))
+            assert.ok(item?.services?.[service], `${round.name}:${service}`);
+        }
+        // Занятость — это ровно то, что видит следующая выдача.
+        const taken = takenPluginPorts(state);
+        for (const port of [...ports, ...RESERVED_PLUGIN_PORTS])
+          assert.ok(taken.has(port));
+        assert.ok(FIRST_PLUGIN_PORT > Math.max(...RESERVED_PLUGIN_PORTS));
+        return true;
+      },
+    ),
     RUNS,
   );
 });
