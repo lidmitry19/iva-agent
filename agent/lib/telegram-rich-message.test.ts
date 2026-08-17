@@ -101,7 +101,7 @@ function scanLinks(source: string): Link[] {
   return found;
 }
 
-/** Каждый лист присутствует, и именно в порядке документа. */
+/** Каждый лист присутствует, и именно в исходном порядке. */
 function missingLeaves(text: string, leaves: readonly string[]): string[] {
   const missing: string[] = [];
   let cursor = 0;
