@@ -144,6 +144,10 @@ HTML-only extras: <u>underline</u> <sub>x</sub> <sup>x</sup>
   other message, so a leaked secret is redacted on the way. That is a safety net,
   not a licence: everything you post must be text you wrote in this turn, not a
   file dump or command output.
+- Unlike a turn reply, a post has NO HTML fallback: if Bot API refuses the rich
+  message, the command exits non-zero with the API error and nothing is sent. A
+  post never lands half-rendered with its images dropped — fix the markdown (or
+  the limits above) and run it again. Never report a post as sent on a failed run.
 
 ## Example
 

@@ -239,19 +239,18 @@ void test("a rich post goes to sendRichMessage, gated, with silent and thread fi
   });
 });
 
-void test("a refused rich post falls back to the HTML path, not to an error", async (t) => {
+void test("a refused rich post fails loudly and sends nothing instead", async (t) => {
   const originalFetch = globalThis.fetch;
   const requests: CapturedRequest[] = [];
   globalThis.fetch = (url: URL | RequestInfo, options?: RequestInit) => {
     requests.push(captureRequest(url, options));
-    return Promise.resolve(
-      new Response(requests.length === 1 ? "rich unsupported" : "", {
-        status: requests.length === 1 ? 400 : 200,
-      }),
-    );
+    return Promise.resolve(new Response("rich unsupported", { status: 400 }));
   };
+  const logged: string[] = [];
   const originalError = console.error;
-  console.error = () => undefined;
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map((argument) => String(argument)).join(" "));
+  };
   t.after(() => {
     globalThis.fetch = originalFetch;
     console.error = originalError;
@@ -260,16 +259,21 @@ void test("a refused rich post falls back to the HTML path, not to an error", as
   const { sendTelegramRich } = await import("./telegram-send.ts");
   const result = await sendTelegramRich("test-bot", "test-chat", "**пост**");
 
-  assert.deepEqual(result, { ok: true, fellBack: false, error: "" });
+  assert.deepEqual(result, {
+    ok: false,
+    fellBack: false,
+    error: "400: rich unsupported",
+  });
+  // Ровно один вызов Bot API: HTML-фолбэка у поста нет, иначе владелец получил бы
+  // куски без картинок и отчёт об успехе.
   assert.deepEqual(
     requests.map((request) => request.url),
-    [
-      "https://api.telegram.org/bottest-bot/sendRichMessage",
-      "https://api.telegram.org/bottest-bot/sendMessage",
-    ],
+    ["https://api.telegram.org/bottest-bot/sendRichMessage"],
   );
-  assert.equal(requests[1].body.parse_mode, "HTML");
-  assert.equal(requests[1].body.text, "<b>пост</b>");
+  assert.ok(
+    logged.some((line) => line.includes("пост не отправлен")),
+    "отказ обязан быть виден в stderr",
+  );
 });
 
 void test("telegram-send never throws on a report that is not a string", async (t) => {

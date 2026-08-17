@@ -72,7 +72,7 @@ const EXPECTED_INVENTORY_SHA256 =
 // The rich-message reader `agent/lib/telegram-rich-message.ts` came next. Its own test
 // reports it at 99.53% lines, 92.69% branches and 100% functions, so the blind spot
 // stays 26. The rich-post CLI `scripts/cli/post.ts` came last, replacing the skill's
-// Python sender: `scripts/cli/post.test.ts` reports it at 93.54% lines, 82.64% branches
+// Python sender: `scripts/cli/post.test.ts` reports it at 93.14% lines, 82.64% branches
 // and 86.96% functions - the uncovered remainder is the tmpfiles.org upload and the
 // stdin reader, both injected in tests - so the blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {

@@ -412,6 +412,7 @@ export function createPostCommand(
     const send =
       dependencies.send ??
       (await import("../lib/telegram-send.ts")).sendTelegramRich;
+    // Отказ Bot API — ошибка команды: rich-фолбэка нет, и «часть поста ушла» тоже.
     const result = await send(token, chat, markdown, {
       silent: options.silent,
       ...(options.threadId === undefined ? {} : { threadId: options.threadId }),

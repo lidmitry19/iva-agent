@@ -238,9 +238,13 @@ export async function sendTelegramHtml(
  * пост из текста и картинок никаких rich-конструкций не содержит, но HTML-путь
  * картинки не рендерит.
  *
- * Отказ Bot API — не ошибка команды: шов уводит текст в тот же HTML-путь, что и
- * ночной отчёт (как это делает канал в agent/channels/telegram.ts). Худший случай
- * равен обычной отправке, гейт по дороге тот же самый.
+ * Фолбэка тут нет намеренно. Отказ Bot API — ошибка отправки: ok=false с текстом
+ * ошибки, и наружу не уходит ничего. У канала фолбэк на месте (ответ в диалоге
+ * лучше отдать хоть как-то), но пост в ЧУЖОЙ чат владелец просил именно постом:
+ * молча выдать вместо него HTML-куски без картинок и отчитаться об успехе —
+ * потеря, которую никто не заметит. HTML/plain-транспорт поэтому оставлен как
+ * заглушка со stop: шов доходит до неё, только если rich отвергли, и сразу
+ * возвращает тот же отказ, не трогая Bot API второй раз.
  */
 export async function sendTelegramRich(
   bot: string,
@@ -260,21 +264,35 @@ export async function sendTelegramRich(
     ...(silent ? { disable_notification: true } : {}),
     ...(threadId ? { message_thread_id: threadId } : {}),
   };
+  // Отказ rich-пути, чтобы вернуть его вызывающему как ошибку отправки: шов
+  // спрашивает транспорт, а не наоборот, и другого места запомнить причину нет.
+  let refusal = "";
+  const refuse = (): Promise<OutboxAck> =>
+    Promise.resolve({
+      ok: false,
+      error: refusal || "sendRichMessage was not attempted",
+      retryPlain: false,
+      stop: true,
+    });
   const transport: OutboxTransport = {
-    ...messageTransport(chat, sendPost, extra),
     sendRich: async (text) => {
       const ack = await sendPost("sendRichMessage", {
         chat_id: chat,
         rich_message: { markdown: text },
         ...extra,
       });
-      if (!ack.ok)
+      if (!ack.ok) {
+        refusal = ack.error;
         console.error(
-          "[telegram] sendRichMessage отвергнут, фолбэк HTML:",
+          "[telegram] sendRichMessage отвергнут, пост не отправлен:",
           ack.error.slice(0, 300),
         );
+      }
       return ack;
     },
+    // Ни одного вызова Bot API: пост либо ушёл rich-сообщением, либо не ушёл.
+    sendHtml: refuse,
+    sendPlain: refuse,
   };
   try {
     const { ok, delivered, fellBack, error } = await traceOutbox(
