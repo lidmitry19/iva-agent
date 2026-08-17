@@ -1492,6 +1492,46 @@ test("a Rollup session that spans two nights stays two turns, not one", async ()
   }
 });
 
+test("a service reply with no turn key joins the chat turn that is open", () => {
+  // The channel's own status and error replies pass the outbound gate but not the Outbox
+  // seam (docs/trace.md), so they arrive with a session and no turn key of their own.
+  const turns = stitchTurns(
+    parseAll([
+      line({
+        ts: "2026-08-17T09:00:00.000Z",
+        turn: "turn_7",
+        session: "sess-c",
+        source: "telegram",
+        kind: "turn",
+        name: "bound",
+        data: { chatKey: "tg:1", updateKey: "tg:1:5" },
+      }),
+      line({
+        ts: "2026-08-17T09:00:01.000Z",
+        turn: "turn_7",
+        session: "sess-c",
+        source: "telegram",
+        kind: "eve",
+        name: "turn.completed",
+        data: { sequence: 1 },
+      }),
+      line({
+        ts: "2026-08-17T09:00:02.000Z",
+        session: "sess-c",
+        source: "telegram",
+        kind: "gate",
+        name: "outbound",
+        data: { clean: true, chars: 12, text: "работаю…" },
+      }),
+    ]),
+  );
+
+  assert.deepEqual(
+    turns.map((turn) => [turn.key, turn.events.length]),
+    [["turn_7", 3]],
+  );
+});
+
 test("a keyless line ahead of every turn of its session joins the first one", () => {
   const turns = stitchTurns(
     parseAll([
