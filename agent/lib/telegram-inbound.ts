@@ -310,6 +310,22 @@ function gatedTextEntries(
   return entries;
 }
 
+// Находка гейта обязана быть видна в логе — и на свежей реплике, и на буфере старого
+// моста. Строка одна на оба пути, иначе они разъезжаются.
+function logInboundFindings(
+  sanitized: ReturnType<typeof sanitizeInbound>,
+): boolean {
+  const flagged = sanitized.blocked || sanitized.flags.length > 0;
+  if (flagged) {
+    console.error(
+      "[security] inbound flagged:",
+      sanitized.reason,
+      sanitized.flags.join(","),
+    );
+  }
+  return flagged;
+}
+
 type CarrierTextEntries = {
   readonly entries: string[];
   readonly flagged: boolean;
@@ -321,14 +337,7 @@ function carrierTextEntries(text: string): CarrierTextEntries {
   if (!userText) return { entries: [], flagged: false };
   const dailyPath = appendDaily("[text]", userText);
   const sanitized = sanitizeInbound(userText);
-  const flagged = sanitized.blocked || sanitized.flags.length > 0;
-  if (flagged) {
-    console.error(
-      "[security] inbound flagged:",
-      sanitized.reason,
-      sanitized.flags.join(","),
-    );
-  }
+  const flagged = logInboundFindings(sanitized);
   return {
     entries: gatedTextEntries(sanitized, dailyPath),
     flagged,
@@ -461,7 +470,12 @@ export async function runTelegramInbound(
       : undefined;
     const items = rawItems.map((text) => {
       const sanitized = sanitizeInbound(text);
+      // Порядок и состав — как у свежей реплики (gatedTextEntries): предупреждение,
+      // текст, пометка об усечении. Без предупреждения помеченный буфер доезжал до
+      // модели как обычная реплика — гейт его не выбрасывает (security-gate.ts).
+      logInboundFindings(sanitized);
       return {
+        warning: sanitized.blocked ? injectionWarning() : null,
         text: sanitized.text,
         notice: inboundTruncationNotice(sanitized, dailyPath),
       };
@@ -474,6 +488,7 @@ export async function runTelegramInbound(
         ) +
           items
             .flatMap((item) => [
+              ...(item.warning ? [item.warning] : []),
               `— ${item.text}`,
               ...(item.notice ? [item.notice] : []),
             ])
