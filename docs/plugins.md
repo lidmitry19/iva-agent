@@ -316,6 +316,10 @@ folder, and the environment is exactly four variables:
 | `PLUGIN_ROOT`      | the plugin folder in the store                                          |
 | `PLUGIN_DATA`      | `data/plugin-data/<name>/`, yours to write in                           |
 
+The plugins Iva ships in `smixs/iva-plugins` are TypeScript run by Node directly —
+`"command": "node", "args": ["server.ts"]`, with no build step — while a service of your own may
+be any command at all: the contract is only `service.json` and those four variables.
+
 `port` in `service.json` is a preference: Iva uses it when free and hands out the next free
 port otherwise, which is why the number arrives through `IVA_SERVICE_PORT` rather than a
 constant in your code. A plugin with services but no extension needs no version build — only
