@@ -76,6 +76,17 @@ function fixture(t: TestContext): {
     "scripts/lib/runtime-dependency.ts",
     'export const runtimeValue = "ready";\n',
   );
+  write(
+    root,
+    "agent/lib/data-dir.ts",
+    'import { packageValue } from "../../packages/data-dir/index.ts";\n' +
+      "export default packageValue;\n",
+  );
+  write(
+    root,
+    "packages/data-dir/index.ts",
+    'export const packageValue = "shared";\n',
+  );
   write(root, "scripts/core.ts", "export {};\n");
   git(root, "add", ".");
   git(root, "commit", "-m", "base");
@@ -246,6 +257,14 @@ test("materialization applies clean three-way merges and advances the manifest a
     ),
     'export const runtimeValue = "ready";\n',
     "stable runtime keeps the external source dependency imported by agent/provider.ts",
+  );
+  assert.equal(
+    readFileSync(
+      join(result.runtimeRoot, "packages/data-dir/index.ts"),
+      "utf8",
+    ),
+    'export const packageValue = "shared";\n',
+    "stable runtime keeps the shared package imported by agent/lib/data-dir.ts",
   );
 });
 

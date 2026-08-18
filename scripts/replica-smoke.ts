@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { startMockOpenAiServer } from "./lib/mock-openai-server.ts";
+import { RUNTIME_SOURCE_TREES } from "./lib/custom-layer.ts";
 import type { ClientSession, MessageResult } from "eve/client";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -231,7 +232,8 @@ async function turn(
 async function prepareReplica(sandbox: string): Promise<string> {
   const app = join(sandbox, "app");
   await mkdir(app, { recursive: true });
-  for (const dir of ["agent", "scripts", "patches", "vault-template"]) {
+  // Деревья те же, что у промоутнутого рантайма; полноту списка держит страж.
+  for (const dir of [...RUNTIME_SOURCE_TREES, "patches", "vault-template"]) {
     await cp(join(ROOT, dir), join(app, dir), { recursive: true });
   }
   for (const file of ["package.json", "package-lock.json", "tsconfig.json"]) {
