@@ -14,6 +14,10 @@ export interface ProviderCatalogEntry {
   keyVar: string | null;
   modelVar: string;
   def: string;
+  // Vision-модель: своя переменная и свой дефолт. null у провайдера, который смотрит
+  // картинку выбранной текстовой моделью (codex — подписка мультимодальна).
+  visionVar: string | null;
+  visionDef: string | null;
   models: string[];
 }
 
@@ -53,6 +57,9 @@ export class ModelCatalogError extends Error {
   }
 }
 
+// Зеркало MODEL_PROVIDERS из agent/lib/model-provider.ts: те же имена, те же переменные и
+// те же дефолты обеих моделей. Импортировать оригинал нельзя (ADR-0003: эта половина грузится
+// на инсталле, где authored tree может не быть), поэтому расхождение ловит тест по соседству.
 export const CATALOG: Record<string, ProviderCatalogEntry> = {
   ollama: {
     label: "Ollama Cloud",
@@ -61,6 +68,8 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     keyVar: "OLLAMA_API_KEY",
     modelVar: "OLLAMA_MODEL",
     def: "deepseek-v4-pro",
+    visionVar: "OLLAMA_VISION_MODEL",
+    visionDef: "gemma4:31b",
     // Mirrors the live GET /models list (checked 2026-07-28). Ollama Cloud retires tags without
     // notice — gemma3:12b went 410 on 2026-07-15 — so keep only IDs seen in the live response.
     // kimi-k3 is billed as "extra usage" on top of the plan (402 with an empty extra balance).
@@ -81,6 +90,10 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     keyVar: "OPENCODE_API_KEY",
     modelVar: "OPENCODE_MODEL",
     def: "deepseek-v4-pro",
+    // Живая проверка 2026-08-18: qwen3.7-plus отдаёт чистое описание, minimax-m3 подмешивает
+    // в него <think>, gpt-5.6-luna отвечает 400. Список моделей картинки не гарантирует.
+    visionVar: "OPENCODE_VISION_MODEL",
+    visionDef: "qwen3.7-plus",
     // Mirrors OPENCODE_MODELS in scripts/setup/main.ts (bare IDs, no "opencode-go/" prefix).
     models: [
       "deepseek-v4-pro",
@@ -99,6 +112,9 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     keyVar: null,
     modelVar: "CODEX_MODEL",
     def: "gpt-5.5",
+    // Картинку смотрит выбранная текстовая модель подписки — своей переменной нет.
+    visionVar: null,
+    visionDef: null,
     models: ["gpt-5.5", "gpt-5.1", "gpt-5"],
   },
   openrouter: {
@@ -108,6 +124,8 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     keyVar: "OPENROUTER_API_KEY",
     modelVar: "OPENROUTER_MODEL",
     def: "openai/gpt-5.1",
+    visionVar: "OPENROUTER_VISION_MODEL",
+    visionDef: "google/gemini-2.5-flash",
     // Always static (300+ live models don't fit inline buttons). Curated known-good
     // slugs only: every model here must support tool calling — Iva sends tool
     // definitions each turn (see the live test in scripts/setup/main.ts for the full check).

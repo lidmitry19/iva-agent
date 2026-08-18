@@ -29,7 +29,11 @@ import {
   probeOpenRouterModel,
   validateModelSelection,
 } from "../lib/model-validation.ts";
-import { catalogProvider, providerEnvKeys } from "../lib/model-catalog.ts";
+import {
+  CATALOG,
+  catalogProvider,
+  providerEnvKeys,
+} from "../lib/model-catalog.ts";
 import { keptSetupWritePlan } from "../lib/setup-keep.ts";
 import { validateTimeZone } from "../lib/timezone.ts";
 import { resolveMemorySearchMode } from "../lib/memory-mode.ts";
@@ -269,12 +273,15 @@ async function writeEnv(out: Env): Promise<void> {
     "MODEL_PROVIDER",
     "OLLAMA_API_KEY",
     "OLLAMA_MODEL",
+    "OLLAMA_VISION_MODEL",
     "OLLAMA_CONTEXT_WINDOW",
     "OPENCODE_API_KEY",
     "OPENCODE_MODEL",
+    "OPENCODE_VISION_MODEL",
     "OPENCODE_CONTEXT_WINDOW",
     "OPENROUTER_API_KEY",
     "OPENROUTER_MODEL",
+    "OPENROUTER_VISION_MODEL",
     "OPENROUTER_CONTEXT_WINDOW",
     "CODEX_MODEL",
     "CODEX_CONTEXT_WINDOW",
@@ -678,8 +685,17 @@ async function main() {
       out.OLLAMA_MODEL,
       "deepseek-v4-pro",
     );
+    console.log(
+      `\n  ${t("Vision model (photos)", "Vision-модель (фото)")}: ${t("describes incoming pictures — the text model above is usually blind.", "описывает входящие картинки — текстовая модель выше обычно их не видит.")} ${t("I recommend", "Рекомендую")} ${C.g}${CATALOG.ollama.visionDef ?? ""}${C.x}.`,
+    );
+    out.OLLAMA_VISION_MODEL = await pickFromList(
+      models,
+      out.OLLAMA_VISION_MODEL,
+      CATALOG.ollama.visionDef ?? "",
+    );
     out.OLLAMA_CONTEXT_WINDOW = out.OLLAMA_CONTEXT_WINDOW || "131072";
     console.log(`  → ${t("model", "модель")}: ${C.g}${out.OLLAMA_MODEL}${C.x}`);
+    console.log(`  → vision: ${C.g}${out.OLLAMA_VISION_MODEL}${C.x}`);
   } else if (provider === "opencode") {
     console.log(
       `\n  ${t("OpenCode key", "Ключ OpenCode")}: ${C.c}https://opencode.ai/auth${C.x} ${t("(subscribe to Go → copy the API key).", "(подпишитесь на Go → скопируйте API key).")}`,
@@ -703,10 +719,24 @@ async function main() {
       curModel,
       "deepseek-v4-pro",
     );
+    console.log(
+      `\n  ${t("Vision model (photos)", "Vision-модель (фото)")}: ${t("describes incoming pictures — the text model above is usually blind.", "описывает входящие картинки — текстовая модель выше обычно их не видит.")} ${t("I recommend", "Рекомендую")} ${C.g}${CATALOG.opencode.visionDef ?? ""}${C.x}.`,
+    );
+    // Тот же срез устаревшего префикса, что и у текстовой модели выше.
+    const curVision = (out.OPENCODE_VISION_MODEL || "").replace(
+      /^opencode-go\//,
+      "",
+    );
+    out.OPENCODE_VISION_MODEL = await pickFromList(
+      models,
+      curVision,
+      CATALOG.opencode.visionDef ?? "",
+    );
     out.OPENCODE_CONTEXT_WINDOW = out.OPENCODE_CONTEXT_WINDOW || "131072";
     console.log(
       `  → ${t("model", "модель")}: ${C.g}${out.OPENCODE_MODEL}${C.x}`,
     );
+    console.log(`  → vision: ${C.g}${out.OPENCODE_VISION_MODEL}${C.x}`);
   } else if (provider === "openrouter") {
     console.log(
       `\n  ${t("OpenRouter key", "Ключ OpenRouter")}: ${C.c}https://openrouter.ai/keys${C.x} ${t("(Create Key → copy sk-or-…).", "(Create Key → скопируйте sk-or-…).")}`,
@@ -758,10 +788,24 @@ async function main() {
       out.OPENROUTER_MODEL = m;
       break;
     }
+    // Vision — отдельный слаг: выбранная текстовая модель может быть text-only.
+    // Живого теста тут нет (мастер не шлёт картинку) — только дефолт и то, что вписали.
+    const visionDef = CATALOG.openrouter.visionDef ?? "";
+    console.log(
+      `\n  ${t("Vision model (photos)", "Vision-модель (фото)")}: ${t("a slug that accepts images, any vendor.", "слаг модели, принимающей картинки, любого вендора.")} ${t("Enter keeps", "Enter оставит")} ${C.g}${visionDef}${C.x}.`,
+    );
+    out.OPENROUTER_VISION_MODEL =
+      (
+        await ask(
+          `  ${t("OpenRouter vision slug", "Слаг vision-модели OpenRouter")}`,
+          out.OPENROUTER_VISION_MODEL || visionDef,
+        )
+      ).trim() || visionDef;
     out.OPENROUTER_CONTEXT_WINDOW = out.OPENROUTER_CONTEXT_WINDOW || "131072";
     console.log(
       `  → ${t("model", "модель")}: ${C.g}${out.OPENROUTER_MODEL}${C.x}`,
     );
+    console.log(`  → vision: ${C.g}${out.OPENROUTER_VISION_MODEL}${C.x}`);
   } else {
     // codex — вход по подписке OpenAI (OAuth), без API-ключа. Токен → data/codex-auth.json.
     const dataDir = dataDirAbs({ ...existing, ...out });

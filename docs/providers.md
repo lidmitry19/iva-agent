@@ -4,12 +4,12 @@ Iva runs on your server with your keys. Here is every external service it talks 
 
 ## Model providers
 
-| Provider                          | Price                       | Text models                                                                                                                                      | Vision                         |
-| --------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
-| **OpenCode Go** (ex-Zen)          | ~$5/mo                      | ~23 models fetched live at setup — `deepseek-v4-pro` (default), `kimi-k3`, `kimi-k2.7-code`, `glm-5.2`, `minimax-m3`, `qwen3.7-max`, `grok-4.5`… | `qwen3.7-plus`                 |
-| **Ollama Cloud**                  | ~$20/mo                     | ~19 models fetched live — `deepseek-v4-pro` (default), `kimi-k3`, `glm-5.2`, `minimax-m3`, `gpt-oss:120b`…                                       | `gemma4:31b`                   |
-| **OpenRouter**                    | pay-as-you-go               | 300+ models across vendors — pick any slug (`vendor/model`)                                                                                      | `google/gemini-2.5-flash`      |
-| **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team | the models your plan exposes (`gpt-5.x`, `-codex`), fetched live                                                                                 | same subscription (multimodal) |
+| Provider                          | Price                       | Text models                                                                                                                                      | Vision                                                             |
+| --------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| **OpenCode Go** (ex-Zen)          | ~$5/mo                      | ~23 models fetched live at setup — `deepseek-v4-pro` (default), `kimi-k3`, `kimi-k2.7-code`, `glm-5.2`, `minimax-m3`, `qwen3.7-max`, `grok-4.5`… | `qwen3.7-plus`, override with `OPENCODE_VISION_MODEL`              |
+| **Ollama Cloud**                  | ~$20/mo                     | ~19 models fetched live — `deepseek-v4-pro` (default), `kimi-k3`, `glm-5.2`, `minimax-m3`, `gpt-oss:120b`…                                       | `gemma4:31b`, override with `OLLAMA_VISION_MODEL`                  |
+| **OpenRouter**                    | pay-as-you-go               | 300+ models across vendors — pick any slug (`vendor/model`)                                                                                      | `google/gemini-2.5-flash`, override with `OPENROUTER_VISION_MODEL` |
+| **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team | the models your plan exposes (`gpt-5.x`, `-codex`), fetched live                                                                                 | same subscription (multimodal), no variable                        |
 
 The first three are plain API keys; the last rides your personal OpenAI subscription:
 
@@ -48,11 +48,11 @@ One key for [300+ models](https://openrouter.ai/models) (Anthropic, OpenAI, Goog
 2. Copy a slug from [openrouter.ai/models](https://openrouter.ai/models) — the `vendor/model` id under the name (e.g. `anthropic/claude-sonnet-4.5`). The model must support **tool/function calling**: Iva sends tools every turn, so chat-only or image models won't work.
 3. `iva config` → provider `4` → paste the key, then the slug. Setup fires a live test **with a tool call** and continues only once the model answers — a mistyped slug or a no-tools model is rejected on the spot, not later as a silent bot.
 
-Set `OPENROUTER_CONTEXT_WINDOW` to the model's real window. Vision runs through `google/gemini-2.5-flash` regardless of your text model (billed to your OpenRouter credit).
+Set `OPENROUTER_CONTEXT_WINDOW` to the model's real window. Vision runs through `google/gemini-2.5-flash` regardless of your text model (billed to your OpenRouter credit); `OPENROUTER_VISION_MODEL` takes any other image-capable slug.
 
 ## Vision
 
-Attachments are never inlined into the model request. A photo lands in the vault, the agent gets its file path, and the provider's own vision model writes the description — OCR plus visual detail — into the daily transcript. Same key as the text model, no extra subscription.
+Attachments are never inlined into the model request. A photo lands in the vault, the agent gets its file path, and the provider's own vision model writes the description — OCR plus visual detail — into the daily transcript. Same key as the text model, no extra subscription. Each provider's default is a `*_VISION_MODEL` line in `.env` and a step in `iva config`. Being on a provider's model list is not the same as reading images: on Go the default is `qwen3.7-plus`, and several of the larger models there refuse a picture outright.
 
 ## VPS sizing
 

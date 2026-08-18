@@ -490,6 +490,7 @@ test("the setup wizard writes grep without leaking host secrets", async (t) => {
       "2", // Provider (1/2/3/4) -> OpenCode
       "test-key", // Paste the OpenCode API key
       "", // Model number -> default (deepseek-v4-pro)
+      "", // Vision model (photos) -> default from the same live list
       "", // Paste the Deepgram API key -> keep fixture dg
       "", // Recognition language (multi = auto ru/uz/en) -> default (multi)
       "", // Search provider (number) -> default (tavily)
@@ -514,6 +515,14 @@ test("the setup wizard writes grep without leaking host secrets", async (t) => {
   for (const secret of Object.values(hostSecrets)) {
     assert.equal(candidateText.includes(secret), false);
   }
+  // Vision-модель — вторая строка того же провайдера, и стоит она вплотную к своей
+  // текстовой: .env читают глазами, и разнесённые по файлу настройки одного провайдера
+  // ищутся дольше, чем правятся.
+  assert.match(
+    candidateText,
+    /^OPENCODE_MODEL=.*\nOPENCODE_VISION_MODEL=.+$/mu,
+    output,
+  );
   assert.match(
     output,
     /No key — hybrid skipped\. Memory search stays on free BM25\. Enable later: iva config\./u,

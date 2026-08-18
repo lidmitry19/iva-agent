@@ -116,6 +116,9 @@ export function createConfigCommand(
         throw new Error(
           "candidate configuration has an invalid model provider",
         );
+      // Живой проверкой подтверждается только текстовая модель: мастер картинку не шлёт,
+      // и vision-переменная (catalog.visionVar) едет в транзакцию вместе с остальным .env
+      // как есть — отдельного шва ей не нужно.
       const selected: ProviderSelection = [catalog.modelVar, catalog.keyVar];
       const port = Number(nextEnv.IVA_PORT || DEFAULT_PORT);
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
