@@ -68,7 +68,7 @@ test("model provider selection preserves each supported provider identity", () =
     {
       name: "opencode",
       model: "opencode-model",
-      visionModel: "minimax-m3",
+      visionModel: "qwen3.7-plus",
       compatibleReasoning: true,
     },
   );
@@ -119,7 +119,7 @@ test("every supported provider keeps its own default vision model", () => {
       (name) => resolveModelProvider({ MODEL_PROVIDER: name }).visionModel,
     ),
     // codex — без своей переменной: у него это дефолтная текстовая модель подписки.
-    ["gemma4:31b", "minimax-m3", "gpt-5.5", "google/gemini-2.5-flash"],
+    ["gemma4:31b", "qwen3.7-plus", "gpt-5.5", "google/gemini-2.5-flash"],
   );
 });
 
@@ -142,9 +142,9 @@ test("a configured vision variable replaces the provider default", () => {
   assert.equal(
     resolveModelProvider({
       MODEL_PROVIDER: "opencode",
-      OPENCODE_VISION_MODEL: "  opencode-go/qwen3.7-plus  ",
+      OPENCODE_VISION_MODEL: "  opencode-go/minimax-m3  ",
     }).visionModel,
-    "qwen3.7-plus",
+    "minimax-m3",
   );
 });
 
@@ -155,7 +155,7 @@ test("a blank vision variable means the provider default, not an empty model nam
         MODEL_PROVIDER: "opencode",
         OPENCODE_VISION_MODEL: raw,
       }).visionModel,
-      "minimax-m3",
+      "qwen3.7-plus",
       JSON.stringify(raw),
     );
   }
@@ -192,7 +192,7 @@ test("a vision variable of another provider never reaches the selection", () => 
       MODEL_PROVIDER: "opencode",
       OLLAMA_VISION_MODEL: "ollama-eyes",
     }).visionModel,
-    "minimax-m3",
+    "qwen3.7-plus",
   );
   assert.equal(
     resolveModelProvider({ MODEL_PROVIDER: "codex", ...noise }).visionModel,
@@ -314,7 +314,7 @@ test("runtime configuration and usage share the resolved provider identity", (t)
     model: "test-model",
     // Vision-переменной в env прогона нет — приезжает дефолт провайдера, а не текстовая
     // модель и не пустая строка.
-    vision: "minimax-m3",
+    vision: "qwen3.7-plus",
     effort: "high",
   });
   const usage: unknown = JSON.parse(
@@ -337,9 +337,9 @@ test("a configured vision model reaches the runtime configuration of the process
       env: {
         MODEL_PROVIDER: "opencode",
         OPENCODE_MODEL: "glm-5.2",
-        OPENCODE_VISION_MODEL: "opencode-go/qwen3.7-plus",
+        OPENCODE_VISION_MODEL: "opencode-go/minimax-m3",
       },
-      expected: { vision: "qwen3.7-plus" },
+      expected: { vision: "minimax-m3" },
     },
     {
       // codex: своей переменной нет, чужая молчит, картинку смотрит текстовая модель.

@@ -67,16 +67,15 @@ export const MODEL_PROVIDERS = {
     modelVar: "OPENCODE_MODEL",
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
-    // Каталог Go течёт, и «есть в GET /models» картинки не обещает: gemini-3-flash выпал
-    // (401 "Model gemini-3-flash is not supported"), а gpt-5.6-luna на любую картинку
-    // отвечает 400 с пустым телом — текст берёт, кадр не видит. reasoning_effort на Go
-    // тоже не вариант: max → 400 invalid_request_error. Дефолт minimax-m3: 200 и описание
-    // в message.content, самое подробное из проверенных (~11 с). Годен и qwen3.7-plus —
-    // вдвое быстрее и чуть беднее. Всё проверено живыми запросами 2026-08-18.
-    // У mimo-v2.5 слабый OCR; glm-*, deepseek-*, grok-4.5, qwen3.7-max картинок не видят.
-    // Переопределяется OPENCODE_VISION_MODEL.
+    // Живая проверка 2026-08-18, картинка через POST /chat/completions: qwen3.7-plus
+    // отвечает 200 и кладёт в message.content чистое описание с OCR (4-6 с) — он и дефолт.
+    // minimax-m3 картинку тоже видит, но течёт <think>…</think> прямо в content, а vision.ts
+    // рассуждение не режет — оно уехало бы в транскрипт. gpt-5.6-luna на любую форму
+    // картинки отвечает 400 с пустым телом, хотя текст берёт. reasoning_effort на Go
+    // отвергается: max → 400 invalid_request_error. glm-*, deepseek-*, qwen3.7-max и
+    // grok-4.5 картинок не видят вовсе. Переопределяется OPENCODE_VISION_MODEL.
     visionModelVar: "OPENCODE_VISION_MODEL",
-    defaultVisionModel: "minimax-m3",
+    defaultVisionModel: "qwen3.7-plus",
   },
   codex: {
     modelVar: "CODEX_MODEL",
