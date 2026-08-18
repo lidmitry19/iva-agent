@@ -25,6 +25,8 @@ test("R1: valid, empty, and invalid timezone settings resolve identically", () =
     [" Asia/Tashkent ", "Asia/Tashkent"],
     ["", "UTC"],
     ["Mars/Olympus", "UTC"],
+    // Канон, а не ввод: `europe/moscow` в `OnCalendar=` не поднимает таймер systemd.
+    ["europe/moscow", "Europe/Moscow"],
   ] as const) {
     assert.equal(resolveAuthoredTimeZone(input), expected);
     assert.equal(resolveOperationalTimeZone(input), expected);
