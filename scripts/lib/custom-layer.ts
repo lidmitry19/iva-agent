@@ -40,6 +40,12 @@ const AUTHORED_PATHSPECS = [
   "agent/subagents",
 ] as const;
 
+// Деревья исходников, из которых собран рантайм. Список один и живёт здесь: модуль
+// одного дерева импортирует соседнее (`agent/lib/data-dir.ts` → `packages/data-dir`),
+// и снапшот, потерявший такое дерево, даёт [UNRESOLVED_IMPORT] на первом же старте
+// сервиса. Полноту списка держит страж в scripts/authored-tree-guard.test.ts.
+export const RUNTIME_SOURCE_TREES = ["agent", "scripts", "packages"] as const;
+
 // Скиллы остаются файлами пользователя (isAuthoredPath, дайджест custom-версии) и
 // переживают обновление, но входом сборки быть перестали.
 const SKILLS_PREFIX = "agent/skills/";
@@ -550,7 +556,7 @@ export function materializeCustomLayer({
     );
   }
   const runtimeDigest = createHash("sha256")
-    .update("runtime-layout-v2")
+    .update("runtime-layout-v3")
     .update(targetRevision)
     .update(JSON.stringify(manifest.entries))
     .digest("hex")
@@ -564,21 +570,19 @@ export function materializeCustomLayer({
     mkdirSync(runtimes, { recursive: true, mode: 0o700 });
     const stagedRuntime = mkdtempSync(join(runtimes, ".staging-"));
     try {
-      cpSync(join(root, "agent"), join(stagedRuntime, "agent"), {
-        recursive: true,
-        preserveTimestamps: true,
-      });
-      // Authored agent modules import runtime helpers through ../scripts and
-      // ../../scripts. Keep that source topology intact after the disposable
-      // update worktree is removed, otherwise Eve cannot bundle the promoted
-      // agent on the next service start. Trees without scripts/ (minimal
-      // fixtures, stripped archives) have nothing to carry over.
-      const rootScripts = join(root, "scripts");
-      if (existsSync(rootScripts))
-        cpSync(rootScripts, join(stagedRuntime, "scripts"), {
-          recursive: true,
-          preserveTimestamps: true,
-        });
+      // Authored agent modules import runtime helpers across tree boundaries
+      // (../scripts, ../../packages). Keep that source topology intact after
+      // the disposable update worktree is removed, otherwise Eve cannot bundle
+      // the promoted agent on the next service start. A tree the checkout does
+      // not carry (minimal fixtures, stripped archives) has nothing to copy.
+      for (const tree of RUNTIME_SOURCE_TREES) {
+        const source = join(root, tree);
+        if (existsSync(source))
+          cpSync(source, join(stagedRuntime, tree), {
+            recursive: true,
+            preserveTimestamps: true,
+          });
+      }
       renameSync(stagedRuntime, runtimeRoot);
     } catch (error) {
       rmSync(stagedRuntime, { recursive: true, force: true });

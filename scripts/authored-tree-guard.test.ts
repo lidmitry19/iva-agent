@@ -13,9 +13,11 @@
 // `usage` shares only its log path (docs/tech-debt.md §3).
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, posix, relative, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { RUNTIME_SOURCE_TREES } from "./lib/custom-layer.ts";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const AUTHORED = join(ROOT, "agent");
@@ -66,7 +68,7 @@ function targetOf(specifier: string, fromFile: string): string | null {
   return null;
 }
 
-function authoredTypeScriptFiles(): string[] {
+function productionTypeScriptFiles(tree: string): string[] {
   const files: string[] = [];
   const visit = (relativeDirectory: string): void => {
     for (const entry of readdirSync(join(ROOT, relativeDirectory), {
@@ -84,14 +86,14 @@ function authoredTypeScriptFiles(): string[] {
         files.push(relativePath);
     }
   };
-  visit("agent");
+  visit(tree);
   return files.sort();
 }
 
 // Every edge out of the authored tree, as "file -> specifier".
 function escapes(): string[] {
   const found = new Set<string>();
-  for (const file of authoredTypeScriptFiles()) {
+  for (const file of productionTypeScriptFiles("agent")) {
     for (const match of readFileSync(join(ROOT, file), "utf8").matchAll(
       MODULE_LITERAL,
     )) {
@@ -109,6 +111,56 @@ test("the authored tree has one explicit shared-package edge", () => {
     ["agent/lib/data-dir.ts -> ../../packages/data-dir/index.ts"],
     "agent/ may leave its tree only for the canonical data-dir package that Eve bundles",
   );
+});
+
+// Which top-level tree a resolved target belongs to, or null when the literal leaves the
+// repository — a path assembled for a temporary tree in a fixture is text, not an edge of
+// this build.
+function treeOf(target: string): string | null {
+  const inside = relative(ROOT, target);
+  if (!inside || inside === ".." || inside.startsWith(`..${sep}`)) return null;
+  return inside.split(sep)[0];
+}
+
+// Every foreign tree the runtime source reaches into, as "file -> specifier -> tree".
+function crossTreeEdges(): string[] {
+  const edges = new Set<string>();
+  for (const tree of RUNTIME_SOURCE_TREES)
+    for (const file of productionTypeScriptFiles(tree))
+      for (const match of readFileSync(join(ROOT, file), "utf8").matchAll(
+        MODULE_LITERAL,
+      )) {
+        const target = targetOf(match[1], file);
+        const referenced = target === null ? null : treeOf(target);
+        if (referenced === null || referenced === tree) continue;
+        edges.add(`${file} -> ${match[1]} -> ${referenced}`);
+      }
+  return [...edges].sort();
+}
+
+function treesTheRuntimeImports(): string[] {
+  return [
+    ...new Set(
+      crossTreeEdges().map((edge) => edge.slice(edge.lastIndexOf(" ") + 1)),
+    ),
+  ].sort();
+}
+
+test("every tree the runtime imports is carried into the promoted runtime", () => {
+  const carried = new Set<string>(RUNTIME_SOURCE_TREES);
+  assert.deepEqual(
+    crossTreeEdges().filter(
+      (edge) => !carried.has(edge.slice(edge.lastIndexOf(" ") + 1)),
+    ),
+    [],
+    "materializeCustomLayer copies only RUNTIME_SOURCE_TREES into data/custom/runtimes, so a tree missing from that list leaves the promoted agent with an import eve cannot resolve — add it in scripts/lib/custom-layer.ts",
+  );
+});
+
+test("the cross-tree scan reads the edges it judges", () => {
+  // Both halves are pinned: a scan that stopped matching would pass the guard above
+  // vacuously, and a new tree in the topology has to be seen by a human.
+  assert.deepEqual(treesTheRuntimeImports(), ["agent", "packages"]);
 });
 
 // Only `from "..."` clauses: a dynamic import() is exactly the escape hatch a CLI module
