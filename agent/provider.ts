@@ -21,14 +21,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // ollama/opencode/openrouter — OpenAI-совместимы (chat/completions, статичный ключ из .env).
 // codex — личная подписка OpenAI (ChatGPT): Responses API + OAuth-токен (data/codex-auth.json,
 // `iva login`). Имена моделей и их дефолты живут в agent/lib/model-provider.ts (там же и
-// переменные *_VISION_MODEL); здесь остаётся то, что из .env не задаётся: адрес, ключ, окно
-// контекста и vision-усилие.
+// переменные *_VISION_MODEL); здесь остаётся то, что из .env не задаётся: адрес, ключ и
+// окно контекста.
 const selected = resolveModelProvider();
 const PROVIDER = selected.name;
 
 // Читается ровно в одном месте — PROVIDERS[PROVIDER] ниже, поэтому запись выбранного
-// провайдера в поле соседа невозможна. satisfies держит таблицу полной: visionReasoningEffort
-// обязателен, поэтому новый провайдер не соберётся, пока про его vision-усилие не ответили.
+// провайдера в поле соседа невозможна. satisfies держит таблицу полной.
 const PROVIDERS = {
   ollama: {
     // OLLAMA_BASE_URL — не пользовательская настройка, а шов для тестов: replica-смоук
@@ -36,30 +35,22 @@ const PROVIDERS = {
     baseURL: process.env.OLLAMA_BASE_URL ?? "https://ollama.com/v1",
     apiKey: process.env.OLLAMA_API_KEY,
     contextWindow: 131072,
-    visionReasoningEffort: undefined,
   },
   opencode: {
     // Продукт переименован Zen → Go, но API живёт на легаси-пути /zen/ (у /go/v1 — 404).
     baseURL: "https://opencode.ai/zen/go/v1",
     apiKey: process.env.OPENCODE_API_KEY,
     contextWindow: 131072,
-    // Go принимает OpenAI-совместимый reasoning_effort прямо в chat/completions, и на картинке
-    // берём максимум: описание фото — единственный шанс модели рассмотреть кадр. Это константа
-    // провайдера, а не THINKING_EFFORT: тот про текстовый ход. Живьём на gpt-5.6-luna не
-    // проверено (ключа Go в репозитории нет) — см. agent/lib/model-provider.ts.
-    visionReasoningEffort: "max",
   },
   openrouter: {
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     contextWindow: 131072,
-    visionReasoningEffort: undefined,
   },
   codex: {
     baseURL: CODEX_BASE_URL,
     apiKey: undefined, // авторизация — OAuth-токен подписки, не статичный ключ (см. codexFetch)
     contextWindow: 272000,
-    visionReasoningEffort: undefined,
   },
 } as const satisfies Record<
   ModelProviderName,
@@ -67,7 +58,6 @@ const PROVIDERS = {
     baseURL: string;
     apiKey: string | undefined;
     contextWindow: number;
-    visionReasoningEffort: "max" | undefined;
   }
 >;
 

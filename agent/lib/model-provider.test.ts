@@ -68,7 +68,7 @@ test("model provider selection preserves each supported provider identity", () =
     {
       name: "opencode",
       model: "opencode-model",
-      visionModel: "gpt-5.6-luna",
+      visionModel: "minimax-m3",
       compatibleReasoning: true,
     },
   );
@@ -119,7 +119,7 @@ test("every supported provider keeps its own default vision model", () => {
       (name) => resolveModelProvider({ MODEL_PROVIDER: name }).visionModel,
     ),
     // codex — без своей переменной: у него это дефолтная текстовая модель подписки.
-    ["gemma4:31b", "gpt-5.6-luna", "gpt-5.5", "google/gemini-2.5-flash"],
+    ["gemma4:31b", "minimax-m3", "gpt-5.5", "google/gemini-2.5-flash"],
   );
 });
 
@@ -155,7 +155,7 @@ test("a blank vision variable means the provider default, not an empty model nam
         MODEL_PROVIDER: "opencode",
         OPENCODE_VISION_MODEL: raw,
       }).visionModel,
-      "gpt-5.6-luna",
+      "minimax-m3",
       JSON.stringify(raw),
     );
   }
@@ -192,7 +192,7 @@ test("a vision variable of another provider never reaches the selection", () => 
       MODEL_PROVIDER: "opencode",
       OLLAMA_VISION_MODEL: "ollama-eyes",
     }).visionModel,
-    "gpt-5.6-luna",
+    "minimax-m3",
   );
   assert.equal(
     resolveModelProvider({ MODEL_PROVIDER: "codex", ...noise }).visionModel,
@@ -297,7 +297,6 @@ test("runtime configuration and usage share the resolved provider identity", (t)
       name: provider.providerName,
       model: provider.providerConfig.textModel,
       vision: provider.providerConfig.visionModel,
-      visionEffort: provider.providerConfig.visionReasoningEffort,
       effort: provider.compatibleThinkingEffort,
     }));
   `,
@@ -313,10 +312,9 @@ test("runtime configuration and usage share the resolved provider identity", (t)
   assert.deepEqual(JSON.parse(result.stdout.trim()), {
     name: "opencode",
     model: "test-model",
-    // Vision-переменной в env прогона нет — приезжает дефолт провайдера, а усилие
-    // на картинке своё, константой провайдера, и от THINKING_EFFORT не зависит.
-    vision: "gpt-5.6-luna",
-    visionEffort: "max",
+    // Vision-переменной в env прогона нет — приезжает дефолт провайдера, а не текстовая
+    // модель и не пустая строка.
+    vision: "minimax-m3",
     effort: "high",
   });
   const usage: unknown = JSON.parse(
@@ -333,7 +331,7 @@ test("runtime configuration and usage share the resolved provider identity", (t)
 test("a configured vision model reaches the runtime configuration of the process", () => {
   const cases: {
     env: Record<string, string>;
-    expected: { vision: string; visionEffort: string | null };
+    expected: { vision: string };
   }[] = [
     {
       env: {
@@ -341,7 +339,7 @@ test("a configured vision model reaches the runtime configuration of the process
         OPENCODE_MODEL: "glm-5.2",
         OPENCODE_VISION_MODEL: "opencode-go/qwen3.7-plus",
       },
-      expected: { vision: "qwen3.7-plus", visionEffort: "max" },
+      expected: { vision: "qwen3.7-plus" },
     },
     {
       // codex: своей переменной нет, чужая молчит, картинку смотрит текстовая модель.
@@ -350,7 +348,7 @@ test("a configured vision model reaches the runtime configuration of the process
         CODEX_MODEL: "gpt-5.5",
         OLLAMA_VISION_MODEL: "nope",
       },
-      expected: { vision: "gpt-5.5", visionEffort: null },
+      expected: { vision: "gpt-5.5" },
     },
   ];
   for (const { env, expected } of cases) {
@@ -360,7 +358,6 @@ test("a configured vision model reaches the runtime configuration of the process
       const provider = await import("./agent/provider.ts");
       console.log(JSON.stringify({
         vision: provider.providerConfig.visionModel,
-        visionEffort: provider.providerConfig.visionReasoningEffort ?? null,
       }));
     `,
       env,

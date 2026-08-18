@@ -90,8 +90,9 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     keyVar: "OPENCODE_API_KEY",
     modelVar: "OPENCODE_MODEL",
     def: "deepseek-v4-pro",
+    // Живая проверка 2026-08-18: minimax-m3 описывает картинку, gpt-5.6-luna отвечает 400.
     visionVar: "OPENCODE_VISION_MODEL",
-    visionDef: "gpt-5.6-luna",
+    visionDef: "minimax-m3",
     // Mirrors OPENCODE_MODELS in scripts/setup/main.ts (bare IDs, no "opencode-go/" prefix).
     models: [
       "deepseek-v4-pro",

@@ -37,8 +37,7 @@ export async function describeImage(
     return out.trim();
   }
 
-  const { baseURL, apiKey, visionModel, visionReasoningEffort } =
-    providerConfig;
+  const { baseURL, apiKey, visionModel } = providerConfig;
   if (!apiKey || !visionModel) return "";
   const b64 = Buffer.from(bytes).toString("base64");
   const res = await fetch(`${baseURL}/chat/completions`, {
@@ -50,12 +49,6 @@ export async function describeImage(
     body: JSON.stringify({
       model: visionModel,
       max_tokens: 700,
-      // Усилие — константа провайдера (agent/provider.ts), не THINKING_EFFORT: то про
-      // текстовый ход. Провайдер без него поле не получает вовсе — лишний параметр в теле
-      // это лишний шанс на 400.
-      ...(visionReasoningEffort
-        ? { reasoning_effort: visionReasoningEffort }
-        : {}),
       messages: [
         {
           role: "user",

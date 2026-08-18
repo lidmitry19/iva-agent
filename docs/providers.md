@@ -6,7 +6,7 @@ Iva runs on your server with your keys. Here is every external service it talks 
 
 | Provider                          | Price                       | Text models                                                                                                                                      | Vision                                                             |
 | --------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| **OpenCode Go** (ex-Zen)          | ~$5/mo                      | ~23 models fetched live at setup — `deepseek-v4-pro` (default), `kimi-k3`, `kimi-k2.7-code`, `glm-5.2`, `minimax-m3`, `qwen3.7-max`, `grok-4.5`… | `gpt-5.6-luna`, override with `OPENCODE_VISION_MODEL`              |
+| **OpenCode Go** (ex-Zen)          | ~$5/mo                      | ~23 models fetched live at setup — `deepseek-v4-pro` (default), `kimi-k3`, `kimi-k2.7-code`, `glm-5.2`, `minimax-m3`, `qwen3.7-max`, `grok-4.5`… | `minimax-m3`, override with `OPENCODE_VISION_MODEL`                |
 | **Ollama Cloud**                  | ~$20/mo                     | ~19 models fetched live — `deepseek-v4-pro` (default), `kimi-k3`, `glm-5.2`, `minimax-m3`, `gpt-oss:120b`…                                       | `gemma4:31b`, override with `OLLAMA_VISION_MODEL`                  |
 | **OpenRouter**                    | pay-as-you-go               | 300+ models across vendors — pick any slug (`vendor/model`)                                                                                      | `google/gemini-2.5-flash`, override with `OPENROUTER_VISION_MODEL` |
 | **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team | the models your plan exposes (`gpt-5.x`, `-codex`), fetched live                                                                                 | same subscription (multimodal), no variable                        |
@@ -52,7 +52,7 @@ Set `OPENROUTER_CONTEXT_WINDOW` to the model's real window. Vision runs through 
 
 ## Vision
 
-Attachments are never inlined into the model request. A photo lands in the vault, the agent gets its file path, and the provider's own vision model writes the description — OCR plus visual detail — into the daily transcript. Same key as the text model, no extra subscription. Each provider's default is a `*_VISION_MODEL` line in `.env` and a step in `iva config`; on Go the default is `gpt-5.6-luna` and the request carries `reasoning_effort: max`.
+Attachments are never inlined into the model request. A photo lands in the vault, the agent gets its file path, and the provider's own vision model writes the description — OCR plus visual detail — into the daily transcript. Same key as the text model, no extra subscription. Each provider's default is a `*_VISION_MODEL` line in `.env` and a step in `iva config`. Being on a provider's model list is not the same as reading images — on Go, `minimax-m3` describes a picture while several larger models answer 400.
 
 ## VPS sizing
 
