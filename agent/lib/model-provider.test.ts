@@ -42,6 +42,7 @@ test("model provider selection defaults to Ollama", () => {
   assert.deepEqual(resolveModelProvider({}), {
     name: "ollama",
     model: "deepseek-v4-pro",
+    visionModel: "gemma4:31b",
     compatibleReasoning: true,
   });
 });
@@ -52,14 +53,24 @@ test("model provider selection preserves each supported provider identity", () =
       MODEL_PROVIDER: "ollama",
       OLLAMA_MODEL: "ollama-model",
     }),
-    { name: "ollama", model: "ollama-model", compatibleReasoning: true },
+    {
+      name: "ollama",
+      model: "ollama-model",
+      visionModel: "gemma4:31b",
+      compatibleReasoning: true,
+    },
   );
   assert.deepEqual(
     resolveModelProvider({
       MODEL_PROVIDER: "opencode",
       OPENCODE_MODEL: "opencode-go/opencode-model",
     }),
-    { name: "opencode", model: "opencode-model", compatibleReasoning: true },
+    {
+      name: "opencode",
+      model: "opencode-model",
+      visionModel: "gpt-5.6-luna",
+      compatibleReasoning: true,
+    },
   );
   assert.deepEqual(
     resolveModelProvider({
@@ -69,6 +80,7 @@ test("model provider selection preserves each supported provider identity", () =
     {
       name: "openrouter",
       model: "vendor/router-model",
+      visionModel: "google/gemini-2.5-flash",
       compatibleReasoning: false,
     },
   );
@@ -77,7 +89,13 @@ test("model provider selection preserves each supported provider identity", () =
       MODEL_PROVIDER: "codex",
       CODEX_MODEL: "codex-model",
     }),
-    { name: "codex", model: "codex-model", compatibleReasoning: false },
+    {
+      name: "codex",
+      model: "codex-model",
+      // Подписка мультимодальна: картинку смотрит та же текстовая модель.
+      visionModel: "codex-model",
+      compatibleReasoning: false,
+    },
   );
 });
 
@@ -87,6 +105,114 @@ test("every supported provider keeps its own default model", () => {
       (name) => resolveModelProvider({ MODEL_PROVIDER: name }).model,
     ),
     ["deepseek-v4-pro", "deepseek-v4-pro", "gpt-5.5", "openai/gpt-5.1"],
+  );
+});
+
+// ─── Vision-модель ────────────────────────────────────────────────────────────────────
+// Вторая модель того же провайдера: текстовая сплошь и рядом слепая, поэтому фото уходит
+// своей. Правило чтения переменной у обеих моделей одно — здесь проверяется, что оно
+// действительно одно, и что провайдеры не читают переменные друг друга.
+
+test("every supported provider keeps its own default vision model", () => {
+  assert.deepEqual(
+    MODEL_PROVIDER_NAMES.map(
+      (name) => resolveModelProvider({ MODEL_PROVIDER: name }).visionModel,
+    ),
+    // codex — без своей переменной: у него это дефолтная текстовая модель подписки.
+    ["gemma4:31b", "gpt-5.6-luna", "gpt-5.5", "google/gemini-2.5-flash"],
+  );
+});
+
+test("a configured vision variable replaces the provider default", () => {
+  assert.equal(
+    resolveModelProvider({
+      MODEL_PROVIDER: "ollama",
+      OLLAMA_VISION_MODEL: "llava:34b",
+    }).visionModel,
+    "llava:34b",
+  );
+  assert.equal(
+    resolveModelProvider({
+      MODEL_PROVIDER: "openrouter",
+      OPENROUTER_VISION_MODEL: "vendor/eyes",
+    }).visionModel,
+    "vendor/eyes",
+  );
+  // Префикс мастера срезается и у vision — эндпоинт Go ждёт bare-ID и здесь тоже.
+  assert.equal(
+    resolveModelProvider({
+      MODEL_PROVIDER: "opencode",
+      OPENCODE_VISION_MODEL: "  opencode-go/qwen3.7-plus  ",
+    }).visionModel,
+    "qwen3.7-plus",
+  );
+});
+
+test("a blank vision variable means the provider default, not an empty model name", () => {
+  for (const raw of ["", " ", "\t\n", "\u00a0", "opencode-go/"]) {
+    assert.equal(
+      resolveModelProvider({
+        MODEL_PROVIDER: "opencode",
+        OPENCODE_VISION_MODEL: raw,
+      }).visionModel,
+      "gpt-5.6-luna",
+      JSON.stringify(raw),
+    );
+  }
+});
+
+// Vision-модель codex не настраивается: подписка мультимодальна, картинка идёт той же
+// моделью и тем же токеном. Любая *_VISION_MODEL в .env для него — чужая строка.
+test("codex takes its vision model from the text model and ignores every vision variable", () => {
+  const selection = resolveModelProvider({
+    MODEL_PROVIDER: "codex",
+    CODEX_MODEL: "gpt-5.5-codex",
+    CODEX_VISION_MODEL: "nope",
+    OLLAMA_VISION_MODEL: "nope",
+    OPENCODE_VISION_MODEL: "nope",
+    OPENROUTER_VISION_MODEL: "nope",
+  });
+  assert.equal(selection.visionModel, "gpt-5.5-codex");
+  assert.equal(selection.visionModel, selection.model);
+});
+
+// Тот же раскол, что и с текстовой моделью: чужая переменная не смеет доехать до запроса.
+test("a vision variable of another provider never reaches the selection", () => {
+  const noise = {
+    OLLAMA_VISION_MODEL: "ollama-eyes",
+    OPENCODE_VISION_MODEL: "opencode-eyes",
+    OPENROUTER_VISION_MODEL: "openrouter-eyes",
+  };
+  assert.equal(
+    resolveModelProvider({ MODEL_PROVIDER: "opencode", ...noise }).visionModel,
+    "opencode-eyes",
+  );
+  assert.equal(
+    resolveModelProvider({
+      MODEL_PROVIDER: "opencode",
+      OLLAMA_VISION_MODEL: "ollama-eyes",
+    }).visionModel,
+    "gpt-5.6-luna",
+  );
+  assert.equal(
+    resolveModelProvider({ MODEL_PROVIDER: "codex", ...noise }).visionModel,
+    "gpt-5.5",
+  );
+});
+
+// Текстовая и vision-модель настраиваются независимо: смена одной не трогает другую.
+test("the text model and the vision model are configured independently", () => {
+  const selection = resolveModelProvider({
+    MODEL_PROVIDER: "ollama",
+    OLLAMA_MODEL: "glm-5.2",
+    OLLAMA_VISION_MODEL: "gemma4:31b",
+  });
+  assert.equal(selection.model, "glm-5.2");
+  assert.equal(selection.visionModel, "gemma4:31b");
+  assert.equal(
+    resolveModelProvider({ MODEL_PROVIDER: "ollama", OLLAMA_MODEL: "glm-5.2" })
+      .visionModel,
+    "gemma4:31b",
   );
 });
 
@@ -170,6 +296,8 @@ test("runtime configuration and usage share the resolved provider identity", (t)
     console.log(JSON.stringify({
       name: provider.providerName,
       model: provider.providerConfig.textModel,
+      vision: provider.providerConfig.visionModel,
+      visionEffort: provider.providerConfig.visionReasoningEffort,
       effort: provider.compatibleThinkingEffort,
     }));
   `,
@@ -185,6 +313,10 @@ test("runtime configuration and usage share the resolved provider identity", (t)
   assert.deepEqual(JSON.parse(result.stdout.trim()), {
     name: "opencode",
     model: "test-model",
+    // Vision-переменной в env прогона нет — приезжает дефолт провайдера, а усилие
+    // на картинке своё, константой провайдера, и от THINKING_EFFORT не зависит.
+    vision: "gpt-5.6-luna",
+    visionEffort: "max",
     effort: "high",
   });
   const usage: unknown = JSON.parse(
@@ -194,6 +326,53 @@ test("runtime configuration and usage share the resolved provider identity", (t)
   if (!isRecord(usage)) return;
   assert.equal(usage.provider, "opencode");
   assert.equal(usage.model, "test-model");
+});
+
+// Переменная из .env обязана доехать до тела запроса, а не остаться в резолвере: картинку
+// шлёт agent/vision.ts, читая providerConfig целым процессом — так же, как стартует агент.
+test("a configured vision model reaches the runtime configuration of the process", () => {
+  const cases: {
+    env: Record<string, string>;
+    expected: { vision: string; visionEffort: string | null };
+  }[] = [
+    {
+      env: {
+        MODEL_PROVIDER: "opencode",
+        OPENCODE_MODEL: "glm-5.2",
+        OPENCODE_VISION_MODEL: "opencode-go/qwen3.7-plus",
+      },
+      expected: { vision: "qwen3.7-plus", visionEffort: "max" },
+    },
+    {
+      // codex: своей переменной нет, чужая молчит, картинку смотрит текстовая модель.
+      env: {
+        MODEL_PROVIDER: "codex",
+        CODEX_MODEL: "gpt-5.5",
+        OLLAMA_VISION_MODEL: "nope",
+      },
+      expected: { vision: "gpt-5.5", visionEffort: null },
+    },
+  ];
+  for (const { env, expected } of cases) {
+    const result = runInRepo(
+      `
+      await import("./scripts/lib/ts-esm-hooks.ts");
+      const provider = await import("./agent/provider.ts");
+      console.log(JSON.stringify({
+        vision: provider.providerConfig.visionModel,
+        visionEffort: provider.providerConfig.visionReasoningEffort ?? null,
+      }));
+    `,
+      env,
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      JSON.parse(result.stdout.trim()),
+      expected,
+      env.MODEL_PROVIDER,
+    );
+  }
 });
 
 // Обе точки входа рантайма читают MODEL_PROVIDER на загрузке модуля — падать они обязаны
@@ -441,6 +620,86 @@ test("property: padding around a real model is trimmed, not passed through", () 
           [MODEL_PROVIDERS[name].modelVar]: `${pad}${model}${pad}`,
         });
         assert.equal(selection.model, model);
+      },
+    ),
+    RUNS,
+  );
+});
+
+// Vision-модель читается тем же правилом, что и текстовая, — значит и свойства у неё те же.
+// Отдельно проверяется, что своя переменная не тянет за собой чужие: у codex её нет вовсе,
+// и подставить туда соседнюю строку .env нельзя ни при каком входе.
+test("property: a blank or padded vision variable always means the provider default", () => {
+  const blank = fc
+    .array(fc.constantFrom(" ", "\t", "\n", "\r", "\u00a0"), { maxLength: 6 })
+    .map((chars) => chars.join(""));
+  fc.assert(
+    fc.property(
+      fc.constantFrom(...MODEL_PROVIDER_NAMES),
+      blank,
+      (name, padding) => {
+        const variable = MODEL_PROVIDERS[name].visionModelVar;
+        const selection = resolveModelProvider({
+          MODEL_PROVIDER: name,
+          ...(variable === null ? {} : { [variable]: padding }),
+        });
+        assert.equal(
+          selection.visionModel,
+          // codex без переменной отвечает своей текстовой моделью.
+          MODEL_PROVIDERS[name].defaultVisionModel ?? selection.model,
+        );
+        assert.equal(selection.visionModel.length > 0, true);
+      },
+    ),
+    RUNS,
+  );
+});
+
+test("property: a configured vision model arrives trimmed and never from a neighbour", () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom(...MODEL_PROVIDER_NAMES),
+      fc.string({ minLength: 1 }).filter((s) => s === s.trim()),
+      fc.constantFrom("", " ", "  ", "\t", "\n"),
+      (name, model, pad) => {
+        // Все четыре vision-переменные помечены своим провайдером: чужая видна сразу.
+        const env: Record<string, string> = { MODEL_PROVIDER: name };
+        for (const other of MODEL_PROVIDER_NAMES) {
+          const variable = MODEL_PROVIDERS[other].visionModelVar;
+          if (variable !== null)
+            env[variable] = `${pad}${other}::${model}${pad}`;
+        }
+
+        const selection = resolveModelProvider(env);
+        const variable = MODEL_PROVIDERS[name].visionModelVar;
+        assert.equal(
+          selection.visionModel,
+          variable === null ? selection.model : `${name}::${model}`,
+        );
+        // И текстовая модель от vision-переменных не съезжает.
+        assert.equal(selection.model, MODEL_PROVIDERS[name].defaultModel);
+      },
+    ),
+    RUNS,
+  );
+});
+
+test("property: only OpenCode strips the wizard prefix from the vision model too", () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom(...MODEL_PROVIDER_NAMES),
+      fc.string({ minLength: 1 }).filter((s) => s === s.trim()),
+      (name, model) => {
+        const variable = MODEL_PROVIDERS[name].visionModelVar;
+        if (variable === null) return;
+        const tagged = `opencode-go/${model}`;
+        assert.equal(
+          resolveModelProvider({
+            MODEL_PROVIDER: name,
+            [variable]: tagged,
+          }).visionModel,
+          name === "opencode" ? model : tagged,
+        );
       },
     ),
     RUNS,

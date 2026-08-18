@@ -46,6 +46,29 @@ test("both trees name the same model variable and the same default model", () =>
   }
 });
 
+// Vision-модель — вторая модель того же провайдера, и разъехаться ей нельзя ровно по той же
+// причине: мастер предложил бы одну модель для фото, а описывала бы картинку другая.
+// codex своей переменной не имеет — обе половины обязаны молчать об этом одинаково.
+test("both trees name the same vision variable and the same vision default", () => {
+  for (const name of MODEL_PROVIDER_NAMES) {
+    const catalog = CATALOG[name];
+    const authored = MODEL_PROVIDERS[name];
+    assert.equal(catalog.visionVar, authored.visionModelVar, name);
+    assert.equal(catalog.visionDef, authored.defaultVisionModel, name);
+    // И с другого конца: пустой env даёт дефолт каталога, а у codex — текстовую модель.
+    assert.equal(
+      resolveModelProvider({ MODEL_PROVIDER: name }).visionModel,
+      catalog.visionDef ?? catalog.def,
+      name,
+    );
+  }
+  // null стоит ровно у codex — иначе «нет переменной» тихо расползлось бы по таблице.
+  assert.deepEqual(
+    MODEL_PROVIDER_NAMES.filter((name) => CATALOG[name].visionVar === null),
+    ["codex"],
+  );
+});
+
 test("the catalog lookup takes exact names only", () => {
   for (const name of MODEL_PROVIDER_NAMES)
     assert.equal(catalogProvider(name), CATALOG[name]);

@@ -15,17 +15,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Единый источник конфигурации провайдера модели. Имя и текстовую модель выбирает
+// Единый источник конфигурации провайдера модели. Имя, текстовую и vision-модель выбирает
 // resolveModelProvider — раз при старте и одинаково для рантайма и учёта расхода; неизвестное
 // MODEL_PROVIDER валит загрузку модуля здесь же, до первого запроса к провайдеру.
 // ollama/opencode/openrouter — OpenAI-совместимы (chat/completions, статичный ключ из .env).
 // codex — личная подписка OpenAI (ChatGPT): Responses API + OAuth-токен (data/codex-auth.json,
-// `iva login`). Здесь же зашита vision-модель провайдера — её зовёт agent/vision.ts.
+// `iva login`). Имена моделей и их дефолты живут в agent/lib/model-provider.ts (там же и
+// переменные *_VISION_MODEL); здесь остаётся то, что из .env не задаётся: адрес, ключ, окно
+// контекста и vision-усилие.
 const selected = resolveModelProvider();
 const PROVIDER = selected.name;
 
 // Читается ровно в одном месте — PROVIDERS[PROVIDER] ниже, поэтому запись выбранного
-// провайдера в поле соседа невозможна. satisfies держит таблицу полной.
+// провайдера в поле соседа невозможна. satisfies держит таблицу полной: visionReasoningEffort
+// обязателен, поэтому новый провайдер не соберётся, пока про его vision-усилие не ответили.
 const PROVIDERS = {
   ollama: {
     // OLLAMA_BASE_URL — не пользовательская настройка, а шов для тестов: replica-смоук
@@ -33,37 +36,30 @@ const PROVIDERS = {
     baseURL: process.env.OLLAMA_BASE_URL ?? "https://ollama.com/v1",
     apiKey: process.env.OLLAMA_API_KEY,
     contextWindow: 131072,
-    // Дешёвая мультимодалка того же провайдера (проверено на проде: принимает image_url, http 200).
-    // Ollama Cloud снимает теги с раздачи: gemma3:12b отвечает 410 "retired at 2026-07-15" —
-    // заменён на gemma4:31b (проверено 2026-07-28). Текстовые модели (deepseek, glm, gpt-oss)
-    // отдают 400 "does not support image input", так что подменять vision на них нельзя.
-    visionModel: "gemma4:31b",
+    visionReasoningEffort: undefined,
   },
   opencode: {
     // Продукт переименован Zen → Go, но API живёт на легаси-пути /zen/ (у /go/v1 — 404).
     baseURL: "https://opencode.ai/zen/go/v1",
     apiKey: process.env.OPENCODE_API_KEY,
     contextWindow: 131072,
-    // gemini-3-flash выпал из каталога Go (401 "Model gemini-3-flash is not supported") — теперь
-    // qwen3.7-plus: отвечает 200 и кладёт описание в message.content. У glm-5.2/minimax-m3 текст
-    // уходит в reasoning, у mimo-v2.5 content пустой — vision.ts читает только content.
-    visionModel: "qwen3.7-plus",
+    // Go принимает OpenAI-совместимый reasoning_effort прямо в chat/completions, и на картинке
+    // берём максимум: описание фото — единственный шанс модели рассмотреть кадр. Это константа
+    // провайдера, а не THINKING_EFFORT: тот про текстовый ход. Живьём на gpt-5.6-luna не
+    // проверено (ключа Go в репозитории нет) — см. agent/lib/model-provider.ts.
+    visionReasoningEffort: "max",
   },
   openrouter: {
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     contextWindow: 131072,
-    // Дешёвая гарантированно-мультимодальная модель для картинок (как qwen3.7-plus у opencode):
-    // vision работает независимо от выбранной текстовой модели (та может быть text-only).
-    visionModel: "google/gemini-2.5-flash",
+    visionReasoningEffort: undefined,
   },
   codex: {
     baseURL: CODEX_BASE_URL,
     apiKey: undefined, // авторизация — OAuth-токен подписки, не статичный ключ (см. codexFetch)
     contextWindow: 272000,
-    // gpt-5* мультимодальны — картинки идут через ту же подписку (см. agent/vision.ts),
-    // поэтому vision-модель подписки — это и есть выбранная текстовая.
-    visionModel: selected.model,
+    visionReasoningEffort: undefined,
   },
 } as const satisfies Record<
   ModelProviderName,
@@ -71,7 +67,7 @@ const PROVIDERS = {
     baseURL: string;
     apiKey: string | undefined;
     contextWindow: number;
-    visionModel: string;
+    visionReasoningEffort: "max" | undefined;
   }
 >;
 
@@ -86,6 +82,9 @@ export const providerConfig = {
     PROVIDERS[PROVIDER].contextWindow,
   ),
   textModel: selected.model,
+  // Модель для картинок — из того же резолвера (переменные *_VISION_MODEL, дефолты там же).
+  // У codex это та же текстовая модель: подписка мультимодальна.
+  visionModel: selected.visionModel,
 };
 
 // THINKING_EFFORT (.env, пишут /model и /think в Telegram): reasoning-усилие модели.
