@@ -45,12 +45,20 @@ export function htmlToPlain(html: unknown): string {
 
 // ── inline markdown → html ──────────────────────────────────────────────────────
 // Protect inline code first (placeholders), escape the rest, then overlay tags.
+// Метка code-span — индекс между U+E000 и U+E001 (Unicode Private Use Area).
+// Прежняя метка «два пробела, индекс, два пробела» встречается в обычной прозе:
+// «the price is  50  dollars» и строки таблиц уезжали в чат покалеченными — текст
+// пропадал или подменялся чужим code-span. В тексте Telegram PUA не значит ничего,
+// escHtml их не трогает, а пришедшие извне срезаются первым же шагом — поэтому
+// подделать метку не может ни модель, ни пользователь.
 function inlineHtml(text: unknown): string {
   const spans: string[] = [];
-  let s = String(text).replace(/`([^`]+)`/g, (_m, c) => {
-    spans.push(`<code>${escHtml(c)}</code>`);
-    return `  ${spans.length - 1}  `;
-  });
+  let s = String(text)
+    .replace(/[\uE000\uE001]/g, "")
+    .replace(/`([^`]+)`/g, (_m, c) => {
+      spans.push(`<code>${escHtml(c)}</code>`);
+      return `\uE000${spans.length - 1}\uE001`;
+    });
   s = escHtml(s);
   // links [t](http(s)://url)
   s = s.replace(
@@ -73,7 +81,7 @@ function inlineHtml(text: unknown): string {
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<i>$1</i>")
     .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, "<i>$1</i>");
   // restore inline code
-  return s.replace(/ {2}(\d+) {2}/g, (_m, i) => spans[Number(i)] ?? "");
+  return s.replace(/\uE000(\d+)\uE001/g, (_m, i) => spans[Number(i)] ?? "");
 }
 
 // GFM table separator: |---|:--:|---|
