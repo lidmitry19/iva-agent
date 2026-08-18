@@ -10,6 +10,7 @@
 import { tr } from "./i18n.ts";
 import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
 import { toChannelLocalToken } from "./telegram-continuation-token.ts";
+import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
 // В callback_data кладём только константу: лимит 64 байта не вмещает sessionId,
 // он и так лежит в run-status.
@@ -17,6 +18,7 @@ export const TELEGRAM_STOP_CALLBACK = "iva_cancel";
 
 export type TelegramStatusHandle = {
   readonly chatId: string;
+  readonly chatType?: string;
   readonly messageThreadId?: number;
   request(
     method: string,
@@ -62,13 +64,18 @@ function messageIdFromResponse(response: { body: unknown }): number | null {
   return typeof result?.message_id === "number" ? result.message_id : null;
 }
 
+// Кнопку показываем только там, где она сработает: её колбэк принимают лишь в личке
+// (scripts/poller/control.ts, ./telegram-stop.ts). В группе мёртвый контрол хуже
+// отсутствующего, поэтому reply_markup туда не уезжает вовсе. Текстовая /stop в группе
+// работает по-прежнему — она через этот путь не ходит.
 export async function sendWorkingStatus(
   tg: TelegramStatusHandle,
   { canStop = true } = {},
 ): Promise<number | null> {
+  const withStop = canStop && isPrivateTelegramChatHandle(tg);
   const base = {
     chat_id: tg.chatId,
-    ...(canStop ? { reply_markup: stopReplyMarkup() } : {}),
+    ...(withStop ? { reply_markup: stopReplyMarkup() } : {}),
     ...(tg.messageThreadId !== undefined
       ? { message_thread_id: tg.messageThreadId }
       : {}),
@@ -94,6 +101,20 @@ export async function sendWorkingStatus(
     text: `${WORK_LOADER.fallback} ${tr("Working…", "Работаю…")}`,
   });
   return res.ok ? messageIdFromResponse(res) : null;
+}
+
+// Ранний статус уходит без кнопки: ход ещё не начался, отменять нечего. Начался — кнопку
+// дорисовываем в то же сообщение и по тому же правилу личного чата.
+export async function enableWorkingStatusStop(
+  tg: TelegramStatusHandle,
+  messageId: number,
+): Promise<void> {
+  if (!isPrivateTelegramChatHandle(tg)) return;
+  await tg.request("editMessageReplyMarkup", {
+    chat_id: tg.chatId,
+    message_id: messageId,
+    reply_markup: stopReplyMarkup(),
+  });
 }
 
 // Терминал хода: state → idle (+wasCancelled), статус-сообщение удалить (обычный финал)

@@ -23,9 +23,9 @@ import { transcribe } from "../transcribe.js";
 // объяснение сбоя — UI канала, обе реплики идут мимо Outbox. Мимо Outbox — не мимо
 // гейта: всё, во что подставлен runtime-контент, уходит через noticeSender.
 import {
+  enableWorkingStatusStop,
   finishTelegramStatus,
   sendWorkingStatus,
-  stopReplyMarkup,
   TELEGRAM_STOP_CALLBACK,
 } from "../lib/telegram-status-message.js";
 import { notifyTelegramFailure } from "../lib/telegram-failure-notice.js";
@@ -206,11 +206,7 @@ const telegram = telegramChannel({
         setStatusIfImpl: setChatStatusIf,
         sendWorkingStatusImpl: (options) => sendWorkingStatus(tg, options),
         enableWorkingStatusStopImpl: (messageId) =>
-          tg.request("editMessageReplyMarkup", {
-            chat_id: tg.chatId,
-            message_id: messageId,
-            reply_markup: stopReplyMarkup(),
-          }),
+          enableWorkingStatusStop(tg, messageId),
         removeWorkingStatusImpl: (messageId) =>
           tg.request("deleteMessage", {
             chat_id: tg.chatId,

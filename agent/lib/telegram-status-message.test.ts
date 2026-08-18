@@ -75,6 +75,38 @@ await test("отказ Telegram на custom_emoji роняет лоадер на
   assert.equal(next.calls[0].body.reply_markup, undefined);
 });
 
+await test("вне лички кнопку «Стоп» не показываем и не дорисовываем", async () => {
+  // Колбэк кнопки принимают только в личке, поэтому в группе её быть не должно:
+  // нажатие всё равно вернуло бы «откройте личный чат».
+  const supergroup = handle();
+  const groupTg = { ...supergroup.tg, chatId: "-1001", chatType: "supergroup" };
+
+  assert.equal(await status.sendWorkingStatus(groupTg), 500);
+  assert.equal(supergroup.calls.length, 1);
+  assert.equal(supergroup.calls[0].body.reply_markup, undefined);
+
+  await status.enableWorkingStatusStop(groupTg, 500);
+  assert.equal(supergroup.calls.length, 1);
+
+  // Проактивный ход приходит без типа чата — тогда решает знак chat_id.
+  const proactive = handle();
+  await status.sendWorkingStatus({ ...proactive.tg, chatId: "-1001" });
+  await status.enableWorkingStatusStop(
+    { ...proactive.tg, chatId: "-1001" },
+    500,
+  );
+  assert.equal(proactive.calls.length, 1);
+  assert.equal(proactive.calls[0].body.reply_markup, undefined);
+
+  // В личке правило прежнее: кнопка и в статусе, и в дорисовке.
+  const direct = handle();
+  assert.equal(await status.sendWorkingStatus(direct.tg), 500);
+  assert.deepEqual(direct.calls[0].body.reply_markup, status.stopReplyMarkup());
+  await status.enableWorkingStatusStop(direct.tg, 500);
+  assert.equal(direct.calls[1].method, "editMessageReplyMarkup");
+  assert.deepEqual(direct.calls[1].body.reply_markup, status.stopReplyMarkup());
+});
+
 await test("обычный финал гасит статус и убирает сообщение, повтор — no-op", async () => {
   const key = runStatus.chatKeyOf("77", undefined);
   runStatus.setChatStatus(key, {
