@@ -10,7 +10,7 @@
 [![Node 24](https://img.shields.io/badge/node-24.x-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Last release](https://img.shields.io/github/release-date/smixs/iva-agent?label=last%20release&color=informational)](https://github.com/smixs/iva-agent/releases)
 
-[Юзкейсы](#зачем-люди-ставят-иву) · [Что умеет](#что-умеет) · [Установка](#установка) · [Память](#память---то-что-копится) · [Что нового](#что-нового) · [Документация](#документация)
+[Сайт](https://iva-agent.com) · [Юзкейсы](#зачем-люди-ставят-иву) · [Что умеет](#что-умеет) · [Установка](#установка) · [Память](#память---то-что-копится) · [Что нового](#что-нового) · [Документация](#документация)
 
 </div>
 

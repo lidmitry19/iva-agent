@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://smixs.github.io/iva/sitemap.xml
+Sitemap: https://iva-agent.com/sitemap.xml

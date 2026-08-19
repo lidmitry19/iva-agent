@@ -10,24 +10,24 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | b
 
 ## Docs
 
-- [Use cases](https://smixs.github.io/iva/use-cases.md): Who runs Iva and for what — scenarios for business owners, specialists, executives and everyday life
-- [Install](https://smixs.github.io/iva/install.md): One command on a fresh Ubuntu VPS — requirements, what install.sh does, flags, and the bot's first message
-- [Configuration](https://smixs.github.io/iva/configuration.md): Every .env variable and the setup wizard (`iva config`)
-- [Memory](https://smixs.github.io/iva/memory.md): The layered vault — daily transcripts, nightly rollups, typed cards, CORE.md, BM25 + graph search
-- [Security & privacy](https://smixs.github.io/iva/security.md): Inbound injection screening, outbound secret redaction, fail-closed user allowlist
-- [Providers & cost](https://smixs.github.io/iva/providers.md): Every external service Iva talks to, with real prices — models, transcription, vision, search
-- [Deploy](https://smixs.github.io/iva/deploy.md): Two systemd user services, two watchdog timers, and five in-process Eve schedules, plus long polling, updates, and backups
-- [Command reference](https://smixs.github.io/iva/cli.md): Telegram slash commands and the `iva` CLI
-- [Settings menu](https://smixs.github.io/iva/menu.md): The `/menu` hub — screen map, what applies instantly vs on restart, key intake, character test, memory interview
-- [Extending](https://smixs.github.io/iva/extending.md): Add skills, MCP connections, and custom tools
-- [Plugins](https://smixs.github.io/iva/plugins.md): Agent Plugins folders - install from a Marketplace, git or a folder, enabled vs trusted, writing skills, an eve Extension, MCP servers and services, and the accepted risk
-- [Trace](https://smixs.github.io/iva/trace.md): The turn journal - the event schema, the catalogue, how to stitch one turn, retention and the content toggle
-- [FAQ](https://smixs.github.io/iva/faq.md): Short answers on cost, models, privacy, and Obsidian
-- [Troubleshooting](https://smixs.github.io/iva/troubleshooting.md): Diagnosing a silent bot, failed timers, and provider errors
+- [Use cases](https://iva-agent.com/use-cases.md): Who runs Iva and for what — scenarios for business owners, specialists, executives and everyday life
+- [Install](https://iva-agent.com/install.md): One command on a fresh Ubuntu VPS — requirements, what install.sh does, flags, and the bot's first message
+- [Configuration](https://iva-agent.com/configuration.md): Every .env variable and the setup wizard (`iva config`)
+- [Memory](https://iva-agent.com/memory.md): The layered vault — daily transcripts, nightly rollups, typed cards, CORE.md, BM25 + graph search
+- [Security & privacy](https://iva-agent.com/security.md): Inbound injection screening, outbound secret redaction, fail-closed user allowlist
+- [Providers & cost](https://iva-agent.com/providers.md): Every external service Iva talks to, with real prices — models, transcription, vision, search
+- [Deploy](https://iva-agent.com/deploy.md): Two systemd user services, two watchdog timers, and five in-process Eve schedules, plus long polling, updates, and backups
+- [Command reference](https://iva-agent.com/cli.md): Telegram slash commands and the `iva` CLI
+- [Settings menu](https://iva-agent.com/menu.md): The `/menu` hub — screen map, what applies instantly vs on restart, key intake, character test, memory interview
+- [Extending](https://iva-agent.com/extending.md): Add skills, MCP connections, and custom tools
+- [Plugins](https://iva-agent.com/plugins.md): Agent Plugins folders - install from a Marketplace, git or a folder, enabled vs trusted, writing skills, an eve Extension, MCP servers and services, and the accepted risk
+- [Trace](https://iva-agent.com/trace.md): The turn journal - the event schema, the catalogue, how to stitch one turn, retention and the content toggle
+- [FAQ](https://iva-agent.com/faq.md): Short answers on cost, models, privacy, and Obsidian
+- [Troubleshooting](https://iva-agent.com/troubleshooting.md): Diagnosing a silent bot, failed timers, and provider errors
 
 ## Optional
 
 - [README (Russian)](https://github.com/smixs/iva-agent/blob/main/README.ru.md): Full project README in Russian
-- [Design philosophy](https://smixs.github.io/iva/philosophy.md): Why most new behaviour becomes a skill instead of code
-- [Tech debt](https://smixs.github.io/iva/tech-debt.md): Known gaps and deliberately deferred decisions
+- [Design philosophy](https://iva-agent.com/philosophy.md): Why most new behaviour becomes a skill instead of code
+- [Tech debt](https://iva-agent.com/tech-debt.md): Known gaps and deliberately deferred decisions
 - [Changelog](https://github.com/smixs/iva-agent/blob/main/CHANGELOG.md): Release history
