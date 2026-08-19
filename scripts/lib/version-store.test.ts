@@ -651,6 +651,144 @@ test("garbage collection preserves the settled rollback regardless of mtime", (t
   assert.match(String(state.settledAt), /^\d{4}-\d{2}-\d{2}T/u);
 });
 
+test("current-only garbage collection takes the rollback slot in settled and unsettled state", (t) => {
+  const settledStore = createVersionStore(home(t));
+  const settledPrevious = "0.3.13-333333333333";
+  const settledCurrent = "0.3.14-444444444444";
+  install(settledStore, settledPrevious);
+  install(settledStore, settledCurrent);
+  settledStore.activate(settledPrevious);
+  settledStore.settle(settledPrevious);
+  settledStore.activate(settledCurrent);
+  settledStore.settle(settledCurrent);
+
+  assert.deepEqual(settledStore.gc(1, { references: "current" }), [
+    settledPrevious,
+  ]);
+  assert.deepEqual(settledStore.list(), [settledCurrent]);
+
+  const unsettledStore = createVersionStore(home(t));
+  const recorded = "0.3.15-555555555555";
+  const current = "0.3.16-666666666666";
+  install(unsettledStore, recorded);
+  install(unsettledStore, current);
+  unsettledStore.activate(recorded);
+  unsettledStore.settle(recorded);
+  unsettledStore.activate(current);
+
+  assert.deepEqual(unsettledStore.gc(1, { references: "current" }), [recorded]);
+  assert.deepEqual(unsettledStore.list(), [current]);
+});
+
+test("current-only garbage collection keeps exactly current and leaves incomplete versions untouched", () => {
+  const finishedNames = fc
+    .uniqueArray(fc.integer({ min: 0, max: 999_999 }), {
+      minLength: 1,
+      maxLength: 8,
+    })
+    .map((identifiers) =>
+      identifiers.map((identifier) =>
+        versionName(
+          `1.0.${identifier}`,
+          identifier.toString(16).padStart(12, "0"),
+        ),
+      ),
+    );
+
+  fc.assert(
+    fc.property(
+      finishedNames,
+      fc.nat(),
+      fc.constantFrom("settled", "unsettled", "no-previous"),
+      fc.integer({ min: 0, max: 3 }),
+      (finished, currentIndex, requestedState, incompleteCount) => {
+        const root = mkdtempSync(join(tmpdir(), "iva-current-gc-"));
+        try {
+          const store = createVersionStore(root);
+          for (const name of finished) install(store, name);
+          const current = finished[currentIndex % finished.length];
+          store.activate(current);
+          const stateKind =
+            requestedState === "unsettled" && finished.length === 1
+              ? "settled"
+              : requestedState;
+          const recorded =
+            stateKind === "unsettled"
+              ? finished.find((name) => name !== current)!
+              : current;
+          const previous =
+            stateKind === "no-previous"
+              ? undefined
+              : finished.find((name) => name !== recorded);
+          mkdirSync(store.layout.data, { recursive: true });
+          writeFileSync(
+            join(store.layout.data, "active.json"),
+            `${JSON.stringify({
+              schema: "iva-active/v2",
+              version: recorded,
+              ...(previous ? { previous } : {}),
+              settledAt: "2026-08-19T00:00:00.000Z",
+            })}\n`,
+          );
+
+          const incomplete = Array.from(
+            { length: incompleteCount },
+            (_, index) =>
+              versionName(`9.9.${index}`, index.toString(16).padStart(12, "f")),
+          );
+          for (const name of incomplete) {
+            const dir = store.stage(name);
+            writeFileSync(join(dir, "partial"), name);
+          }
+
+          store.gc(1, { references: "current" });
+
+          assert.deepEqual(store.list(), [current]);
+          for (const name of incomplete) {
+            const dir = join(store.layout.versions, name);
+            assert.deepEqual(readdirSync(dir).sort(), [
+              ".iva-incomplete",
+              "partial",
+            ]);
+            assert.equal(readFileSync(join(dir, "partial"), "utf8"), name);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    ),
+    { seed: 194, numRuns: 200, verbose: true },
+  );
+});
+
+test("current-only garbage collection fails closed before deleting versions", (t) => {
+  const foreignStore = createVersionStore(home(t));
+  for (const name of ["0.3.13-333333333333", "0.3.14-444444444444"])
+    install(foreignStore, name);
+  mkdirSync(foreignStore.layout.current);
+  const beforeForeign = readdirSync(foreignStore.layout.versions);
+
+  assert.throws(
+    () => foreignStore.gc(1, { references: "current" }),
+    /current.*foreign|current path is not a symlink/u,
+  );
+  assert.deepEqual(readdirSync(foreignStore.layout.versions), beforeForeign);
+
+  const corruptStore = createVersionStore(home(t));
+  for (const name of ["0.3.15-555555555555", "0.3.16-666666666666"])
+    install(corruptStore, name);
+  corruptStore.activate("0.3.16-666666666666");
+  mkdirSync(corruptStore.layout.data, { recursive: true });
+  writeFileSync(join(corruptStore.layout.data, "active.json"), "{junk\n");
+  const beforeCorrupt = readdirSync(corruptStore.layout.versions);
+
+  assert.throws(
+    () => corruptStore.gc(1, { references: "current" }),
+    /active\.json.*corrupt/u,
+  );
+  assert.deepEqual(readdirSync(corruptStore.layout.versions), beforeCorrupt);
+});
+
 test("corrupt active bytes block GC and settlement without changing data", (t) => {
   const store = createVersionStore(home(t));
   for (const name of [
