@@ -6,6 +6,7 @@ Everything between `curl` and a working bot. One command on a fresh server: the 
 
 - 🖥️ **A server or your own machine** — Ubuntu/Debian is the tested path (apt); Fedora (dnf) and macOS (brew) work too. Any always-on box.
 - 🧠 **512MB RAM is enough** — on boxes under 1.5GB the installer adds a 2GB swapfile so the build isn't OOM-killed (needs ~2.6GB free disk).
+- 💾 **At least ~1.5GB free for Iva itself** — two version directories of ~400MB each plus the npm cache; allow 2GB more when the installer adds a swapfile.
 - 🔑 **sudo** — asked up front, and only if system packages are missing or a swapfile is needed; the Chromium step may ask once more.
 
 > Never used a server? The host sends you an address (IP), a login and a password. On Mac or Linux open Terminal, on Windows PowerShell, type `ssh root@YOUR_ADDRESS`, enter the password. You're in. First thing: make yourself a normal user and switch to it — `adduser iva && usermod -aG sudo iva && su - iva` — and install from there. Iva's shell tool runs with the permissions of whoever installed it, so don't hand it root.

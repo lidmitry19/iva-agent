@@ -1,6 +1,12 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 import assert from "node:assert/strict";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -13,7 +19,7 @@ import {
 import { PLUGIN_SCHEMA_URL } from "#lib/plugin-reader.ts";
 import { pluginRoot, writePluginsState } from "#lib/plugin-store.ts";
 import { createSystemdControl } from "../lib/systemd-control.ts";
-import { createVersionStore } from "../lib/version-store.ts";
+import { acquireUpdateLock, createVersionStore } from "../lib/version-store.ts";
 import { createDoctorCommand } from "./doctor.ts";
 import { createCliRuntime } from "./runtime.ts";
 import { createCliSystemd } from "./systemd.ts";
@@ -57,6 +63,41 @@ function lifecycle(
     restartServices: () => undefined,
     ...overrides,
   };
+}
+
+function installDoctorVersion(
+  store: ReturnType<typeof createVersionStore>,
+  name: string,
+): string {
+  const dir = store.stage(name);
+  mkdirSync(join(dir, ".output/server"), { recursive: true });
+  writeFileSync(join(dir, ".output/server/index.mjs"), "export {};\n");
+  store.linkState(dir);
+  store.complete(name);
+  return dir;
+}
+
+async function doctorOutput(root: string): Promise<{
+  events: Array<[string, string]>;
+  summaryLogs: unknown[][];
+}> {
+  const events: Array<[string, string]> = [];
+  const summaryLogs: unknown[][] = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    hasSystemd: () => false,
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: (...args) => summaryLogs.push(args),
+    exit: () => undefined,
+  })();
+  return { events, summaryLogs };
 }
 
 test("non-systemd doctor preserves exact counter and exit semantics", async (t) => {
@@ -359,6 +400,156 @@ test("doctor reports an update that flipped but never finished", async (t) => {
   events.length = 0;
   await doctor();
   assert.equal(unfinished(), false, JSON.stringify(events));
+});
+
+test("doctor removes leftover, incomplete, and surplus versions", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "iva-cli-doctor-cleanup-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeFileSync(join(home, ".env"), "present=true\n");
+  const store = createVersionStore(home);
+  const rollback = "0.3.14-141414141414";
+  const surplus = "0.3.13-131313131313";
+  const current = "0.3.15-151515151515";
+  for (const name of [rollback, surplus, current])
+    installDoctorVersion(store, name);
+  store.activate(rollback);
+  store.settle(rollback);
+  store.activate(current);
+  store.settle(current);
+  const incomplete = "0.3.16-161616161616";
+  const incompleteDir = store.stage(incomplete);
+  writeFileSync(join(incompleteDir, "partial"), "partial\n");
+  const leftover = ".probe-dead";
+  mkdirSync(join(home, leftover));
+
+  const { events, summaryLogs } = await doctorOutput(store.layout.current);
+
+  const removed = events.filter(
+    ([kind, message]) => kind === "ok" && message.startsWith("removed "),
+  );
+  assert.equal(removed.length, 1, JSON.stringify(events));
+  for (const name of [incomplete, leftover, surplus])
+    assert.ok(removed[0][1].includes(name), removed[0][1]);
+  assert.equal(existsSync(incompleteDir), false);
+  assert.equal(existsSync(join(home, leftover)), false);
+  assert.equal(existsSync(join(store.layout.versions, surplus)), false);
+  assert.ok(
+    events.some(
+      ([kind, message]) =>
+        kind === "ok" &&
+        /^versions on disk: 2 \(current .+, rollback .+\) — .+ free$/u.test(
+          message,
+        ),
+    ),
+    JSON.stringify(events),
+  );
+  assert.ok(
+    summaryLogs.some(
+      (entry) => typeof entry[0] === "string" && /1 fixed/u.test(entry[0]),
+    ),
+    JSON.stringify(summaryLogs),
+  );
+});
+
+test("doctor skips version cleanup while an update holds the lock", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "iva-cli-doctor-lock-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeFileSync(join(home, ".env"), "present=true\n");
+  const store = createVersionStore(home);
+  const previous = "0.3.14-141414141414";
+  const surplus = "0.3.13-131313131313";
+  const current = "0.3.15-151515151515";
+  for (const name of [previous, surplus, current])
+    installDoctorVersion(store, name);
+  store.activate(previous);
+  store.settle(previous);
+  store.activate(current);
+  store.settle(current);
+  const leftover = join(home, ".probe-held");
+  mkdirSync(leftover);
+  const lock = acquireUpdateLock(join(home, "data"));
+  assert.ok(lock);
+  t.after(() => lock.release());
+
+  const { events } = await doctorOutput(store.layout.current);
+
+  assert.ok(
+    events.some(
+      (event) =>
+        event[0] === "warn" &&
+        event[1] === "update in progress — version cleanup skipped",
+    ),
+    JSON.stringify(events),
+  );
+  assert.equal(existsSync(join(store.layout.versions, surplus)), true);
+  assert.equal(existsSync(leftover), true);
+});
+
+test("doctor reports corrupt version state without removing anything", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "iva-cli-doctor-corrupt-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeFileSync(join(home, ".env"), "present=true\n");
+  const store = createVersionStore(home);
+  const previous = "0.3.14-141414141414";
+  const surplus = "0.3.13-131313131313";
+  const current = "0.3.15-151515151515";
+  for (const name of [previous, surplus, current])
+    installDoctorVersion(store, name);
+  store.activate(previous);
+  store.settle(previous);
+  store.activate(current);
+  store.settle(current);
+  const leftover = join(home, ".probe-corrupt");
+  mkdirSync(leftover);
+  writeFileSync(join(store.layout.data, "active.json"), "{junk\n");
+  const before = readdirSync(store.layout.versions);
+
+  const { events } = await doctorOutput(store.layout.current);
+
+  assert.ok(
+    events.some(
+      ([kind, message]) =>
+        kind === "bad" && /^version cleanup failed/u.test(message),
+    ),
+    JSON.stringify(events),
+  );
+  assert.deepEqual(readdirSync(store.layout.versions), before);
+  assert.equal(existsSync(leftover), true);
+});
+
+test("doctor keeps every referenced version while an update is unfinished", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "iva-cli-doctor-unsettled-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeFileSync(join(home, ".env"), "present=true\n");
+  const store = createVersionStore(home);
+  const previous = "0.3.13-131313131313";
+  const recorded = "0.3.14-141414141414";
+  const current = "0.3.15-151515151515";
+  for (const name of [previous, recorded, current])
+    installDoctorVersion(store, name);
+  store.activate(previous);
+  store.settle(previous);
+  store.activate(recorded);
+  store.settle(recorded);
+  store.activate(current);
+
+  const { events } = await doctorOutput(store.layout.current);
+
+  assert.ok(
+    events.some(
+      ([kind, message]) =>
+        kind === "warn" && message.includes(`update to ${current} never`),
+    ),
+    JSON.stringify(events),
+  );
+  assert.ok(
+    events.some(
+      ([kind, message]) =>
+        kind === "ok" && message.startsWith("versions on disk: 3 "),
+    ),
+    JSON.stringify(events),
+  );
+  assert.equal(store.list().length, 3);
 });
 
 test("doctor rejects an invalid model provider instead of diagnosing Ollama", async (t) => {
