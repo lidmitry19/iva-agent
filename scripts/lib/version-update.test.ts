@@ -126,6 +126,20 @@ function customFile(home: string, path: string, body: string): void {
   writeFileSync(target, body);
 }
 
+/** Leave a complete version ready for a later update to reuse. */
+async function prepareVersion(
+  store: ReturnType<typeof createVersionStore>,
+  target: { readonly sha: string; readonly version: string },
+): Promise<string> {
+  const name = `${target.version}-${target.sha.slice(0, 12)}`;
+  const dir = store.stage(name);
+  await store.materialize({ sha: target.sha, dir });
+  store.linkState(dir);
+  await fixtureRunner()("npm", ["run", "build"], dir);
+  store.complete(name);
+  return name;
+}
+
 type Updated = Extract<UpdateOutcome, { status: "updated" }>;
 
 /** Narrow to a successful update, failing the test with the real status otherwise. */
@@ -133,6 +147,8 @@ function updated(outcome: UpdateOutcome): Updated {
   assert.equal(outcome.status, "updated", JSON.stringify(outcome));
   return outcome;
 }
+
+const healthyProbe = () => Promise.resolve({ ok: true, log: "" });
 
 /** Run the harness until it stalls at `step`, then SIGKILL it there. */
 async function killAt(
@@ -322,6 +338,43 @@ test("a second release is built beside the running one and both survive for roll
     readFileSync(join(iva.home, "current/agent/agent.ts"), "utf8"),
     "export const agent = 1;\n",
   );
+});
+
+test("a build starts with only the running version on disk", async (t) => {
+  const iva = world(t);
+  await iva.update({ probe: healthyProbe });
+  iva.release("0.3.15");
+  const running = updated(await iva.update({ probe: healthyProbe })).version;
+  const store = createVersionStore(iva.home);
+  const stale = "0.3.12-121212121212";
+  store.stage(stale);
+  store.complete(stale);
+  const target = iva.release("0.3.16");
+  const staged = `${target.version}-${target.sha.slice(0, 12)}`;
+  let inspected = false;
+
+  const outcome = updated(
+    await iva.update({
+      probe: healthyProbe,
+      run: fixtureRunner((step) => {
+        if (step === "install") {
+          inspected = true;
+          assert.deepEqual(
+            readdirSync(store.layout.versions).sort(),
+            [running, staged].sort(),
+          );
+        }
+        return Promise.resolve();
+      }),
+    }),
+  );
+
+  assert.equal(inspected, true);
+  assert.deepEqual(
+    readdirSync(store.layout.versions).sort(),
+    [outcome.version, running].sort(),
+  );
+  assert.equal(store.previousName(), running);
 });
 
 test("a version that does not start is discarded and the running one stays live", async (t) => {
@@ -642,6 +695,34 @@ test("an update killed while building is cleaned up by the next run", async (t) 
   assert.deepEqual(
     readdirSync(store.layout.versions).sort(),
     [first.version, outcome.version].sort(),
+  );
+});
+
+test("an install interrupted after rollback removal keeps current and retries cleanly", async (t) => {
+  const iva = world(t);
+  const rollback = updated(await iva.update({ probe: healthyProbe }));
+  writeFileSync(join(iva.repo, "agent/agent.ts"), "export const agent = 2;\n");
+  iva.release("0.3.15");
+  const running = updated(await iva.update({ probe: healthyProbe }));
+  writeFileSync(join(iva.repo, "agent/agent.ts"), "export const agent = 3;\n");
+  iva.release("0.3.16");
+  const store = createVersionStore(iva.home);
+
+  await killAt(iva.home, "install", iva.target);
+
+  assert.equal(store.currentName(), running.version);
+  assert.equal(store.previousName(), null);
+  assert.equal(
+    existsSync(join(store.layout.versions, rollback.version)),
+    false,
+  );
+
+  const outcome = updated(await iva.update({ probe: healthyProbe }));
+  assert.equal(store.currentName(), outcome.version);
+  assert.equal(store.previousName(), running.version);
+  assert.deepEqual(
+    store.list().sort(),
+    [outcome.version, running.version].sort(),
   );
 });
 
@@ -1285,6 +1366,71 @@ test("writer retirement runs only after live health and service commit", async (
   assert.deepEqual(calls, ["live-health", "writer-retirement", "adopt"]);
 });
 
+test("old versions go before the Google CLI errand", async (t) => {
+  const iva = world(t);
+  await iva.update({ probe: healthyProbe });
+  iva.release("0.3.15");
+  await iva.update({ probe: healthyProbe });
+  const store = createVersionStore(iva.home);
+  const stale = "0.3.12-121212121212";
+  store.stage(stale);
+  store.complete(stale);
+  const target = iva.release("0.3.16");
+  await prepareVersion(store, target);
+  const base = fixtureRunner();
+  let inspected = false;
+
+  await iva.update({
+    probe: healthyProbe,
+    run: (command, args, cwd) => {
+      if (
+        command === "npm" &&
+        args.join(" ") === "i -g @googleworkspace/cli@latest"
+      ) {
+        inspected = true;
+        assert.ok(store.list().length <= 2, store.list().join(", "));
+      }
+      return base(command, args, cwd);
+    },
+  });
+
+  assert.equal(inspected, true);
+});
+
+test("a failing cleanup step does not skip version garbage collection", async (t) => {
+  const iva = world(t);
+  await iva.update({ probe: healthyProbe });
+  iva.release("0.3.15");
+  await iva.update({ probe: healthyProbe });
+  const store = createVersionStore(iva.home);
+  const stale = "0.3.12-121212121212";
+  store.stage(stale);
+  store.complete(stale);
+  const target = iva.release("0.3.16");
+  const next = await prepareVersion(store, target);
+  const base = fixtureRunner();
+
+  const outcome = updated(
+    await iva.update({
+      probe: healthyProbe,
+      retireCommittedWriters: () =>
+        Promise.reject(new Error("writer retirement failed")),
+      adopt: () => {
+        throw new Error("adoption failed");
+      },
+      run: (command, args, cwd) =>
+        command === "npm" && args[0] === "i"
+          ? Promise.resolve({ code: 1, output: "registry unavailable" })
+          : base(command, args, cwd),
+    }),
+  );
+
+  assert.ok(outcome.removed.length > 0);
+  assert.equal(store.list().length, 2);
+  assert.equal(store.cleanupPending(next), true);
+  assert.equal(store.settled(), next);
+});
+
 test("writer-retirement fault leaves cleanup debt without rolling back", async (t) => {
   const iva = world(t);
   let attempts = 0;
@@ -1404,31 +1550,42 @@ test("a box where every candidate port is taken ends the update instead of spinn
 
 test("a version prepared but never activated is reused instead of rebuilt", async (t) => {
   const iva = world(t);
-  const first = updated(await iva.update());
+  const first = updated(await iva.update({ probe: healthyProbe }));
   writeFileSync(join(iva.repo, "agent/agent.ts"), "export const agent = 2;\n");
-  const next = iva.release("0.3.15");
+  iva.release("0.3.15");
+  const second = updated(await iva.update({ probe: healthyProbe }));
+  writeFileSync(join(iva.repo, "agent/agent.ts"), "export const agent = 3;\n");
+  const next = iva.release("0.3.16");
   const store = createVersionStore(iva.home);
 
   // Exactly the state a kill between "finished" and "activated" leaves behind.
-  const name = `0.3.15-${next.sha.slice(0, 12)}`;
-  const dir = store.stage(name);
-  await store.materialize({ sha: next.sha, dir });
-  store.linkState(dir);
-  await fixtureRunner()("npm", ["run", "build"], dir);
-  store.complete(name);
-  assert.equal(store.currentName(), first.version);
+  const name = await prepareVersion(store, next);
+  assert.equal(store.currentName(), second.version);
 
   let builds = 0;
-  updated(
+  const outcome = updated(
     await iva.update({
       run: fixtureRunner(() => {
         builds += 1;
         return Promise.resolve();
       }),
+      probe: (dir, port) => {
+        assert.equal(store.currentName(), second.version);
+        assert.deepEqual(
+          store.list().sort(),
+          [first.version, second.version, name].sort(),
+        );
+        assert.equal(dir, join(store.layout.versions, name));
+        assert.equal(typeof port, "number");
+        return healthyProbe();
+      },
     }),
   );
   assert.equal(store.currentName(), name);
   assert.equal(builds, 0, "a finished version must not be built twice");
+  assert.deepEqual(store.list().sort(), [name, second.version].sort());
+  assert.equal(outcome.previous, second.version);
+  assert.equal(store.previousName(), second.version);
 });
 
 test("--force rebuilds the running release beside it, never inside it", async (t) => {

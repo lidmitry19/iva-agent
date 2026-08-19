@@ -14,6 +14,21 @@ sudo mkswap /swapfile && sudo swapon /swapfile
 cd ~/iva && npm run build
 ```
 
+### Disk full during update
+
+Symptoms: `iva update` fails with `ENOSPC`, services restart in a loop, `iva doctor` says `update to … never finished`. `~/iva/versions/` keeps the running version and one rollback, about 400 MB each; a build removes the rollback first, so an update needs room for one more version.
+
+Start with `iva doctor` — it removes leftover and surplus versions. If the disk is still full, free it by hand, then finish the update:
+
+```bash
+sudo journalctl --vacuum-size=100M
+npm cache clean --force
+rm -rf ~/iva/versions/<a version that is neither current nor the rollback>
+iva update
+```
+
+If the running version itself is broken, run `iva rollback` before `iva update`: the build takes the rollback slot.
+
 ### Bot silent after iva config
 
 Cause: before 0.1.4 the wizard saw Iva's own port as "busy", moved `IVA_PORT` 8723 → 8724 and left `ASSISTANT_HOST` on the old one — the bridge talked to a port nobody listened on.

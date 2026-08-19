@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
@@ -17,7 +17,11 @@ import {
   providerEnvKeys,
 } from "../lib/model-catalog.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
-import { createVersionStore } from "../lib/version-store.ts";
+import {
+  acquireUpdateLock,
+  createVersionStore,
+  KEEP,
+} from "../lib/version-store.ts";
 import { hasEmbeddingSource } from "../lib/memory-mode.ts";
 import type { createCliRuntime } from "./runtime.ts";
 import type { createCliSystemd } from "./systemd.ts";
@@ -42,6 +46,15 @@ type RollupStatus = Record<string, RollupEntry | null | undefined>;
 
 /** Сколько ждём `/health` прокси: он на loopback, и медленный ответ — уже симптом. */
 const HEALTH_TIMEOUT_MS = 1500;
+
+/** Free bytes in the short units used by the installation report. */
+function formatFreeSpace(bytes: number): string {
+  const mb = 1024 ** 2;
+  const gb = 1024 ** 3;
+  return bytes >= gb
+    ? `${(bytes / gb).toFixed(1)} GB`
+    : `${Math.round(bytes / mb)} MB`;
+}
 
 export function createDoctorCommand(
   runtime: CliRuntime,
@@ -198,11 +211,48 @@ export function createDoctorCommand(
 
     // An update whose flip landed but whose restart or migrations did not: the
     // daily check cannot see it, because upstream and the active version agree.
-    const store = createVersionStore(classifyRoot(ROOT).home);
+    const install = classifyRoot(ROOT);
+    const store = createVersionStore(install.home);
     const active = store.currentName();
-    if (active && store.settled() !== active) {
-      warn(`update to ${active} never finished — run: iva update`);
-      warnN++;
+    if (active) {
+      try {
+        if (store.settled() !== active) {
+          warn(`update to ${active} never finished — run: iva update`);
+          warnN++;
+        }
+      } catch {
+        // Corrupt state is reported by the version cleanup below, which reads
+        // the same file first and deletes nothing when it cannot be trusted.
+      }
+    }
+
+    if (install.kind === "version" && active) {
+      const lock = acquireUpdateLock(store.layout.data);
+      if (!lock) {
+        warn("update in progress — version cleanup skipped");
+        warnN++;
+      } else {
+        try {
+          const leftovers = store.sweep();
+          const removed = store.gc(KEEP);
+          const gone = [...leftovers, ...removed];
+          if (gone.length > 0) {
+            ok(`removed ${gone.join(", ")}`);
+            fixN++;
+          }
+          const free = statfsSync(store.layout.versions);
+          const freeBytes = free.bavail * free.bsize;
+          ok(
+            `versions on disk: ${store.list().length} (current ${active}, rollback ${store.previousName() ?? "none"}) — ${formatFreeSpace(freeBytes)} free`,
+          );
+          okN++;
+        } catch (error) {
+          bad(`version cleanup failed: ${String(error)}`);
+          badN++;
+        } finally {
+          lock.release();
+        }
+      }
     }
 
     if (!hasSystemd()) {
@@ -471,7 +521,6 @@ export function createDoctorCommand(
      * (development checkout): сборка плагинов там не при чём, и говорить не о чем.
      */
     function codeBuiltIntoVersion(name: string): boolean | null {
-      const install = classifyRoot(ROOT);
       if (install.kind !== "version") return null;
       const store = createVersionStore(install.home);
       const active = store.currentName();

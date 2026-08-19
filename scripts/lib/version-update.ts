@@ -44,6 +44,7 @@ import {
 import {
   acquireUpdateLock,
   createVersionStore,
+  KEEP,
   parseVersionName,
   releaseOf,
   versionName,
@@ -79,8 +80,6 @@ export type UpdateOutcome =
       removed: string[];
     };
 
-/** The active version plus one to roll back to; disks on these boxes are small. */
-const KEEP = 2;
 const INSTALL = ["ci", "--no-audit", "--no-fund"];
 const BUILD = ["run", "build"];
 /** Candidate ports one probe may lose to a neighbour before it gives up. */
@@ -315,6 +314,8 @@ export async function runVersionUpdate(
             );
     const name = finished ?? store.nextBuild(release);
     if (!finished) {
+      for (const gone of store.gc(1, { references: "current" }))
+        log(`removed ${gone} to make room for the build`);
       const dir = store.stage(name);
       try {
         await store.materialize({ sha: target.sha, dir });
@@ -672,7 +673,10 @@ export async function finishVersionUpdate({
   };
 }
 
-/** Optional installation chores are durable debt after service commit. */
+/**
+ * Optional installation chores are durable debt after service commit. Version
+ * cleanup goes first so every later chore has the disk space it needs.
+ */
 async function runPostHealthCleanup({
   name,
   run,
@@ -690,6 +694,13 @@ async function runPostHealthCleanup({
 }): Promise<string[]> {
   let complete = true;
   let removed: string[] = [];
+  try {
+    removed = store.gc(KEEP);
+    for (const gone of removed) log(`removed ${gone}`);
+  } catch (error) {
+    complete = false;
+    log(`version cleanup remains pending: ${String(error)}`);
+  }
   try {
     await retireCommittedWriters(store.layout.current);
   } catch (error) {
@@ -712,12 +723,6 @@ async function runPostHealthCleanup({
     }))
   )
     complete = false;
-  try {
-    removed = store.gc(KEEP);
-  } catch (error) {
-    complete = false;
-    log(`version cleanup remains pending: ${String(error)}`);
-  }
   if (complete) {
     try {
       store.finishCleanup(name);

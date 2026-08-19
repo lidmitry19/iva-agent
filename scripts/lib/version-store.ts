@@ -37,6 +37,8 @@ const VERSION_ORDER = new Intl.Collator("en", { numeric: true }).compare;
 export const STATE_DIRS = ["data", "vault", ".eve/.workflow-data"];
 /** Where older builds kept the workflow store: linked where one is, never created. */
 export const LEGACY_STATE_DIRS = [".workflow-data"];
+/** The active version plus one to roll back to; a build takes the rollback slot. Disks on these boxes are small. */
+export const KEEP = 2;
 
 type ActiveStateV1 = {
   readonly schema: "iva-active/v1";
@@ -599,19 +601,27 @@ export function createVersionStore(
     return stale;
   }
 
-  /** Keep every state reference, then fill the requested count deterministically. */
-  function gc(keep: number): string[] {
+  /**
+   * Keep every state reference by default, or only `current` when a build needs
+   * the rollback slot, then fill the requested count deterministically.
+   */
+  function gc(
+    keep: number,
+    options: { readonly references?: "state" | "current" } = {},
+  ): string[] {
+    const state = activeState();
     const active = currentName();
     const finished = list();
-    const state = activeState();
     const kept = new Set(
       retainedVersions(
         finished,
-        [
-          active,
-          state?.version,
-          state?.schema === "iva-active/v2" ? state.previous : null,
-        ],
+        options.references === "current"
+          ? [active]
+          : [
+              active,
+              state?.version,
+              state?.schema === "iva-active/v2" ? state.previous : null,
+            ],
         keep,
       ),
     );
