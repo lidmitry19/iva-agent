@@ -4,11 +4,11 @@
 
 <img src="assets/iva-header.webp" alt="Iva — self-hosted Telegram AI assistant with layered memory" width="100%">
 
-[![Release](https://img.shields.io/github/v/release/smixs/iva?color=brightgreen)](https://github.com/smixs/iva/releases)
+[![Release](https://img.shields.io/github/v/release/smixs/iva-agent?color=brightgreen)](https://github.com/smixs/iva-agent/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![built on eve](https://img.shields.io/badge/built%20on-eve-000000?logo=vercel&logoColor=white)](https://eve.dev/docs/introduction)
 [![Node 24](https://img.shields.io/badge/node-24.x-339933?logo=node.js&logoColor=white)](https://nodejs.org)
-[![Last release](https://img.shields.io/github/release-date/smixs/iva?label=last%20release&color=informational)](https://github.com/smixs/iva/releases)
+[![Last release](https://img.shields.io/github/release-date/smixs/iva-agent?label=last%20release&color=informational)](https://github.com/smixs/iva-agent/releases)
 
 [Use cases](#why-people-run-iva) · [Features](#features) · [Install](#install) · [Memory](#the-memory-tree) · [What's new](#whats-new) · [Docs](#documentation)
 
@@ -21,7 +21,7 @@ Iva is a self-hosted Telegram AI assistant with layered memory that turns your m
 **One command installs it:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 ## Why people run Iva
@@ -106,16 +106,16 @@ Web pages, search results, voice transcripts, captions and the vision model's de
 One command on any Ubuntu/Debian box — a fresh VPS or your own machine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 1. Get a bot token from [@BotFather](https://t.me/BotFather).
 2. Run the installer and answer its questions.
 3. Message your bot. The wizard picks your Telegram ID out of that message, finishes setup, and Iva confirms right in the chat that it's live.
 
-Brand-new VPS, still logged in as root? Run `bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)` first: it creates your sudo user (with lingering enabled), updates the box, and turns on a firewall, fail2ban and SSH hardening. It asks three things — a login, its password, and the timezone — and no SSH key. Then log in as that user with that password and run the installer above. Details: [docs/install.md](docs/install.md).
+Brand-new VPS, still logged in as root? Run `bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/bootstrap.sh)` first: it creates your sudo user (with lingering enabled), updates the box, and turns on a firewall, fail2ban and SSH hardening. It asks three things — a login, its password, and the timezone — and no SSH key. Then log in as that user with that password and run the installer above. Details: [docs/install.md](docs/install.md).
 
-Install as a normal user, not as root — Iva's shell tool runs as whoever installed it. Headless installs take `--skip-setup` or `--non-interactive`. Prefer to read before you run? Fetch it with `curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh -o install.sh`, read it, then `bash install.sh`. Wizard walkthrough and an SSH primer for first-time VPS owners: [docs/install.md](docs/install.md).
+Install as a normal user, not as root — Iva's shell tool runs as whoever installed it. Headless installs take `--skip-setup` or `--non-interactive`. Prefer to read before you run? Fetch it with `curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh -o install.sh`, read it, then `bash install.sh`. Wizard walkthrough and an SSH primer for first-time VPS owners: [docs/install.md](docs/install.md).
 
 ### The first minute
 
@@ -131,7 +131,7 @@ Then send a photo of a business card, or forward a long post and ask for the gis
 <summary><b>Install from a clone — build it yourself</b></summary>
 
 ```bash
-git clone https://github.com/smixs/iva.git ~/iva
+git clone https://github.com/smixs/iva-agent.git ~/iva
 cd ~/iva && bash install.sh
 ```
 
@@ -207,7 +207,7 @@ Full history — [CHANGELOG.md](CHANGELOG.md).
 
 ## Thanks
 
-Iva gets better because people run it for real — contributors are welcome. [Open an issue](https://github.com/smixs/iva/issues) with what breaks, or send a PR. Everyone who already helped: [docs/thanks.md](docs/thanks.md).
+Iva gets better because people run it for real — contributors are welcome. [Open an issue](https://github.com/smixs/iva-agent/issues) with what breaks, or send a PR. Everyone who already helped: [docs/thanks.md](docs/thanks.md).
 
 ## License
 

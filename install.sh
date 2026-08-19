@@ -2,7 +2,7 @@
 #
 # Install Iva (a personal long-term-memory agent) with one command on a bare VPS:
 #
-#   curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 #
 # Installs system dependencies (git, gh, python3, ffmpeg, pandoc, poppler), uv, Node 24+ (nvm),
 # npm dependencies, runs an interactive setup (Ollama + model + Telegram +
@@ -23,7 +23,7 @@
 printf '\n  \033[36m⏳ Preparing environment / Идёт подготовка окружения — up to a minute, do not interrupt…\033[0m\n'
 set -Eeuo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/smixs/iva.git}"
+REPO_URL="${REPO_URL:-https://github.com/smixs/iva-agent.git}"
 BRANCH="${BRANCH:-main}"
 UPDATE_CHANNEL="$BRANCH"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/iva}"

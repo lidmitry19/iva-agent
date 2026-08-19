@@ -27,7 +27,7 @@ Everything between `curl` and a working bot. One command on a fresh server: the 
 Brand-new server, still logged in as `root`? One command gets it ready — run it **as root**, before anything else:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/bootstrap.sh)
 ```
 
 It asks three things up front — a login, its password, and the timezone — then: updates the system, installs Iva's system packages (`git gh python3 ffmpeg pandoc poppler-utils`), creates that user with sudo and systemd lingering already enabled, turns on a firewall that allows SSH only, starts fail2ban and unattended security upgrades, and hardens sshd last — with a reload, so the session you're typing in is never dropped. Every step is detect-then-skip, so re-running it is safe. It ends by printing the `ssh` and `install.sh` commands to run next. Log: `/var/log/iva-bootstrap.log`.
@@ -37,7 +37,7 @@ No SSH key is involved: you log in as the new user with the password you just se
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 The first question is your language — English or Russian — before anything touches the system. Input is read from `/dev/tty`, so the wizard stays interactive even piped through `curl`. If there's no terminal at all (Docker, CI), setup is skipped and the script prints how to run it later.
@@ -86,17 +86,17 @@ Only one installer runs in an installation at a time: a second one is refused by
 Flags pass through the pipe with `bash -s --`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash -s -- --skip-setup
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash -s -- --skip-setup
 ```
 
-| Option              | Effect                                                           |
-| ------------------- | ---------------------------------------------------------------- |
-| `--skip-setup`      | install everything, don't run the wizard                         |
-| `--non-interactive` | no questions at all — defaults only, wizard skipped              |
-| `-h`, `--help`      | show the built-in help and exit                                  |
-| `REPO_URL=…`        | install from a fork (default `https://github.com/smixs/iva.git`) |
-| `BRANCH=…`          | install and keep updating from this branch (default `main`)      |
-| `INSTALL_DIR=…`     | where the code goes (default `~/iva`)                            |
+| Option              | Effect                                                                 |
+| ------------------- | ---------------------------------------------------------------------- |
+| `--skip-setup`      | install everything, don't run the wizard                               |
+| `--non-interactive` | no questions at all — defaults only, wizard skipped                    |
+| `-h`, `--help`      | show the built-in help and exit                                        |
+| `REPO_URL=…`        | install from a fork (default `https://github.com/smixs/iva-agent.git`) |
+| `BRANCH=…`          | install and keep updating from this branch (default `main`)            |
+| `INSTALL_DIR=…`     | where the code goes (default `~/iva`)                                  |
 
 The last three are environment variables, read by the script at startup.
 

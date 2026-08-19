@@ -402,7 +402,7 @@ await test("scanOutbound leaves hyphenated prose and key talk alone", () => {
     // An address with no credential in it: an ssh remote, a URL naming only the
     // user, a mailbox in prose. A rule that fires here redacts ordinary answers.
     "git@github.com:user/repo.git",
-    "git clone git@github.com:smixs/iva.git",
+    "git clone git@github.com:smixs/iva-agent.git",
     "https://user@host/repo",
     "https://api.deepinfra.com/v1/openai/embeddings",
     "пиши на hello@majento.ai, отвечаю в тот же день",

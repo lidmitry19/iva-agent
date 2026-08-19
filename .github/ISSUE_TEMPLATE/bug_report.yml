@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Security problems do not belong here — use
-        [private reporting](https://github.com/smixs/iva/security/advisories/new),
+        [private reporting](https://github.com/smixs/iva-agent/security/advisories/new),
         or email mixshima@gmail.com if that page is unavailable to you. Everything
         else: the more of the below you fill in, the faster this gets fixed.
   - type: textarea

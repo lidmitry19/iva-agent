@@ -3,7 +3,7 @@
 # Prepare a fresh VPS for Iva (a personal long-term-memory agent) with one command,
 # as root, on Ubuntu 22.04/24.04 or Debian 12:
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/bootstrap.sh)
 #
 # What it does, in this order: sets the timezone, updates the system, installs the
 # packages install.sh expects (git, python3, ffmpeg, pandoc, poppler), creates a
@@ -45,7 +45,7 @@ GUM_VERSION="0.17.0"
 GUM_SHA256_X86_64="69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb"
 GUM_SHA256_ARM64="b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c"
 
-RAW_BASE="https://raw.githubusercontent.com/smixs/iva/main"
+RAW_BASE="https://raw.githubusercontent.com/smixs/iva-agent/main"
 LOG_FILE="/var/log/iva-bootstrap.log"
 SSHD_MAIN_CONFIG="/etc/ssh/sshd_config"
 SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
@@ -207,7 +207,7 @@ usage() {
   cat <<'USAGE'
 Prepare a fresh Ubuntu/Debian VPS for Iva. Run as root:
 
-  bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/bootstrap.sh)
 
 It sets the timezone, updates the system, installs Iva's system packages, creates a
 sudo user with lingering enabled, enables a SSH-only firewall, fail2ban and unattended

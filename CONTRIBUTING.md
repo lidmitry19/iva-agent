@@ -5,7 +5,7 @@ from an actual install is worth more than a drive-by PR, so start wherever you a
 
 ## Reporting a bug
 
-Open an [issue](https://github.com/smixs/iva/issues/new/choose) and include the version
+Open an [issue](https://github.com/smixs/iva-agent/issues/new/choose) and include the version
 (`iva version`), how you installed, and what you expected instead. If it involves a
 message the assistant handled, `iva logs poll` (the Telegram bridge) usually contains the
 answer and logs no message text. The agent log, `iva logs`, can carry your memory and the
@@ -31,7 +31,7 @@ Node 24 is required — the project uses the built-in SQLite and native TypeScri
 loading.
 
 ```bash
-git clone https://github.com/smixs/iva.git ~/iva && cd ~/iva
+git clone https://github.com/smixs/iva-agent.git ~/iva && cd ~/iva
 npm install
 cp .env.example .env && chmod 600 .env   # fill in a bot token and one model provider
 npm run build                            # eve build — needed after every agent/ change

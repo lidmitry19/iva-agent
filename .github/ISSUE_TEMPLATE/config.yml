@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/smixs/iva/security/advisories/new
+    url: https://github.com/smixs/iva-agent/security/advisories/new
     about: Report privately — never in a public issue. No access to that page? mixshima@gmail.com
   - name: Troubleshooting guide
-    url: https://github.com/smixs/iva/blob/main/docs/troubleshooting.md
+    url: https://github.com/smixs/iva-agent/blob/main/docs/troubleshooting.md
     about: The usual suspects, already written down.

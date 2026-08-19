@@ -6,4 +6,4 @@ Code contributions: [@yakovmakovets](https://github.com/yakovmakovets), [@AndySh
 
 Reports and proposals that shaped releases: [@shamulin-hamnoi](https://github.com/shamulin-hamnoi), [@AndyShaman](https://github.com/AndyShaman), [@mamysh](https://github.com/mamysh), [@snjrusmn](https://github.com/snjrusmn), [@D1msn](https://github.com/D1msn), [@865x44](https://github.com/865x44), [@neproger](https://github.com/neproger), [@litrokol](https://github.com/litrokol).
 
-Found something? [Open an issue](https://github.com/smixs/iva/issues).
+Found something? [Open an issue](https://github.com/smixs/iva-agent/issues).

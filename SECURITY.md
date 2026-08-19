@@ -8,7 +8,7 @@ Vulnerabilities here are worth reporting properly.
 
 **Do not open a public issue for a security problem.**
 
-Use GitHub's private channel: [Report a vulnerability](https://github.com/smixs/iva/security/advisories/new).
+Use GitHub's private channel: [Report a vulnerability](https://github.com/smixs/iva-agent/security/advisories/new).
 It creates a draft advisory only the maintainer can see.
 
 If that page is unavailable to you, email **mixshima@gmail.com** with `iva security` in

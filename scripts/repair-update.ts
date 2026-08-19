@@ -71,12 +71,18 @@ function optionalGit(root: string, ...args: string[]): string | null {
   return result.status === 0 ? String(result.stdout ?? "").trim() : null;
 }
 
+// The repository is smixs/iva-agent. Installs made before 2026-08-19 still keep
+// origin = smixs/iva, which GitHub redirects, so both paths stay official.
+const OFFICIAL_REPO_PATHS = new Set(["smixs/iva-agent", "smixs/iva"]);
+
 export function isOfficialIvaOrigin(value: string): boolean {
   const scp = value.match(/^git@([^:]+):(.+)$/i);
   if (scp)
     return (
       scp[1]?.toLowerCase() === "github.com" &&
-      scp[2]?.replace(/\.git$/i, "").toLowerCase() === "smixs/iva"
+      OFFICIAL_REPO_PATHS.has(
+        scp[2]?.replace(/\.git$/i, "").toLowerCase() ?? "",
+      )
     );
   try {
     const url = new URL(value);
@@ -84,10 +90,12 @@ export function isOfficialIvaOrigin(value: string): boolean {
       (url.protocol === "https:" || url.protocol === "ssh:") &&
       url.hostname.toLowerCase() === "github.com" &&
       url.port === "" &&
-      url.pathname
-        .replace(/^\//, "")
-        .replace(/\.git$/i, "")
-        .toLowerCase() === "smixs/iva"
+      OFFICIAL_REPO_PATHS.has(
+        url.pathname
+          .replace(/^\//, "")
+          .replace(/\.git$/i, "")
+          .toLowerCase(),
+      )
     );
   } catch {
     return false;
@@ -109,7 +117,7 @@ export function validateOfficialCheckout(inputRoot: string): Checkout {
   if (top !== root) throw new Error("run repair from the Iva repository root");
   const origin = git(root, "remote", "get-url", "origin");
   if (!isOfficialIvaOrigin(origin))
-    throw new Error("origin is not the official smixs/iva repository");
+    throw new Error("origin is not the official smixs/iva-agent repository");
   return { root, origin };
 }
 

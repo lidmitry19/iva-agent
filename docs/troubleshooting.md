@@ -87,7 +87,7 @@ ffmpeg -i note.m4a -f segment -segment_time 600 -c copy part%02d.m4a
 Cause: old versions used a destructive recovery path when upstream history changed. Re-run the current installer; it creates a backup ref, stashes tracked and untracked customizations by exact OID, and refuses an unsafe merge:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 Do not reset or clean the checkout. If the histories cannot be combined safely, the existing version and user files remain in place and the full reason is recorded under `data/logs/`.

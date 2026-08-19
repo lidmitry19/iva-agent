@@ -80,7 +80,7 @@ Everything that arrives on its own runs on a schedule: digests and reminders are
 ## Try it
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 [Quick start](../README.md#quick-start) · [Features](../README.md#features) · [Docs](README.md)

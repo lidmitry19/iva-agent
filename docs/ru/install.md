@@ -29,7 +29,7 @@
 ## Установка
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 Первый вопрос — язык, English или русский, ещё до того, как скрипт что-то тронет в системе. Ввод читается из `/dev/tty`, поэтому мастер остаётся интерактивным даже через пайп из `curl`. Если терминала нет вовсе (Docker, CI), настройка пропускается, а скрипт печатает, как запустить её позже.
@@ -78,17 +78,17 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
 Флаги проходят через пайп с помощью `bash -s --`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash -s -- --skip-setup
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash -s -- --skip-setup
 ```
 
-| Опция               | Действие                                                            |
-| ------------------- | ------------------------------------------------------------------- |
-| `--skip-setup`      | поставить всё, но не запускать мастер                               |
-| `--non-interactive` | вообще без вопросов — только значения по умолчанию, мастер пропущен |
-| `-h`, `--help`      | показать встроенную справку и выйти                                 |
-| `REPO_URL=…`        | ставить из форка (по умолчанию `https://github.com/smixs/iva.git`)  |
-| `BRANCH=…`          | ставить и дальше обновлять эту ветку (по умолчанию `main`)          |
-| `INSTALL_DIR=…`     | куда положить код (по умолчанию `~/iva`)                            |
+| Опция               | Действие                                                                 |
+| ------------------- | ------------------------------------------------------------------------ |
+| `--skip-setup`      | поставить всё, но не запускать мастер                                    |
+| `--non-interactive` | вообще без вопросов — только значения по умолчанию, мастер пропущен      |
+| `-h`, `--help`      | показать встроенную справку и выйти                                      |
+| `REPO_URL=…`        | ставить из форка (по умолчанию `https://github.com/smixs/iva-agent.git`) |
+| `BRANCH=…`          | ставить и дальше обновлять эту ветку (по умолчанию `main`)               |
+| `INSTALL_DIR=…`     | куда положить код (по умолчанию `~/iva`)                                 |
 
 Последние три — переменные окружения, скрипт читает их на старте.
 

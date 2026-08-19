@@ -3,9 +3,9 @@ set -Eeuo pipefail
 
 # One-time bridge from legacy, dirty Iva checkouts to the current updater.
 # User-facing entrypoint:
-#   curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/repair.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/repair.sh | bash
 
-REPO_URL="${IVA_REPAIR_REPO_URL:-https://github.com/smixs/iva.git}"
+REPO_URL="${IVA_REPAIR_REPO_URL:-https://github.com/smixs/iva-agent.git}"
 BRANCH="${IVA_REPAIR_BRANCH:-main}"
 INSTALL_DIR="${IVA_INSTALL_DIR:-${HOME}/iva}"
 SKIP_RESTART="${IVA_REPAIR_SKIP_RESTART:-0}"
@@ -37,8 +37,11 @@ node -e 'const p=require(process.argv[1]); if(p.name!=="iva") process.exit(1)' \
 top="$(git -C "$INSTALL_DIR" rev-parse --show-toplevel)"
 [ "$(cd "$top" && pwd -P)" = "$INSTALL_DIR" ] || die "invalid Iva checkout"
 
+# The repository is smixs/iva-agent. Installs made before 2026-08-19 still keep
+# origin = smixs/iva, which GitHub redirects, so both names stay official.
 is_official_remote() {
   case "$1" in
+    https://github.com/smixs/iva-agent|https://github.com/smixs/iva-agent.git|git@github.com:smixs/iva-agent|git@github.com:smixs/iva-agent.git|ssh://git@github.com/smixs/iva-agent|ssh://git@github.com/smixs/iva-agent.git) return 0 ;;
     https://github.com/smixs/iva|https://github.com/smixs/iva.git|git@github.com:smixs/iva|git@github.com:smixs/iva.git|ssh://git@github.com/smixs/iva|ssh://git@github.com/smixs/iva.git) return 0 ;;
     *) return 1 ;;
   esac
@@ -46,12 +49,12 @@ is_official_remote() {
 
 origin="$(git -C "$INSTALL_DIR" remote get-url origin)"
 if is_official_remote "$origin"; then
-  is_official_remote "$REPO_URL" || die "repository URL is not github.com/smixs/iva"
+  is_official_remote "$REPO_URL" || die "repository URL is not github.com/smixs/iva-agent"
 elif [ "${REPO_URL#/}" != "$REPO_URL" ] && [ "$origin" = "$REPO_URL" ] && [ -d "$REPO_URL" ]; then
   [ "$(git --git-dir="$REPO_URL" rev-parse --is-bare-repository 2>/dev/null)" = "true" ] \
     || die "invalid local test repository"
 else
-  die "origin is not github.com/smixs/iva"
+  die "origin is not github.com/smixs/iva-agent"
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"

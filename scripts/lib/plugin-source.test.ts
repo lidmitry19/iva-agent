@@ -204,8 +204,8 @@ test("a value that git would read as an option never reaches it", () => {
     "https://h.test/x.git",
     "main",
   ]);
-  assert.equal(isScpLikeUrl("git@github.com:smixs/iva.git"), true);
-  assert.equal(isScpLikeUrl("https://github.com/smixs/iva.git"), false);
+  assert.equal(isScpLikeUrl("git@github.com:smixs/iva-agent.git"), true);
+  assert.equal(isScpLikeUrl("https://github.com/smixs/iva-agent.git"), false);
 });
 
 test("an unrecognized source is refused by name, never guessed", () => {

@@ -37,6 +37,44 @@ void test("repair bootstrap accepts only the canonical Iva GitHub remote", () =>
   assert.equal(isOfficialIvaOrigin("git@example.com:smixs/iva.git"), false);
 });
 
+void test("repair bootstrap accepts the renamed repository alongside the old name", () => {
+  assert.equal(isOfficialIvaOrigin("git@github.com:smixs/iva-agent"), true);
+  assert.equal(isOfficialIvaOrigin("git@github.com:smixs/iva-agent.git"), true);
+  assert.equal(isOfficialIvaOrigin("https://github.com/smixs/iva-agent"), true);
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/smixs/iva-agent.git"),
+    true,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("ssh://git@github.com/smixs/iva-agent"),
+    true,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("ssh://git@github.com/smixs/iva-agent.git"),
+    true,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/SMIXS/IVA-AGENT.GIT"),
+    true,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/smixs/iva-agentx"),
+    false,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/smixs/iva-plugins"),
+    false,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("git@example.com:smixs/iva-agent.git"),
+    false,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("http://github.com/smixs/iva-agent.git"),
+    false,
+  );
+});
+
 void test("repair bootstrap validates the checkout before changing files", () => {
   const root = mkdtempSync(join(tmpdir(), "iva-repair-"));
   git(root, "init", "-b", "main");
@@ -48,8 +86,19 @@ void test("repair bootstrap validates the checkout before changing files", () =>
   git(root, "remote", "add", "origin", "git@github.com:smixs/iva.git");
 
   assert.doesNotThrow(() => validateOfficialCheckout(root));
+  git(
+    root,
+    "remote",
+    "set-url",
+    "origin",
+    "git@github.com:smixs/iva-agent.git",
+  );
+  assert.doesNotThrow(() => validateOfficialCheckout(root));
   git(root, "remote", "set-url", "origin", "git@example.com:smixs/iva.git");
-  assert.throws(() => validateOfficialCheckout(root), /official smixs\/iva/);
+  assert.throws(
+    () => validateOfficialCheckout(root),
+    /official smixs\/iva-agent/,
+  );
 });
 
 void test("repair bootstrap validates runtime input before filesystem access", () => {

@@ -4,11 +4,11 @@
 
 <img src="assets/iva-header.webp" alt="Iva - self-hosted AI-ассистент в Telegram с многослойной памятью" width="100%">
 
-[![Release](https://img.shields.io/github/v/release/smixs/iva?color=brightgreen)](https://github.com/smixs/iva/releases)
+[![Release](https://img.shields.io/github/v/release/smixs/iva-agent?color=brightgreen)](https://github.com/smixs/iva-agent/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![built on eve](https://img.shields.io/badge/built%20on-eve-000000?logo=vercel&logoColor=white)](https://eve.dev/docs/introduction)
 [![Node 24](https://img.shields.io/badge/node-24.x-339933?logo=node.js&logoColor=white)](https://nodejs.org)
-[![Last release](https://img.shields.io/github/release-date/smixs/iva?label=last%20release&color=informational)](https://github.com/smixs/iva/releases)
+[![Last release](https://img.shields.io/github/release-date/smixs/iva-agent?label=last%20release&color=informational)](https://github.com/smixs/iva-agent/releases)
 
 [Юзкейсы](#зачем-люди-ставят-иву) · [Что умеет](#что-умеет) · [Установка](#установка) · [Память](#память---то-что-копится) · [Что нового](#что-нового) · [Документация](#документация)
 
@@ -19,7 +19,7 @@
 Iva - self-hosted AI-ассистент в Telegram с многослойной памятью, который превращает ваши сообщения в vault, совместимый с Obsidian. Вы говорите - она раскладывает: голосовые, фото, пересланные посты и решения становятся обычными markdown-карточками, которые она действительно помнит. Всё крутится на вашем собственном сервере, с вашими ключами и вашими данными. Ставится одной командой:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 ## Зачем люди ставят Иву
@@ -104,21 +104,21 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
 Одна команда на любой машине с Ubuntu/Debian - свежем VPS или собственном компьютере:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | bash
 ```
 
 1. Возьмите токен бота у [@BotFather](https://t.me/BotFather).
 2. Запустите установщик и ответьте на его вопросы.
 3. Напишите своему боту. Мастер достанет ваш Telegram ID из этого сообщения, закончит настройку, и Ива прямо в чате подтвердит, что работает.
 
-Ставьте от обычного пользователя, не от root: shell-инструмент Ивы работает с правами того, кто её поставил. Для установки без диалога есть `--skip-setup` и `--non-interactive`. Хотите сначала прочитать скрипт - заберите его через `curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/install.sh -o install.sh`, прочитайте, потом `bash install.sh`. Прохождение мастера шаг за шагом и SSH-ликбез для тех, у кого VPS впервые: [docs/ru/install.md](docs/ru/install.md).
+Ставьте от обычного пользователя, не от root: shell-инструмент Ивы работает с правами того, кто её поставил. Для установки без диалога есть `--skip-setup` и `--non-interactive`. Хотите сначала прочитать скрипт - заберите его через `curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh -o install.sh`, прочитайте, потом `bash install.sh`. Прохождение мастера шаг за шагом и SSH-ликбез для тех, у кого VPS впервые: [docs/ru/install.md](docs/ru/install.md).
 
 ### Шаг 0 (опционально): подготовка свежего VPS
 
 Только что купили VPS и сидите под root? Этот скрипт готовит машину до установки Ивы: заводит sudo-пользователя (сразу с linger), обновляет систему и ставит зависимости. Заодно включает фаервол (наружу открыт только SSH), fail2ban и автоматические обновления безопасности, а вход под root по SSH закрывает.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/bootstrap.sh)
 ```
 
 Спросит три вещи - логин, пароль и часовой пояс, - SSH-ключ не нужен. Если обновилось ядро, предложит перезагрузку. Повторный запуск безопасен: уже настроенное скрипт не ломает.
@@ -139,7 +139,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/smixs/iva/main/bootstrap.sh)
 <summary><b>Установка из исходников - собрать из клона самому</b></summary>
 
 ```bash
-git clone https://github.com/smixs/iva.git ~/iva
+git clone https://github.com/smixs/iva-agent.git ~/iva
 cd ~/iva && bash install.sh
 ```
 
@@ -215,7 +215,7 @@ cd ~/iva && bash install.sh
 
 ## Спасибо
 
-Ива становится лучше, потому что люди гоняют её по-настоящему - контрибуторам мы рады. [Заводите issue](https://github.com/smixs/iva/issues) о том, что сломалось, или присылайте PR. Все, кто уже помог: [docs/thanks.md](docs/thanks.md).
+Ива становится лучше, потому что люди гоняют её по-настоящему - контрибуторам мы рады. [Заводите issue](https://github.com/smixs/iva-agent/issues) о том, что сломалось, или присылайте PR. Все, кто уже помог: [docs/thanks.md](docs/thanks.md).
 
 ## Лицензия
 

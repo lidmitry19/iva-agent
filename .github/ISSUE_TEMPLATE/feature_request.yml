@@ -6,8 +6,8 @@ body:
     attributes:
       value: |
         Before writing: most new behaviour in Iva is a **skill** — a markdown file the
-        agent reads — not new code. See [docs/philosophy.md](https://github.com/smixs/iva/blob/main/docs/philosophy.md)
-        and [docs/extending.md](https://github.com/smixs/iva/blob/main/docs/extending.md).
+        agent reads — not new code. See [docs/philosophy.md](https://github.com/smixs/iva-agent/blob/main/docs/philosophy.md)
+        and [docs/extending.md](https://github.com/smixs/iva-agent/blob/main/docs/extending.md).
         If your idea fits there, you can likely ship it yourself in one file.
   - type: textarea
     id: problem
