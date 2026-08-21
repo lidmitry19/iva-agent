@@ -25,6 +25,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE = `import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 mkdirSync(join(process.cwd(), ".output"), { recursive: true });
+mkdirSync(join(process.cwd(), ".eve"), { recursive: true });
 writeFileSync(
   join(process.cwd(), ".output/app.mjs"),
   "import " + JSON.stringify(join(process.cwd(), "agent/agent.ts")) + ";\\n",
@@ -32,6 +33,10 @@ writeFileSync(
 writeFileSync(
   join(process.cwd(), ".output/data-dir.txt"),
   process.env.ASSISTANT_DATA_DIR ?? "",
+);
+writeFileSync(
+  join(process.cwd(), ".eve/agent-summary.json"),
+  JSON.stringify({ skills: [{ name: "mine", description: "stock" }] }),
 );
 `;
 
@@ -133,6 +138,20 @@ test("the staging build receives the installation's canonical data directory", (
   assert.equal(
     readFileSync(join(version, ".output/data-dir.txt"), "utf8"),
     join(home, "runtime"),
+  );
+});
+
+test("the staging build promotes eve's agent summary", () => {
+  const home = join(world(), "iva");
+  const version = join(home, "versions/0.3.15-0123456789ab");
+  mkdirSync(version, { recursive: true });
+  plantTree(version);
+
+  const built = build(version);
+  assert.equal(built.status, 0, built.output);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(version, ".eve/agent-summary.json"), "utf8")),
+    { skills: [{ name: "mine", description: "stock" }] },
   );
 });
 
