@@ -112,18 +112,26 @@ function git(cwd: string, args: readonly string[]): string {
 function build(
   root: string,
   configuredDataDir?: string,
+  nodeImport?: string,
 ): { status: number | null; output: string } {
-  const result = spawnSync(process.execPath, [join(root, "scripts/build.ts")], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      NO_COLOR: "1",
-      ...(configuredDataDir === undefined
-        ? {}
-        : { ASSISTANT_DATA_DIR: configuredDataDir }),
+  const result = spawnSync(
+    process.execPath,
+    [
+      ...(nodeImport ? ["--import", nodeImport] : []),
+      join(root, "scripts/build.ts"),
+    ],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        ...(configuredDataDir === undefined
+          ? {}
+          : { ASSISTANT_DATA_DIR: configuredDataDir }),
+      },
     },
-  });
+  );
   return { status: result.status, output: `${result.stdout}${result.stderr}` };
 }
 
@@ -152,6 +160,46 @@ test("the staging build promotes eve's agent summary", () => {
   assert.deepEqual(
     JSON.parse(readFileSync(join(version, ".eve/agent-summary.json"), "utf8")),
     { skills: [{ name: "mine", description: "stock" }] },
+  );
+});
+
+test("backup cleanup cannot roll back the promoted build", () => {
+  const home = join(world(), "iva");
+  const version = join(home, "versions/0.3.15-0123456789ab");
+  mkdirSync(version, { recursive: true });
+  plantTree(version);
+  mkdirSync(join(version, ".output"), { recursive: true });
+  mkdirSync(join(version, ".eve"), { recursive: true });
+  writeFileSync(join(version, ".output/app.mjs"), "old output\n");
+  writeFileSync(
+    join(version, ".eve/agent-summary.json"),
+    JSON.stringify({ skills: [{ name: "old", description: "old" }] }),
+  );
+  const failCleanup = join(version, "fail-cleanup.mjs");
+  writeFileSync(
+    failCleanup,
+    `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const rmSync = fs.rmSync;
+fs.rmSync = (path, options) => {
+  if (String(path).includes("agent-summary.iva-build-backup-"))
+    throw new Error("forced summary backup cleanup failure");
+  return rmSync(path, options);
+};
+syncBuiltinESMExports();
+`,
+  );
+
+  const built = build(version, undefined, failCleanup);
+  assert.equal(built.status, 0, built.output);
+  assert.match(built.output, /build artifact cleanup deferred/u);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(version, ".eve/agent-summary.json"), "utf8")),
+    { skills: [{ name: "mine", description: "stock" }] },
+  );
+  assert.notEqual(
+    readFileSync(join(version, ".output/app.mjs"), "utf8"),
+    "old output\n",
   );
 });
 

@@ -228,8 +228,13 @@ export function buildWithCustomLayer(): void {
       process.stderr.write(
         `custom layer is invalid; built core only; recovery: ${invalidRecoveryDir}\n`,
       );
-    if (summaryBackup) rmSync(summaryBackup, { force: true });
-    if (outputBackup) rmSync(outputBackup, { recursive: true, force: true });
+    try {
+      if (summaryBackup) rmSync(summaryBackup, { force: true });
+      if (outputBackup) rmSync(outputBackup, { recursive: true, force: true });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`build artifact cleanup deferred: ${detail}\n`);
+    }
   } catch (error) {
     if (summaryPromoted) restoreAgentSummary(summaryBackup);
     if (outputPromoted) restoreOutput(outputBackup);
