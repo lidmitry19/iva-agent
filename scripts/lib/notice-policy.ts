@@ -137,6 +137,28 @@ export function pluginsSwitchedOffAlert(
   );
 }
 
+/** Ключ дросселя: ночная свёртка снесла кусок CORE, код вернул файл как было. */
+export const CORE_DAMAGE_ALERT_KEY = "core-rollup-damage";
+
+/**
+ * Ночная свёртка потеряла секцию CORE (или обнулила файл), и код откатил CORE к состоянию
+ * до хода (ADR-0002). Молчать нельзя: откат выглядит как «ночь ничего не записала», а
+ * правило Alert (ADR-0007) требует сказать, что сломалось, чем грозит и что сделать.
+ */
+export function coreDamageAlert(
+  tr: Translate,
+  lostHeadings: readonly string[],
+): string {
+  const listed = lostHeadings.map((heading) => `«${heading}»`).join(", ");
+  const what = lostHeadings.length
+    ? tr(`dropped ${listed} from`, `потеряла ${listed} в`)
+    : tr("emptied", "опустошила");
+  return tr(
+    `⚠️ Tonight's memory rollup ${what} CORE.md. CORE.md goes into every single turn, so the missing part would have fallen out of my memory. I restored the file as it was before tonight — the day's new facts are NOT in it. Open vault/CORE.md and add what tonight should have written.`,
+    `⚠️ Ночная свёртка памяти ${what} CORE.md. CORE.md уходит в каждый ход, поэтому пропавшее выпало бы из моей памяти. Я вернула файл в состояние до этой ночи — новых фактов дня в нём НЕТ. Открой vault/CORE.md и допиши то, что должна была записать эта ночь.`,
+  );
+}
+
 function errorCode(error: unknown): string | undefined {
   return error !== null && typeof error === "object" && "code" in error
     ? typeof error.code === "string"

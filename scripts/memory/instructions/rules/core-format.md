@@ -15,9 +15,12 @@ file the model never has to search for.
    deterministically clamps any remaining overflow without touching pointers.
 2. **Only durable facts.** Identity, standing preferences, and ≤3 active goals. Anything a web
    search would surface, anything stale within ~7 days, any task state → does NOT belong here.
-3. **Who writes it:** the nightly `rollup.ts daily` pass (full rewrite from the day + existing CORE),
-   plus the live agent on an explicit "remember …" about a durable user fact/preference/goal.
-   Never let routine chat edit it.
+3. **Who writes it:** the nightly `rollup.ts daily` pass **edits individual lines**, and only when
+   the day produced something durable — a day with nothing new leaves the file byte-identical and
+   unopened. Never rewrite the whole file. Sections that are not in the Shape below belong to the
+   user: keep them verbatim. The `Последний день` pointer is maintained by code after the turn,
+   not by you. The live agent edits CORE only on an explicit "remember …" about a durable user
+   fact/preference/goal. Never let routine chat edit it.
 
 ## MECE routing (what goes where)
 

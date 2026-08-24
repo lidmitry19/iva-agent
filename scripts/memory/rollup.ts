@@ -11,10 +11,15 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, type MessageResult, type SessionState } from "eve/client";
 import { CORE_CAP } from "#lib/core-cap.ts";
+import { coreDamage, setLastDayPointer } from "#lib/core-clamp.ts";
 import { writeFileAtomicSync } from "#lib/fs-atomic.ts";
 import { tr } from "#lib/i18n.ts";
 import { readSettings } from "#lib/settings.ts";
 import {
+  alertOnce,
+  alertResolved,
+  coreDamageAlert,
+  CORE_DAMAGE_ALERT_KEY,
   deliverMemoryReport,
   memoryReportTail,
   memoryReportsEnabled,
@@ -134,9 +139,11 @@ function buildPrompt(p: Period, now: string): string {
         `resolve every listed same-entity conflict by superseding the stale card. ` +
         `Then assemble a daily-summary for ${yesterday} with the day's topics and MOC links down to the cards ` +
         `and to the raw transcript daily/${yesterday}.md. ` +
-        `Then update ${VAULT}/CORE.md per the ${INSTRUCTIONS}/rules/core-format.md rule: refresh permanent ` +
-        `facts about the user, preferences, active goals (≤3), and the pointer to the last day (${yesterday}); ` +
-        `keep it ≤~${CORE_CAP} characters — compress on overflow, don't bloat. ` +
+        `Then ${VAULT}/CORE.md, per the ${INSTRUCTIONS}/rules/core-format.md rule. If the day produced ` +
+        `no new durable fact, preference, goal or behavioral lesson, do not open or write CORE.md. ` +
+        `Otherwise edit only the affected lines; never rewrite the file; keep every existing section, ` +
+        `including ones not in the template. The pointer to the last day is set by code — leave it alone. ` +
+        `Keep the file ≤~${CORE_CAP} characters — compress on overflow, don't bloat. ` +
         `Separately, reflect on the day's interactions: for each notable exchange judge the outcome — ` +
         `useful, dead_end, or corrected (user corrected you, asked again, or was dissatisfied). ` +
         `When a corrected/dead_end outcome reveals a REPEATABLE behavioral lesson (not a one-off fix), ` +
@@ -306,7 +313,21 @@ async function dropHungSession(label: string): Promise<void> {
   }
 }
 
+const CORE_PATH = join(VAULT, "CORE.md");
+
+// CORE как есть. Отсутствующий файл — пустое состояние первой ночи (ровно то, что видит
+// динамическая инструкция CORE); любой другой отказ чтения остаётся громким.
+function readCoreText(path: string): string {
+  const read = readCore(path);
+  if (read.state === "unreadable") throw read.error;
+  return read.state === "valid" ? read.text : "";
+}
+
 const today = localDate();
+const yesterday = shiftDate(today, -1);
+// Снимок CORE ДО хода: файл правит сама ночь, и пропажу секции видно только сравнением
+// с тем, что было. Читается всегда, даже если ночь CORE не откроет вовсе.
+const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.session(saved.state) : client.session();
@@ -381,16 +402,71 @@ if (result.status === "failed" || !result.message) {
   process.exit(1);
 }
 
-// Daily is the only rollup that updates CORE. Verify the actual file, not just the turn
-// status: one same-session correction is allowed, then fail loudly and leave brain as
+// Алерт владельцу тем же путём, что у brain: один дроссель на всю установку (ADR-0007),
+// доставка — через шов наружу, который несёт и outbound-гейт.
+async function alertOwner(
+  key: string,
+  essence: string,
+  message: string,
+): Promise<void> {
+  const outcome = await alertOnce(DATA_DIR, key, essence, async () => {
+    if (!BOT || !CHAT) {
+      console.error(
+        `rollup ${period}: no TELEGRAM_BOT_TOKEN/TELEGRAM_DIGEST_CHAT_ID — alert not sent: ${message}`,
+      );
+      return false;
+    }
+    const sent = await sendTelegramHtml(BOT, CHAT, message, {
+      trace: { session: session.state.sessionId, source: "rollup" },
+    });
+    if (!sent.ok)
+      console.error(`rollup ${period}: alert send failed: ${sent.error}`);
+    return sent.ok;
+  });
+  if (outcome === "throttled")
+    console.log(
+      `rollup ${period}: ${key} is unchanged since the last alert — not repeated`,
+    );
+}
+
+// Daily is the only rollup that touches CORE. Verify the actual file, not just the turn
+// status: a lost section is rolled back here, the last-day pointer is written here, and
+// one same-session correction of the cap is allowed — then fail loudly and leave brain as
 // the deterministic 05:00 backstop.
 if (period === "daily") {
-  const corePath = join(VAULT, "CORE.md");
-  const initialCore = readCore(corePath);
-  if (initialCore.state === "unreadable") throw initialCore.error;
   // A non-empty pre-existing vault may legitimately have no CORE. The turn starts from
   // the same empty state that the dynamic CORE instruction already documents and uses.
-  let core = initialCore.state === "valid" ? initialCore.text : "";
+  let core = readCoreText(CORE_PATH);
+
+  // Ход мог снести секцию целиком — в том числе пользовательскую, которой нет в шаблоне.
+  // Это потеря данных, поэтому файл возвращается как был, и владелец слышит об этом:
+  // молчаливый откат читался бы как «ночь ничего не записала» (ADR-0002, ADR-0007).
+  const damage = coreDamage(coreBeforeTurn, core);
+  if (damage.damaged) {
+    writeFileAtomicSync(CORE_PATH, coreBeforeTurn);
+    core = coreBeforeTurn;
+    const lost = damage.lostHeadings.map((h) => `## ${h}`).join(", ");
+    console.error(
+      `rollup daily: CORE.md lost ${lost || "all of its content"} during the turn — restored the pre-turn file`,
+    );
+    await alertOwner(
+      CORE_DAMAGE_ALERT_KEY,
+      damage.lostHeadings.join(",") || "emptied",
+      coreDamageAlert(tr, damage.lostHeadings),
+    );
+  } else {
+    alertResolved(DATA_DIR, CORE_DAMAGE_ALERT_KEY);
+  }
+
+  // Указатель на последний день ведёт код: дата известна точно, а модели тут нечего
+  // решать — за неё она платила бы полным перезаписыванием файла. Пишем только если
+  // строка реально изменилась, иначе день без новых фактов трогал бы vault впустую.
+  const pointed = setLastDayPointer(core, yesterday);
+  if (pointed !== core) {
+    writeFileAtomicSync(CORE_PATH, pointed);
+    core = pointed;
+  }
+
   if (core.length > CORE_CAP) {
     const oldLength = core.length;
     console.error(
@@ -401,7 +477,7 @@ if (period === "daily") {
     try {
       await guardedTurn(
         session,
-        `Re-open ${corePath}: it is ${oldLength} characters, above the hard ${CORE_CAP}-character cap. ` +
+        `Re-open ${CORE_PATH}: it is ${oldLength} characters, above the hard ${CORE_CAP}-character cap. ` +
           "Compress it now per the core-format rule. Preserve every heading and the Pointers/Указатели " +
           "section; remove stale Preferences/Предпочтения first. Do not return until the file itself is within the cap.",
         "core-correction",
@@ -414,7 +490,7 @@ if (period === "daily") {
       if ((e as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
         await dropHungSession("core-correction");
     }
-    const correctedCore = readCore(corePath);
+    const correctedCore = readCore(CORE_PATH);
     if (correctedCore.state === "unreadable") throw correctedCore.error;
     if (correctedCore.state === "missing") {
       console.error(
