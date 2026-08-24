@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import fc from "fast-check";
 
 // Пайплайн живёт БЕЗ eve: тест грузит его голым node. Окружение выставляем до
 // импорта — i18n и settings читают ASSISTANT_DATA_DIR на загрузке модуля.
@@ -742,11 +743,332 @@ await test("rich_message читается в каждой части пачки,
     effects,
   );
 
-  assert.deepEqual(result?.context, ["forwarded article", "third article"]);
+  assert.deepEqual(result?.context, [
+    "[forwarded from channel Source]\nforwarded article",
+    "third article",
+  ]);
   const written = dailyText().slice(before.length);
   assert.match(written, /\[text\]\ncarrier/u);
-  assert.match(written, /\[text\]\nforwarded article/u);
+  assert.match(
+    written,
+    /\[text\]\n\[forwarded from channel Source\]\nforwarded article/u,
+  );
   assert.match(written, /\[text\]\nthird article/u);
+});
+
+// --- Пересылка ---
+//
+// Bot API ≥7.0 присылает только forward_origin: legacy-поля forward_from,
+// forward_from_chat и forward_sender_name заменены им в 7.0. Метка обязана быть
+// одинаковой в контексте модели и в дневнике, иначе репост читается как слова
+// владельца (issue #195).
+
+function forwarded(text: string, origin: Record<string, unknown>) {
+  return privateText(text, { forward_origin: origin });
+}
+
+await test("пересылка от пользователя с username помечена и в контексте, и в дневнике", async () => {
+  const before = dailyText();
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("hello from ann", {
+      type: "user",
+      date: 1,
+      sender_user: { id: 9, is_bot: false, first_name: "Ann", username: "ann" },
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, ["[forwarded from @ann]\nhello from ann"]);
+  assert.match(
+    dailyText().slice(before.length),
+    /\[text\]\n\[forwarded from @ann\]\nhello from ann/u,
+  );
+});
+
+await test("пересылка от пользователя без username помечена именем", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("no username here", {
+      type: "user",
+      date: 1,
+      sender_user: {
+        id: 9,
+        is_bot: false,
+        first_name: "Ann",
+        last_name: "Lee",
+      },
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "[forwarded from Ann Lee]\nno username here",
+  ]);
+});
+
+await test("пересылка из канала помечена заголовком и username канала", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("channel post", {
+      type: "channel",
+      date: 1,
+      message_id: 8,
+      chat: { id: -100, type: "channel", title: "Source", username: "src" },
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "[forwarded from channel Source (@src)]\nchannel post",
+  ]);
+});
+
+await test("пересылка из группы читает sender_chat той же меткой", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("group post", {
+      type: "chat",
+      date: 1,
+      sender_chat: { id: -1, type: "supergroup", title: "Team" },
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "[forwarded from channel Team]\ngroup post",
+  ]);
+});
+
+await test("скрытый отправитель помечен именем, которое отдал Telegram", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("hidden one", {
+      type: "hidden_user",
+      date: 1,
+      sender_user_name: "Someone",
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "[forwarded (hidden sender: Someone)]\nhidden one",
+  ]);
+});
+
+await test("метку не выдумываем: origin без опознавательных полей даёт голое [forwarded]", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    forwarded("nameless", { type: "user", date: 1 }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, ["[forwarded]\nnameless"]);
+});
+
+await test("текст без forward_origin метки не получает", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    privateText("my own words"),
+    effects,
+  );
+
+  assert.equal(result?.context, undefined);
+});
+
+await test("пересланная часть внутри пачки помечена, носитель — нет", async () => {
+  const before = dailyText();
+  const { effects } = harness();
+  const carrier = "look at this";
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 20,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      text: carrier,
+      iva_parts: [
+        {
+          message_id: 20,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          text: carrier,
+        },
+        {
+          message_id: 21,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          forward_origin: {
+            type: "user",
+            date: 1,
+            sender_user: { id: 9, is_bot: false, username: "ann" },
+          },
+          text: "her words",
+        },
+      ],
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, ["[forwarded from @ann]\nher words"]);
+  const written = dailyText().slice(before.length);
+  assert.match(written, /\[text\]\nlook at this/u);
+  assert.match(written, /\[text\]\n\[forwarded from @ann\]\nher words/u);
+});
+
+await test("пересланный носитель пачки едет к модели с меткой, а не молча", async () => {
+  const { effects } = harness();
+  const carrier = "reposted carrier";
+  const result = await inbound.runTelegramInbound(
+    message({
+      message_id: 22,
+      chat: { id: 77, type: "private" },
+      from: { id: 42, is_bot: false },
+      text: carrier,
+      iva_parts: [
+        {
+          message_id: 22,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          forward_origin: {
+            type: "channel",
+            date: 1,
+            message_id: 3,
+            chat: { id: -100, type: "channel", title: "Source" },
+          },
+          text: carrier,
+        },
+        {
+          message_id: 23,
+          chat: { id: 77, type: "private" },
+          from: { id: 42, is_bot: false },
+          text: "and my comment",
+        },
+      ],
+    }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    `[forwarded from channel Source]\n${carrier}`,
+    "and my comment",
+  ]);
+});
+
+// Свойство метки на произвольном MessageOrigin, включая мусорный.
+//
+// КАК ВОСПРОИЗВЕСТИ ПАДЕНИЕ: при провале fast-check печатает строку вида
+// `Property failed after N tests { seed: -1234567, path: "12:3:0", endOnFailure: true }`.
+// Подставь её вторым аргументом — fc.assert(prop, { seed: -1234567, path: "12:3:0" }) —
+// и прогон повторится байт в байт, включая shrink.
+const FORWARD_SEED = 20_260_824;
+const FORWARD_RUNS = 200;
+
+// Алфавит имени источника: латиница, цифры, пробелы и ровно те символы, которыми
+// подделывают метку — скобки и перевод строки. Кириллицы и невидимых знаков тут нет
+// специально: их нормализует security-гейт, и свойство проверяло бы уже не метку.
+const forwardName = fc.string({
+  unit: fc.constantFrom(..."abcXYZ019", " ", "[", "]", "\n"),
+  maxLength: 12,
+});
+
+function maybe<T>(arb: fc.Arbitrary<T>): fc.Arbitrary<T | undefined> {
+  return fc.option(arb, { nil: undefined });
+}
+
+const junkValue = fc.oneof(
+  fc.constant(null),
+  fc.constant(7),
+  fc.constant("user"),
+  fc.constant(true),
+  fc.array(fc.constant("user"), { maxLength: 2 }),
+);
+
+const forwardChat = fc.record({
+  id: fc.integer(),
+  type: fc.constantFrom("channel", "supergroup", "group"),
+  title: maybe(forwardName),
+  username: maybe(forwardName),
+});
+
+const originRecord = fc.oneof(
+  fc.record({
+    type: fc.constant("user"),
+    sender_user: maybe(
+      fc.record({
+        id: fc.integer(),
+        username: maybe(forwardName),
+        first_name: maybe(forwardName),
+        last_name: maybe(forwardName),
+      }),
+    ),
+  }),
+  fc.record({
+    type: fc.constant("hidden_user"),
+    sender_user_name: maybe(fc.oneof(forwardName, junkValue)),
+  }),
+  fc.record({
+    type: fc.constantFrom("channel", "chat"),
+    chat: maybe(fc.oneof(forwardChat, junkValue)),
+    sender_chat: maybe(fc.oneof(forwardChat, junkValue)),
+  }),
+  fc.record({ type: fc.oneof(fc.constant("future_origin"), junkValue) }),
+  fc.record({}),
+);
+
+// Зеркало правила очистки имени: одна строка, без скобок метки, с потолком длины.
+function cleanId(value: unknown): string {
+  return typeof value === "string"
+    ? value.replace(/[[\]]/gu, "").replace(/\s+/gu, " ").trim().slice(0, 100)
+    : "";
+}
+
+await test(`метка пересылки не подделывается и не выдумывается (seed ${FORWARD_SEED})`, async () => {
+  const body = "property body";
+  await fc.assert(
+    fc.asyncProperty(
+      fc.oneof(originRecord, junkValue),
+      async (origin: unknown) => {
+        const { effects } = harness();
+        const result = await inbound.runTelegramInbound(
+          privateText(body, { forward_origin: origin }),
+          effects,
+        );
+
+        assert.ok(result);
+        const isOrigin =
+          typeof origin === "object" &&
+          origin !== null &&
+          !Array.isArray(origin);
+        if (!isOrigin) {
+          // Пересылки нет — метки тоже нет, штатный поток не переопределяется.
+          assert.equal(result.context, undefined);
+          return;
+        }
+
+        // Метка ровно одна, занимает ровно одну строку и не режет текст.
+        assert.ok(result.context);
+        assert.equal(result.context.length, 1);
+        assert.match(
+          result.context[0],
+          new RegExp(`^\\[forwarded[^\\n]*\\]\\n${body}$`, "u"),
+        );
+
+        const record = origin as Record<string, unknown>;
+        const user = record.sender_user as Record<string, unknown> | undefined;
+        const username = cleanId(user?.username);
+        if (record.type === "user" && username) {
+          assert.ok(
+            result.context[0].startsWith(`[forwarded from @${username}]`),
+          );
+        }
+        const hidden = cleanId(record.sender_user_name);
+        if (record.type === "hidden_user" && hidden) {
+          assert.ok(result.context[0].includes(hidden));
+        }
+      },
+    ),
+    { seed: FORWARD_SEED, numRuns: FORWARD_RUNS },
+  );
 });
 
 // --- Trace ---
