@@ -37,7 +37,7 @@ const CORE = [
   "",
   "## Указатели",
   "",
-  "- Последний день: vault/summaries/daily/2026-08-20 · Индекс: vault/MOC.md",
+  "- Последний день: summaries/daily/2026-08-20 · Индекс: MOC.md",
   "",
 ].join("\n");
 
@@ -67,7 +67,24 @@ test("a day with nothing new leaves CORE byte-identical except the pointer line"
   assert.deepEqual(changedLines(CORE, pointed), [pointerIndexOf(CORE)]);
   assert.equal(pointed, CORE.replace("2026-08-20", "2026-08-23"));
   // Хвост строки (индекс MOC) переживает правку.
-  assert.match(pointed, /2026-08-23 · Индекс: vault\/MOC\.md/u);
+  assert.match(pointed, /2026-08-23 · Индекс: MOC\.md/u);
+});
+
+test("an old CORE with the vault/ prefix is normalized in place", () => {
+  const legacy = CORE.replace(
+    "- Последний день: summaries/daily/2026-08-20 · Индекс: MOC.md",
+    "- Последний день: vault/summaries/daily/2026-08-20 · Индекс: vault/MOC.md",
+  );
+
+  const pointed = setLastDayPointer(legacy, "2026-08-23");
+
+  // Меняется вся ссылка целиком, хвост строки (индекс) остаётся как был у владельца.
+  assert.deepEqual(changedLines(legacy, pointed), [pointerIndexOf(legacy)]);
+  assert.equal(
+    pointed.split("\n")[pointerIndexOf(legacy)],
+    "- Последний день: summaries/daily/2026-08-23 · Индекс: vault/MOC.md",
+  );
+  assert.equal(setLastDayPointer(pointed, "2026-08-23"), pointed);
 });
 
 test("re-running the same night writes nothing at all", () => {
@@ -138,8 +155,8 @@ test("a first-run vault without CORE is not damage", () => {
 
 test("the pointer is inserted into an existing Pointers section that lost the line", () => {
   const withoutLine = CORE.replace(
-    "- Последний день: vault/summaries/daily/2026-08-20 · Индекс: vault/MOC.md\n",
-    "- Индекс: vault/MOC.md\n",
+    "- Последний день: summaries/daily/2026-08-20 · Индекс: MOC.md\n",
+    "- Индекс: MOC.md\n",
   );
 
   const pointed = setLastDayPointer(withoutLine, "2026-08-23");
@@ -147,8 +164,8 @@ test("the pointer is inserted into an existing Pointers section that lost the li
   assert.equal(
     pointed,
     withoutLine.replace(
-      "- Индекс: vault/MOC.md\n",
-      "- Индекс: vault/MOC.md\n- Последний день: vault/summaries/daily/2026-08-23\n",
+      "- Индекс: MOC.md\n",
+      "- Индекс: MOC.md\n- Последний день: summaries/daily/2026-08-23\n",
     ),
   );
   assert.equal(setLastDayPointer(pointed, "2026-08-23"), pointed);
@@ -160,7 +177,7 @@ test("the pointer lands inside the section, not at the end of the file", () => {
     "",
     "## Указатели",
     "",
-    "- Индекс: vault/MOC.md",
+    "- Индекс: MOC.md",
     "",
     "## Мои заметки",
     "",
@@ -172,7 +189,7 @@ test("the pointer lands inside the section, not at the end of the file", () => {
 
   assert.match(
     pointed,
-    /- Индекс: vault\/MOC\.md\n- Последний день: vault\/summaries\/daily\/2026-08-23\n\n## Мои заметки/u,
+    /- Индекс: MOC\.md\n- Последний день: summaries\/daily\/2026-08-23\n\n## Мои заметки/u,
   );
 });
 
@@ -183,7 +200,7 @@ test("a missing Pointers section is appended at the end", () => {
 
   assert.equal(
     pointed,
-    `${text}\n## Указатели\n\n- Последний день: vault/summaries/daily/2026-08-23\n`,
+    `${text}\n## Указатели\n\n- Последний день: summaries/daily/2026-08-23\n`,
   );
   assert.equal(setLastDayPointer(pointed, "2026-08-23"), pointed);
 });
@@ -191,15 +208,15 @@ test("a missing Pointers section is appended at the end", () => {
 test("an empty CORE gets the section and nothing else", () => {
   assert.equal(
     setLastDayPointer("", "2026-08-23"),
-    "## Указатели\n\n- Последний день: vault/summaries/daily/2026-08-23\n",
+    "## Указатели\n\n- Последний день: summaries/daily/2026-08-23\n",
   );
 });
 
 test("a pointer line without a value keeps its tail readable", () => {
-  const text = "## Указатели\n\n- Последний день: · Индекс: vault/MOC.md\n";
+  const text = "## Указатели\n\n- Последний день: · Индекс: MOC.md\n";
   assert.equal(
     setLastDayPointer(text, "2026-08-23"),
-    "## Указатели\n\n- Последний день: vault/summaries/daily/2026-08-23 · Индекс: vault/MOC.md\n",
+    "## Указатели\n\n- Последний день: summaries/daily/2026-08-23 · Индекс: MOC.md\n",
   );
 });
 
@@ -283,10 +300,12 @@ const coreDocument = fc
     after: fc.array(section, { maxLength: 2 }),
     insidePointers: fc.array(filler, { maxLength: 2 }),
     old: isoDate,
+    // Установка могла остаться со старым путём — правка обязана его нормализовать.
+    oldPrefix: fc.constantFrom("", "vault/"),
     tail: fc.constantFrom(
       "",
-      " · Индекс: vault/MOC.md",
-      "  ·  Индекс: vault/MOC.md · и ещё что-то",
+      " · Индекс: MOC.md",
+      "  ·  Индекс: MOC.md · и ещё что-то",
     ),
     crlf: fc.boolean(),
     finalNewline: fc.boolean(),
@@ -300,7 +319,7 @@ const coreDocument = fc
       "## Указатели",
       "",
       ...shape.insidePointers,
-      `- Последний день: vault/summaries/daily/${shape.old}${shape.tail}`,
+      `- Последний день: ${shape.oldPrefix}summaries/daily/${shape.old}${shape.tail}`,
       "",
       ...shape.after.flat(),
     ];
@@ -317,7 +336,7 @@ test("property: the pointer edit moves exactly one line and nothing else", () =>
         .split(newline)
         .map((line, index) =>
           index === at
-            ? `- Последний день: vault/summaries/daily/${date}${tail}`
+            ? `- Последний день: summaries/daily/${date}${tail}`
             : line,
         )
         .join(newline);
@@ -357,7 +376,7 @@ test("property: junk in, pointer out — never a throw, always idempotent", () =
   fc.assert(
     fc.property(junk, isoDate, (text, date) => {
       const once = setLastDayPointer(text, date);
-      assert.ok(once.includes(`vault/summaries/daily/${date}`));
+      assert.ok(once.includes(`summaries/daily/${date}`));
       assert.equal(setLastDayPointer(once, date), once);
       // Ни одна прежняя строка не потеряна: указатель только дописывает.
       assert.equal(

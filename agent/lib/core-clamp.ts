@@ -198,11 +198,11 @@ export function clampCore(text: string): string {
 
 // Строка указателя на последний обработанный день. Обе локали заголовка секции знает
 // SECTION_KIND выше; здесь — обе локали самой метки. Значение (путь до сводки) кончается
-// на первом пробеле или `·`, поэтому хвост строки («· Индекс: vault/MOC.md») переживает
-// правку байт в байт.
+// на первом пробеле или `·`, поэтому хвост строки («· Индекс: MOC.md») переживает правку
+// байт в байт, а старое значение с префиксом `vault/` заменяется целиком.
 const LAST_DAY_LABEL =
   /^(\s*[-*][ \t]+(?:Последний день|Last day)[ \t]*:[ \t]*)([^\s·]*)(.*)$/u;
-const DAILY_SUMMARY_PREFIX = "vault/summaries/daily/";
+const DAILY_SUMMARY_PREFIX = "summaries/daily/";
 // Канонический вид секции из Shape (core-format.md) — на случай, когда её нет вовсе.
 const POINTERS_HEADING = "## Указатели";
 const LAST_DAY_LABEL_TEXT = "- Последний день: ";
