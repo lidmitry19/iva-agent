@@ -5,24 +5,27 @@ index is in context; search content with `memory_search` (ranked search over
 cards and summaries), then pull the top hits one file at a time with
 `read_file`. Never read the whole vault.
 
+`read_file` paths are relative to the vault root (`CORE.md`, `cards/…` — the
+same shape `memory_search` returns): never prefix them with `vault/`. Shell
+commands (`ls`, `grep`) run from the project root, so there the path does start
+with `vault/`.
+
 Creating a fact card (contact/project/decision/idea/note) — write it with the
 **`write_card`** tool, not `write_file`: it guarantees a valid type and schema
 (no invented types, no extra fields). Do not use `write_file` for cards.
 
 ### What lives where (coarse → precise)
 
-- `vault/CORE.md` — who the user is, standing preferences, ≤3 active goals,
+- `CORE.md` — who the user is, standing preferences, ≤3 active goals,
   pointers. ALREADY in context (the "CORE" block) — do not re-read it.
-- `vault/MOC.md` — the topic index of the vault: topic hubs → cards. READ
-  FIRST for "what do I know about X".
-- `vault/summaries/daily/YYYY-MM-DD.md` — the day summary (topics + links).
-  Take it INSTEAD of the raw log.
-- `vault/weekly/`, `vault/monthly/`, `vault/yearly/` — week/month/year
-  summaries.
-- `vault/cards/{projects,contacts,decisions,ideas,notes}/<slug>.md` — typed
-  facts.
-- `vault/daily/YYYY-MM-DD.md` — the RAW two-sided transcript (large). Only
-  when exact wording matters.
+- `MOC.md` — the topic index of the vault: topic hubs → cards. READ FIRST for
+  "what do I know about X".
+- `summaries/daily/YYYY-MM-DD.md` — the day summary (topics + links). Take it
+  INSTEAD of the raw log.
+- `weekly/`, `monthly/`, `yearly/` — week/month/year summaries.
+- `cards/{projects,contacts,decisions,ideas,notes}/<slug>.md` — typed facts.
+- `daily/YYYY-MM-DD.md` — the RAW two-sided transcript (large). Only when exact
+  wording matters.
 
 ### How to recall (step by step)
 
@@ -55,7 +58,7 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 
 ### What happens by itself (do NOT run manually)
 
-- Messages and your replies are auto-written to `vault/daily/<today>.md` (the
+- Messages and your replies are auto-written to `daily/<today>.md` (the
   transcript hook).
 - Voice, video and audio are transcribed into the daily file before you see
   them (Deepgram).
@@ -71,8 +74,9 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 Normally the nightly rollup writes `CORE.md`. But when the user DIRECTLY asks
 to change something — remember a standing fact, preference or goal, **or
 change your communication style, tone or rules of behavior** — update
-`vault/CORE.md` through `write_file` right away: add or fix the line (keep a
-"How to behave" section for behavior), keep the file short (≤~1200
+`vault/CORE.md` through `write_file` right away — `write_file` takes the host
+path from the project root, NOT a vault-relative one: add or fix the line
+(keep a "How to behave" section for behavior), keep the file short (≤~1200
 characters), do not duplicate, confirm briefly. CORE loads every turn, so the
 change applies immediately. Do NOT write the ephemeral into CORE (task
 status, "call at 5") — tasks live in `tasks`, the rest settles into the daily

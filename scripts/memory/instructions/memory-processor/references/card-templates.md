@@ -1,7 +1,7 @@
 # Card templates
 
 Frontmatter per type. `type` and `status` MUST exist in
-`vault/schema.json` → `node_types`. `description` is a search snippet
+`schema.json` → `node_types`. `description` is a search snippet
 (what/why), never a title repeat. `tags`: 2–5, lowercase, kebab-case.
 
 The canonical generic templates live in

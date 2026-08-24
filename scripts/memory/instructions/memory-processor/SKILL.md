@@ -2,7 +2,7 @@
 name: memory-processor
 description: >-
   Iva's daily-memory processor. Reads the day's two-sided transcript
-  (vault/daily/YYYY-MM-DD.md), distills noteworthy entities / decisions / ideas
+  (daily/YYYY-MM-DD.md), distills noteworthy entities / decisions / ideas
   into typed autograph cards, links them into the graph, and produces a
   daily-summary card (topics + MOC) that navigates down to the raw transcript and
   up to the week. Model-agnostic — runs on any LLM driving the vault (Iva uses
@@ -21,18 +21,18 @@ used — you are the enrichment.
 
 ## Inputs
 
-- `vault/daily/YYYY-MM-DD.md` — the day's raw two-sided transcript
+- `daily/YYYY-MM-DD.md` — the day's raw two-sided transcript
   (`## HH:MM [text|voice|video|photo|forward from: …]` for the user,
   `## HH:MM [iva]` for Iva's replies; older days may use legacy `[eva]`).
   See `scripts/memory/instructions/rules/daily-format.md`.
-- `vault/schema.json` — the vault schema (types, domains, decay).
-- Existing cards under `vault/cards/**` and prior summaries under
-  `vault/summaries/`, `vault/weekly|monthly|yearly/` — for linking and dedup.
+- `schema.json` — the vault schema (types, domains, decay).
+- Existing cards under `cards/**` and prior summaries under `summaries/`,
+  `weekly|monthly|yearly/` — for linking and dedup.
 
 ## Outputs
 
-1. Zero or more **entity/decision/idea cards** under `vault/cards/<kind>/`.
-2. One **daily-summary card** at `vault/summaries/daily/YYYY-MM-DD.md`.
+1. Zero or more **entity/decision/idea cards** under `cards/<kind>/`.
+2. One **daily-summary card** at `summaries/daily/YYYY-MM-DD.md`.
 3. A processing marker appended to the raw daily file (never edit existing entries).
 
 ## Layout & types (from schema.json)
