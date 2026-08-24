@@ -2361,3 +2361,37 @@ test("a plugin without a tsconfig of its own is left out of the build and named"
     logged.join("\n"),
   );
 });
+
+test("a release that names a newer updater is refused before anything is staged", async (t) => {
+  const iva = world(t);
+  writeFileSync(
+    join(iva.repo, "update-compat.json"),
+    '{"minUpdater":"99.0.0"}\n',
+  );
+  iva.release("0.3.15");
+
+  const outcome = await iva.update();
+
+  assert.equal(outcome.status, "too-old", JSON.stringify(outcome));
+  assert.equal(
+    outcome.status === "too-old" ? outcome.minUpdater : null,
+    "99.0.0",
+  );
+  const store = createVersionStore(iva.home);
+  assert.deepEqual(store.list(), []);
+  assert.equal(store.currentName(), null);
+  assert.deepEqual(iva.restarts, []);
+});
+
+test("a marker this updater satisfies leaves the update alone", async (t) => {
+  const iva = world(t);
+  writeFileSync(
+    join(iva.repo, "update-compat.json"),
+    '{"minUpdater":"0.0.1"}\n',
+  );
+  iva.release("0.3.15");
+
+  const outcome = updated(await iva.update());
+
+  assert.equal(outcome.version.startsWith("0.3.15-"), true, outcome.version);
+});

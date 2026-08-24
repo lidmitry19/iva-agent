@@ -2,6 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { modelSummary } from "./model-summary.ts";
 import { redactTelegramBody } from "./notice.ts";
+import { updaterTooOldMessage } from "./update-check.ts";
 import type { RestoreReport } from "./update-safety.ts";
 
 type UpdatePhase = "protect" | "fetch" | "build";
@@ -37,6 +38,8 @@ type Reporter = {
   busy(): Promise<void>;
   /** Refusal before the first phase — the message carries what to fix, in the job's language. */
   badProvider(value: string, accepted: string): Promise<void>;
+  /** Refusal before the first write: this CLI is older than the release it fetched. */
+  updaterTooOld(version: string): Promise<void>;
   postCommitFailure(message: string): Promise<void>;
   /** Whether the user really got the final screen; false is a result to act on. */
   complete(versions: {
@@ -304,6 +307,13 @@ export function createTelegramUpdateReporter({
       await finish(
         `⚠️ ${copy.badProvider}: ${JSON.stringify(value)} (${accepted})`,
       );
+    },
+    // Отказ до первой записи: обновиться сама эта установка уже не может. Текст — тот же,
+    // что уходит в терминал, и собирается ЗДЕСЬ, из языка того, кто нажал. Без parse_mode:
+    // команда репейра обязана доехать до чата символ в символ.
+    async updaterTooOld(version: string) {
+      currentPhase = null;
+      await finish(`⚠️ ${updaterTooOldMessage(version, lang)}`);
     },
     async postCommitFailure(message: string) {
       currentPhase = null;

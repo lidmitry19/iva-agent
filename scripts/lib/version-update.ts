@@ -14,6 +14,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isAuthoredPath } from "./authored-paths.ts";
 import { resolveDataDir } from "./data-dir.ts";
+import { gitAt, updaterCompat } from "./update-check.ts";
 import {
   alertResolved,
   PLUGIN_ALERT_KEY,
@@ -69,6 +70,8 @@ type Store = ReturnType<typeof createVersionStore>;
 export type UpdateOutcome =
   | { status: "busy" }
   | { status: "current"; version: string }
+  /** The fetched release names an updater newer than this one; nothing was touched. */
+  | { status: "too-old"; own: string; minUpdater: string }
   | { status: "unhealthy"; version: string; log: string }
   | { status: "failed"; message: string }
   | {
@@ -265,6 +268,19 @@ export async function runVersionUpdate(
     store.heal();
 
     const target = await resolveTarget();
+    // The tree names the oldest updater able to install it, and this is the last step
+    // before the first write (`store.stage` below): an older CLI leaves here having
+    // touched nothing (#191).
+    const compat = await updaterCompat(
+      (...args: string[]) => gitAt(store.layout.repo, args),
+      target.sha,
+    );
+    if (compat.status === "too-old")
+      return {
+        status: "too-old",
+        own: compat.own,
+        minUpdater: compat.minUpdater,
+      };
     // Half of what gets built, so half of what it is called.
     const { digest, plugins } = await versionOverlay(store.layout.data, log);
     const release = versionName(target.version, target.sha, digest);

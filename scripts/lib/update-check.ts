@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -7,7 +8,8 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { notificationChat } from "./notification-chat.ts";
 import { resolveUpdateTarget, type GitResult } from "./update-channel.ts";
 
@@ -97,6 +99,121 @@ export function compareStableVersions(
   return 0;
 }
 
+/** The file a release uses to name the oldest CLI that can install it. */
+export const UPDATE_COMPAT_FILE = "update-compat.json";
+
+/** What an owner runs when their CLI can no longer update itself. */
+export const REPAIR_COMMAND =
+  "curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/repair.sh | bash";
+
+export type UpdaterCompat =
+  | { readonly status: "ok" }
+  | {
+      readonly status: "too-old";
+      readonly own: string;
+      readonly minUpdater: string;
+    };
+
+type GitRun = (...args: string[]) => Promise<GitResult>;
+
+/** The release a tree is, from its own package.json; null when there is none to read. */
+export function installedVersion(root: string): string | null {
+  try {
+    return packageVersion(readFileSync(join(root, "package.json"), "utf8"));
+  } catch {
+    return null; // No readable package.json: nothing to name it with.
+  }
+}
+
+const UPDATER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** The release of the CLI running right now — the one deciding whether it may update. */
+export function updaterVersion(root: string = UPDATER_ROOT): string {
+  const version = installedVersion(root);
+  if (!version)
+    throw new Error(`no readable release in ${join(root, "package.json")}`);
+  return version;
+}
+
+/** `minUpdater` of a marker text; anything else is an error, never a null. */
+export function parseMinUpdater(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`${UPDATE_COMPAT_FILE} is not JSON`);
+  }
+  const value =
+    parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>).minUpdater
+      : null;
+  if (typeof value !== "string" || !stableParts(value))
+    throw new Error(
+      `${UPDATE_COMPAT_FILE} has no minUpdater release: ${JSON.stringify(value)}`,
+    );
+  return value;
+}
+
+/**
+ * `minUpdater` of the fetched tree, or null where the tree carries no marker at all —
+ * a commit from before it existed, or a downgrade. A marker that is there but cannot
+ * be read is an error: "no answer" must never read as "go ahead".
+ */
+export async function readMinUpdater(
+  git: GitRun,
+  commit: string,
+): Promise<string | null> {
+  const listed = await git("ls-tree", commit, "--", UPDATE_COMPAT_FILE);
+  if (listed.code !== 0)
+    throw new Error(
+      listed.stderr || `could not list ${UPDATE_COMPAT_FILE} at ${commit}`,
+    );
+  if (!(listed.stdout ?? "").trim()) return null;
+  const shown = await git("show", `${commit}:${UPDATE_COMPAT_FILE}`);
+  if (shown.code !== 0)
+    throw new Error(
+      shown.stderr || `could not read ${UPDATE_COMPAT_FILE} at ${commit}`,
+    );
+  return parseMinUpdater(shown.stdout ?? "");
+}
+
+/**
+ * May this CLI install that tree? The tree decides: it names the oldest updater able
+ * to put it in place, and an older one stops before it touches the installation.
+ */
+export async function updaterCompat(
+  git: GitRun,
+  commit: string,
+  own: string = updaterVersion(),
+): Promise<UpdaterCompat> {
+  const minUpdater = await readMinUpdater(git, commit);
+  if (!minUpdater) return { status: "ok" };
+  const comparison = compareStableVersions(own, minUpdater);
+  if (comparison === null)
+    throw new Error(
+      `cannot compare the installed release ${JSON.stringify(own)} with minUpdater ${JSON.stringify(minUpdater)}`,
+    );
+  return comparison === 1
+    ? { status: "too-old", own, minUpdater }
+    : { status: "ok" };
+}
+
+/** The way out of a too-old install: one text, every place that has to say it. */
+export function repairInstructions(locale = "en"): string {
+  return locale === "ru"
+    ? `Откройте терминал на сервере и выполните:\n${REPAIR_COMMAND}\nДанные и .env остаются на месте.`
+    : `Open a terminal on the server and run:\n${REPAIR_COMMAND}\nYour data and .env stay in place.`;
+}
+
+/** Why the update stopped, and what to run instead. */
+export function updaterTooOldMessage(own: string, locale = "en"): string {
+  const lead =
+    locale === "ru"
+      ? `Ваша Iva (${own}) слишком старая, чтобы обновиться сама.`
+      : `Your Iva (${own}) is too old to update itself.`;
+  return `${lead} ${repairInstructions(locale)}`;
+}
+
 export async function inspectUpstream({
   root,
   remote = "origin",
@@ -137,6 +254,14 @@ export async function inspectUpstream({
   const versionComparison = compareStableVersions(localVersion, remoteVersion);
   const hasCommitUpdate = behind > 0 && local !== remoteHead;
   const hasVersionUpdate = hasCommitUpdate && versionComparison === 1;
+  // The same marker both updaters read, from the ref this call already fetched: an
+  // Alert that only says "a new version is available" sends an owner into an update
+  // that refuses itself (ADR-0003).
+  const compat = await updaterCompat(
+    run,
+    remoteHead,
+    localVersion ?? undefined,
+  );
   const common = {
     branch: target.branch,
     currentBranch: target.currentBranch,
@@ -147,6 +272,7 @@ export async function inspectUpstream({
     localVersion,
     remoteVersion,
     hasCommitUpdate,
+    updaterTooOld: compat.status === "too-old",
   };
   if (hasVersionUpdate && remoteVersion !== null) {
     return {
@@ -165,12 +291,21 @@ export function updateOffer(
   localVersion: string | null | undefined,
   remoteVersion: string | null | undefined,
   locale = "en",
+  // Tapping «Update» on such a release only earns the refusal below; the Alert says
+  // what to run instead, in the same words the updater uses.
+  updaterTooOld = false,
 ): UpdateOffer {
   const ru = locale === "ru";
+  const head = ru
+    ? `⬆️ Доступна новая версия Ивы\n\nv${localVersion} → v${remoteVersion}`
+    : `⬆️ A new Iva version is available\n\nv${localVersion} → v${remoteVersion}`;
+  const tail = updaterTooOld
+    ? repairInstructions(locale)
+    : ru
+      ? "Настройки и локальные изменения будут сохранены."
+      : "Settings and local changes will be preserved.";
   return {
-    text: ru
-      ? `⬆️ Доступна новая версия Ивы\n\nv${localVersion} → v${remoteVersion}\nНастройки и локальные изменения будут сохранены.`
-      : `⬆️ A new Iva version is available\n\nv${localVersion} → v${remoteVersion}\nSettings and local changes will be preserved.`,
+    text: `${head}\n${tail}`,
     replyMarkup: {
       inline_keyboard: [
         [
