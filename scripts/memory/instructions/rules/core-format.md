@@ -2,7 +2,7 @@
 paths: "CORE.md"
 ---
 
-# CORE format — the always-on memory file (`vault/CORE.md`)
+# CORE format — the always-on memory file (`CORE.md`)
 
 `CORE.md` is the agent's **always-on RAM**: it is injected into the system prompt every single
 turn (by `agent/instructions/20-core.ts`). Keep it tiny and high-signal — it is the one memory
@@ -48,7 +48,7 @@ file the model never has to search for.
 
 ## Указатели
 
-- Последний день: vault/summaries/daily/YYYY-MM-DD · Индекс: vault/MOC.md
+- Последний день: summaries/daily/YYYY-MM-DD · Индекс: MOC.md
 ```
 
 Empty/unknown fields stay as short placeholders until the relationship fills them in. Do not pad.

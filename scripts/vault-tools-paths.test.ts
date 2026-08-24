@@ -8,12 +8,14 @@ import assert from "node:assert/strict";
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ToolContext } from "eve/tools";
 import { settled } from "./fixtures/tool-result.ts";
 
@@ -126,4 +128,41 @@ test("read_file принимает и абсолютный путь", async () =
     await readFileTool.execute({ path: CARD }, testToolContext("read_file")),
   );
   assert.ok(read.content.includes("Иван Петров"));
+});
+
+// Инструкции не должны давать read_file путь с префиксом `vault/`: тул резолвит
+// относительный путь ОТ корня vault, поэтому `vault/daily/x.md` превращается в
+// vault/vault/daily/x.md и падает с ENOENT (#199). Шелл-примеры (ls, grep, uv run) и
+// write_file — исключение: они работают от корня проекта, а не от корня vault.
+// Скиллы (agent/skills) сюда не входят намеренно: они гоняют шелл-утилиты и получают от
+// Telegram ХОСТОВЫЙ путь вложения (`vault/attachments/…`, см. lib/telegram-media.ts) —
+// там префикс правильный. Контракт read_file живёт в инструкциях и ночных промптах.
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const INSTRUCTION_ROOTS = ["agent/instructions", "scripts/memory/instructions"];
+const VAULT_PREFIXED =
+  /`vault\/(CORE\.md|MOC\.md|PERSONA\.md|schema\.json|cards|daily|summaries|weekly|monthly|yearly)/;
+const HOST_RELATIVE = /`ls |`grep|uv run|write_file/;
+
+test("инструкции не префиксуют vault/ пути, которые уходят в read_file", () => {
+  const offenders: string[] = [];
+  for (const root of INSTRUCTION_ROOTS) {
+    const names = readdirSync(join(ROOT, root), {
+      recursive: true,
+      encoding: "utf8",
+    });
+    for (const name of names) {
+      if (!name.endsWith(".md")) continue;
+      const lines = readFileSync(join(ROOT, root, name), "utf8").split("\n");
+      lines.forEach((line, index) => {
+        if (!VAULT_PREFIXED.test(line)) return;
+        if (HOST_RELATIVE.test(line)) return;
+        offenders.push(`${root}/${name}:${index + 1}: ${line.trim()}`);
+      });
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `read_file резолвит путь от корня vault — префикс vault/ даёт ENOENT:\n${offenders.join("\n")}`,
+  );
 });
