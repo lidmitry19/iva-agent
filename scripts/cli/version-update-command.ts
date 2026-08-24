@@ -15,7 +15,13 @@ import {
   reporterFor,
 } from "../lib/telegram-status.ts";
 import { resolveUpdateTarget } from "../lib/update-channel.ts";
-import { gitAt, packageVersion, requireGit } from "../lib/update-check.ts";
+import {
+  gitAt,
+  installedVersion,
+  packageVersion,
+  requireGit,
+  updaterTooOldMessage,
+} from "../lib/update-check.ts";
 import { catalogProvider } from "../lib/model-catalog.ts";
 import { classifyRoot, isManagedInstall } from "../lib/version-layout.ts";
 import {
@@ -131,15 +137,6 @@ export async function resolveTarget(
   return { sha, version };
 }
 
-/** The release the running tree is, straight from its own package.json. */
-function installedVersion(root: string): string | null {
-  try {
-    return packageVersion(readFileSync(join(root, "package.json"), "utf8"));
-  } catch {
-    return null; // No readable package.json: nothing to name it with.
-  }
-}
-
 /**
  * `iva update` on the immutable layout. This half only fetches and unpacks the new
  * version; it continues inside that version's own `scripts/update-finish.ts`, so
@@ -249,6 +246,14 @@ export function createVersionUpdateCommand(
         terminal.fail(text.busy);
         // Or the Telegram message stays on the phase it never got past.
         await reporter?.busy();
+        process.exitCode = 1;
+      } else if (outcome.status === "too-old") {
+        // Не отказ сборки, а отказ ставить: повторять /update бессмысленно, и сообщение
+        // говорит ровно то, чем эту установку чинят.
+        terminal.fail(
+          updaterTooOldMessage(outcome.own, language === "ru" ? "ru" : "en"),
+        );
+        await reporter?.updaterTooOld(outcome.own);
         process.exitCode = 1;
       } else if (outcome.status === "unhealthy") await failed(outcome.log);
       else if (outcome.status === "failed") await failed(outcome.message);
@@ -368,6 +373,11 @@ export function createVersionUpdateCommand(
         status: "failed",
         reason:
           "an update is running - try again when it finishes (iva status)",
+      };
+    if (outcome.status === "too-old")
+      return {
+        status: "failed",
+        reason: updaterTooOldMessage(outcome.own),
       };
     return {
       status: "failed",

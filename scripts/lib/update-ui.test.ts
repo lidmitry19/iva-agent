@@ -29,6 +29,7 @@ import {
   createTelegramUpdateReporter,
   UPDATE_LOADER,
 } from "./telegram-status.ts";
+import { REPAIR_COMMAND } from "./update-check.ts";
 import {
   acquireUpdateLock,
   createUpdateTransaction,
@@ -2906,4 +2907,42 @@ test("a failure detail is capped and passes the outbound gate", async () => {
   const plain = calls.at(-1)?.body.text ?? "";
   assert.match(plain, /Couldn't build Iva/u);
   assert.doesNotMatch(plain, /xxxx/u);
+});
+
+// Команда репейра — единственное, что пользователю остаётся сделать, поэтому она обязана
+// доехать до чата целиком: без обрезки хвостом, без разметки и на языке того, кто нажал.
+test("the update reporter hands the repair command to the chat whole", async () => {
+  for (const [locale, expected] of [
+    ["ru", /Ваша Iva \(0\.3\.20\) слишком старая, чтобы обновиться сама\./u],
+    ["en", /Your Iva \(0\.3\.20\) is too old to update itself\./u],
+  ] as const) {
+    const calls: TelegramCall[] = [];
+    const fetchImpl: MockFetch = async (url, init) => {
+      calls.push({
+        method: url.split("/").at(-1),
+        body: JSON.parse(init.body) as TelegramBody,
+      });
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    const reporter = createTelegramUpdateReporter({
+      token: "token",
+      job: { chatId: 1, messageId: 100, locale },
+      env: {},
+      fetchImpl,
+    });
+    assert.ok(reporter);
+
+    await reporter.updaterTooOld("0.3.20");
+
+    const body = calls.at(-1)?.body ?? {};
+    const text = body.text ?? "";
+    assert.match(text, expected, locale);
+    assert.equal(text.includes(REPAIR_COMMAND), true, text);
+    // Ни parse_mode, ни entities: любая разметка съела бы часть команды.
+    assert.equal("parse_mode" in body, false, locale);
+    assert.equal(body.entities, undefined, locale);
+    // Это финальный экран, а не фаза под лоадером.
+    assert.doesNotMatch(text, /Building Iva|Собираю Iva/u, locale);
+    assert.doesNotMatch(text, /Retry: \/update|Повторить: \/update/u, locale);
+  }
 });

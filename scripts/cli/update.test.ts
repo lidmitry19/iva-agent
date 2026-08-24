@@ -17,6 +17,8 @@ type TransactionState = {
   outputTouched: boolean;
   hadLocalChanges: boolean;
   buildCode?: number;
+  /** `update-compat.json` of the fetched tree; undefined means the tree carries none. */
+  compatMarker?: string;
 };
 
 async function sandbox(t: TestContext): Promise<string> {
@@ -123,7 +125,7 @@ function transactionFixture(events: string[], state: TransactionState) {
     },
     resolveTarget: async () => {
       events.push("tx.resolveTarget");
-      return { changed: state.changed };
+      return { changed: state.changed, remote: "target-head" };
     },
     restoreLocalChanges: async () => {
       events.push("tx.restoreLocalChanges");
@@ -152,6 +154,17 @@ function transactionFixture(events: string[], state: TransactionState) {
     },
     git: async (...args: string[]) => {
       events.push(`tx.git:${args.join(" ")}`);
+      if (args[0] === "ls-tree")
+        return {
+          code: 0,
+          stdout:
+            state.compatMarker === undefined
+              ? ""
+              : `100644 blob ${"0".repeat(40)}\tupdate-compat.json`,
+          stderr: "",
+        };
+      if (args[0] === "show" && args[1]?.endsWith(":update-compat.json"))
+        return { code: 0, stdout: state.compatMarker ?? "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
     run: async (command: string, args: string[]) => {
@@ -212,6 +225,9 @@ function operationsFixture(
     },
     badProvider: async (value: string, accepted: string) => {
       events.push(`reporter.badProvider:${value}:${accepted}`);
+    },
+    updaterTooOld: async (version: string) => {
+      events.push(`reporter.updaterTooOld:${version}`);
     },
     postCommitFailure: async (message: string) => {
       events.push(`reporter.postCommitFailure:${message}`);
@@ -766,6 +782,117 @@ test("every accepted provider name passes the update preflight", async (t) => {
       events.some((event) => event.startsWith("terminal.fail:Fix MODEL")),
       false,
       name,
+    );
+  }
+});
+
+test("a release that names a newer updater stops the update before any write", async (t) => {
+  const previousExitCode = process.exitCode;
+  t.after(() => {
+    process.exitCode = previousExitCode;
+  });
+  process.exitCode = undefined;
+  const root = await sandbox(t);
+  const events: string[] = [];
+  const transaction = transactionFixture(events, {
+    changed: true,
+    outputTouched: false,
+    hadLocalChanges: true,
+    compatMarker: '{"minUpdater":"99.0.0"}',
+  });
+  const command = createUpdateCommand({
+    runtime: runtimeFixture(root, events, { systemdAvailable: true }),
+    systemdLifecycle: {
+      writeUnits: () => {
+        events.push("lifecycle.writeUnits");
+        return [];
+      },
+      migrateEnv: () => {
+        events.push("lifecycle.migrateEnv");
+        return false;
+      },
+    },
+    showTree: async () => {},
+    restartUserbotIfActive: () => events.push("callback.restartUserbot"),
+    operations: operationsFixture(events, transaction),
+  });
+
+  await command(["--telegram-job", "job-1"]);
+
+  // The local changes go back and the protection is released — the exit the
+  // "already up to date" path takes — and nothing after the fetch runs.
+  assertOrder(events, [
+    "tx.resolveTarget",
+    "tx.git:ls-tree target-head -- update-compat.json",
+    "tx.git:show target-head:update-compat.json",
+    "tx.restoreLocalChanges",
+    "tx.commit",
+    "tx.teardownCandidate",
+    "ops.releaseUpdateLock",
+  ]);
+  for (const forbidden of [
+    "tx.fetchAndIntegrate",
+    "tx.buildCandidate",
+    "tx.promoteCandidate",
+    "tx.rollback",
+    "lifecycle.migrateEnv",
+    "callback.restartUserbot",
+  ])
+    assert.equal(events.includes(forbidden), false, forbidden);
+  assert.equal(
+    events.some((event) => event.startsWith("reporter.complete")),
+    false,
+  );
+
+  const failure = events.find((event) => event.startsWith("terminal.fail:"));
+  assert.ok(failure, "the refusal is said in the terminal");
+  assert.match(
+    failure,
+    /Your Iva \(\d+\.\d+\.\d+\) is too old to update itself/,
+  );
+  assert.match(
+    failure,
+    /curl -fsSL https:\/\/raw\.githubusercontent\.com\/smixs\/iva-agent\/main\/repair\.sh \| bash/,
+  );
+  assert.match(failure, /Your data and \.env stay in place\./);
+  assert.equal(
+    events.some((event) => event.startsWith("reporter.updaterTooOld:")),
+    true,
+  );
+  assert.equal(process.exitCode, 1);
+});
+
+test("a marker this updater satisfies, or none at all, changes nothing", async (t) => {
+  for (const compatMarker of ['{"minUpdater":"0.0.1"}', undefined]) {
+    const root = await sandbox(t);
+    const events: string[] = [];
+    const transaction = transactionFixture(events, {
+      changed: true,
+      outputTouched: false,
+      hadLocalChanges: false,
+      compatMarker,
+    });
+    const command = createUpdateCommand({
+      runtime: runtimeFixture(root, events),
+      systemdLifecycle: { writeUnits: () => [], migrateEnv: () => false },
+      showTree: async () => {},
+      restartUserbotIfActive: () => {},
+      operations: operationsFixture(events, transaction),
+    });
+
+    await command([]);
+
+    const label = String(compatMarker);
+    assert.equal(events.includes("tx.fetchAndIntegrate"), true, label);
+    assert.equal(
+      events.some((event) => event.startsWith("reporter.updaterTooOld")),
+      false,
+      label,
+    );
+    assert.equal(
+      events.includes("tx.git:show target-head:update-compat.json"),
+      compatMarker !== undefined,
+      label,
     );
   }
 });

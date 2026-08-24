@@ -69,6 +69,7 @@ export async function runDailyUpdateCheck({
       info.localVersion,
       info.remoteVersion,
       await noticeLang(env),
+      info.updaterTooOld,
     );
     await sendImpl({ token, chatId, offer });
     await writeStateImpl(storage, info.remoteVersion);

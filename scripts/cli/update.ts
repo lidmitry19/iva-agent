@@ -13,6 +13,7 @@ import {
   removeTelegramJob,
   reporterFor,
 } from "../lib/telegram-status.ts";
+import { updaterCompat, updaterTooOldMessage } from "../lib/update-check.ts";
 import {
   acquireUpdateLock,
   commitThenRunPostCommit,
@@ -55,7 +56,7 @@ type CommandResult = {
 
 type UpdateTransaction = {
   protect(): Promise<unknown>;
-  resolveTarget(): Promise<{ changed: boolean }>;
+  resolveTarget(): Promise<{ changed: boolean; remote: string }>;
   restoreLocalChanges(): Promise<RestoreReport>;
   versions(): Promise<UpdateVersions>;
   buildCandidate(options: { npm: string }): Promise<object | null>;
@@ -82,6 +83,7 @@ type TelegramReporter = {
   ): Promise<void>;
   busy(): Promise<void>;
   badProvider(value: string, accepted: string): Promise<void>;
+  updaterTooOld(version: string): Promise<void>;
   postCommitFailure(message: string): Promise<void>;
   complete(
     versions: UpdateVersions & {
@@ -366,6 +368,25 @@ export function createUpdateCommand({
           changedLocal: tx.hadLocalChanges,
           restoreReport,
         });
+        return;
+      }
+      // Живая установка ещё не тронута: HEAD на месте, юниты старые. Дальше их пишет ЭТОТ
+      // CLI по шаблонам новой версии — токен, которого он не знает, уезжает в юнит как есть
+      // (#191). Поэтому дерево само называет самый старый апдейтер, способный его поставить,
+      // а тот, что старше, останавливается здесь и говорит, чем ставить (ADR-0003).
+      const compat = update.changed
+        ? await updaterCompat(
+            (...args: string[]) => tx.git(...args),
+            update.remote,
+          )
+        : ({ status: "ok" } as const);
+      if (compat.status === "too-old") {
+        // Тот же выход, что у «уже обновлена»: изменения возвращаются, защита снимается.
+        await tx.restoreLocalChanges();
+        await finalizeUpdate();
+        terminal.fail(updaterTooOldMessage(compat.own, locale));
+        await reporter?.updaterTooOld(compat.own);
+        process.exitCode = 1;
         return;
       }
       await phaseDone("fetch");

@@ -14,13 +14,20 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import fc from "fast-check";
 import {
   compareStableVersions,
   inspectUpstream,
   markVersionNotified,
   notificationChat,
+  parseMinUpdater,
+  readMinUpdater,
   readNotifiedVersion,
+  REPAIR_COMMAND,
   updateOffer,
+  updaterCompat,
+  updaterTooOldMessage,
+  updaterVersion,
 } from "./update-check.ts";
 
 type UpdateOfferRequest = {
@@ -441,4 +448,215 @@ test("the update offer speaks the language picked in /menu, not the one left in 
   assert.equal(russian.length, 1);
   assert.match(russian[0], /Доступна новая версия Ивы/);
   assert.doesNotMatch(russian[0], /A new Iva version/);
+});
+
+const RELEASE = fc
+  .tuple(fc.nat({ max: 40 }), fc.nat({ max: 40 }), fc.nat({ max: 40 }))
+  .map(([major, minor, patch]) => `${major}.${minor}.${patch}`);
+// Everything a marker, a package.json or a hand edit can put where a release belongs.
+const JUNK = fc.oneof(
+  fc.string(),
+  fc.constantFrom(
+    "",
+    " 1.2.3",
+    "1.2",
+    "1.2.3.4",
+    "v1.2.3",
+    "01.2.3",
+    "1.2.3-beta.1",
+    "1.2.3+meta",
+    "latest",
+  ),
+);
+
+test("release comparison is a total order", () => {
+  fc.assert(
+    fc.property(RELEASE, (one) => {
+      assert.equal(compareStableVersions(one, one), 0);
+    }),
+    { seed: 191_001, numRuns: 200 },
+  );
+
+  fc.assert(
+    fc.property(RELEASE, RELEASE, (one, other) => {
+      const forward = compareStableVersions(one, other);
+      const back = compareStableVersions(other, one);
+      assert.notEqual(forward, null);
+      assert.notEqual(back, null);
+      // Written without negating zero: -0 is not 0 under strict equality.
+      assert.equal(forward, back === 0 ? 0 : -(back as number));
+      assert.equal(forward === 0, one === other);
+    }),
+    { seed: 191_002, numRuns: 400 },
+  );
+
+  fc.assert(
+    fc.property(RELEASE, RELEASE, RELEASE, (one, other, third) => {
+      const first = compareStableVersions(one, other) as number;
+      const second = compareStableVersions(other, third) as number;
+      const whole = compareStableVersions(one, third) as number;
+      if (first <= 0 && second <= 0) assert.ok(whole <= 0);
+      if (first >= 0 && second >= 0) assert.ok(whole >= 0);
+    }),
+    { seed: 191_003, numRuns: 400 },
+  );
+});
+
+test("release comparison answers junk with the unparseable verdict, never a crash", () => {
+  fc.assert(
+    fc.property(
+      fc.oneof(RELEASE, JUNK),
+      fc.oneof(RELEASE, JUNK),
+      (one, other) => {
+        const verdict = compareStableVersions(one, other);
+        assert.ok([null, -1, 0, 1].includes(verdict));
+        const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+        if (!stable.test(one) || !stable.test(other))
+          assert.equal(verdict, null);
+      },
+    ),
+    { seed: 191_004, numRuns: 500 },
+  );
+});
+
+test("an unreadable minUpdater is a named error, never a silent go-ahead", () => {
+  assert.equal(parseMinUpdater('{"minUpdater":"0.3.29"}'), "0.3.29");
+  fc.assert(
+    fc.property(
+      fc.oneof(
+        fc.string(),
+        fc.json(),
+        JUNK.map((value) => JSON.stringify({ minUpdater: value })),
+      ),
+      (text) => {
+        let parsed: string;
+        try {
+          parsed = parseMinUpdater(text);
+        } catch (error) {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /update-compat\.json/);
+          return;
+        }
+        assert.match(parsed, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+      },
+    ),
+    { seed: 191_005, numRuns: 500 },
+  );
+});
+
+test("the marker of a fetched tree decides whether this updater may install it", async () => {
+  const { seed, local } = repoFixture();
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const at =
+    (root: string) =>
+    (...args: string[]) =>
+      Promise.resolve({
+        code: 0,
+        stdout: execFileSync("git", args, {
+          cwd: root,
+          encoding: "utf8",
+        }).trim(),
+        stderr: "",
+      });
+  const head = () => git(local, "rev-parse", "HEAD");
+
+  // A tree from before the marker existed is installed the way it always was.
+  assert.equal(await readMinUpdater(at(local), head()), null);
+  assert.deepEqual(await updaterCompat(at(local), head(), "0.0.1"), {
+    status: "ok",
+  });
+
+  writeFileSync(join(seed, "update-compat.json"), '{"minUpdater":"0.3.29"}\n');
+  git(seed, "add", "update-compat.json");
+  git(seed, "commit", "-m", "compat");
+  git(seed, "push");
+  git(local, "fetch", "origin");
+  const marked = git(local, "rev-parse", "origin/main");
+
+  assert.equal(await readMinUpdater(at(local), marked), "0.3.29");
+  assert.deepEqual(await updaterCompat(at(local), marked, "0.3.28"), {
+    status: "too-old",
+    own: "0.3.28",
+    minUpdater: "0.3.29",
+  });
+  for (const own of ["0.3.29", "0.3.30", "1.0.0"])
+    assert.deepEqual(await updaterCompat(at(local), marked, own), {
+      status: "ok",
+    });
+
+  writeFileSync(join(seed, "update-compat.json"), "{ not json\n");
+  git(seed, "add", "update-compat.json");
+  git(seed, "commit", "-m", "corrupt");
+  git(seed, "push");
+  git(local, "fetch", "origin");
+  await assert.rejects(
+    () =>
+      updaterCompat(at(local), git(local, "rev-parse", "origin/main"), "9.9.9"),
+    /update-compat\.json is not JSON/,
+  );
+});
+
+test("this checkout names its own release, and the refusal says how to repair it", () => {
+  const own = updaterVersion();
+  assert.match(own, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  assert.throws(
+    () => updaterVersion(mkdtempSync(join(tmpdir(), "iva-no-package-"))),
+    /no readable release/,
+  );
+
+  const english = updaterTooOldMessage("0.3.20", "en");
+  assert.equal(
+    english,
+    `Your Iva (0.3.20) is too old to update itself. Open a terminal on the server and run:\n${REPAIR_COMMAND}\nYour data and .env stay in place.`,
+  );
+  const russian = updaterTooOldMessage("0.3.20", "ru");
+  assert.equal(
+    russian,
+    `Ваша Iva (0.3.20) слишком старая, чтобы обновиться сама. Откройте терминал на сервере и выполните:\n${REPAIR_COMMAND}\nДанные и .env остаются на месте.`,
+  );
+});
+
+test("the update Alert carries the repair command only for an updater that is too old", async () => {
+  const plain = updateOffer("1.2.3", "1.2.4", "en");
+  assert.doesNotMatch(plain.text, /repair\.sh/);
+  assert.match(plain.text, /Settings and local changes will be preserved\./);
+
+  for (const locale of ["en", "ru"]) {
+    const stuck = updateOffer("1.2.3", "1.2.4", locale, true);
+    assert.match(stuck.text, /v1\.2\.3 → v1\.2\.4/);
+    assert.ok(stuck.text.includes(REPAIR_COMMAND), stuck.text);
+    // The buttons stay: the tap now earns the same words instead of a broken update.
+    assert.deepEqual(
+      stuck.replyMarkup.inline_keyboard[0].map(
+        (button) => button.callback_data,
+      ),
+      ["iva_update:do", "iva_update:skip"],
+    );
+  }
+
+  // End to end: the flag comes off the remote marker the daily check already fetched.
+  const { seed, local } = repoFixture();
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  writeFileSync(
+    join(seed, "package.json"),
+    '{"name":"iva","version":"9.9.9"}\n',
+  );
+  writeFileSync(join(seed, "update-compat.json"), '{"minUpdater":"9.9.9"}\n');
+  git(seed, "add", "-A");
+  git(seed, "commit", "-m", "release that needs a newer updater");
+  git(seed, "push");
+
+  const info = await inspectUpstream({ root: local });
+  assert.equal(info.hasVersionUpdate, true);
+  assert.equal(info.updaterTooOld, true);
+  assert.ok(
+    updateOffer(
+      info.localVersion,
+      info.remoteVersion,
+      "en",
+      info.updaterTooOld,
+    ).text.includes(REPAIR_COMMAND),
+  );
 });

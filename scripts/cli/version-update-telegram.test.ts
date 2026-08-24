@@ -344,3 +344,42 @@ test("every accepted provider name passes the managed preflight", async (t) => {
     );
   }
 });
+
+// Через весь путь до чата: репейр — единственное, что пользователю остаётся сделать,
+// поэтому команда обязана доехать целиком, а не быть обрезанной хвостом отказа сборки.
+test("a release that needs a newer updater says so in the chat, command intact", async (t) => {
+  const iva = world(t, { locale: "ru" });
+  writeFileSync(
+    join(iva.home, "update-compat.json"),
+    '{"minUpdater":"99.0.0"}\n',
+  );
+  git(iva.home, ["add", "-A"]);
+  git(iva.home, ["commit", "-m", "release that needs a newer updater"]);
+  git(iva.home, ["push", "-q", "origin", "main"]);
+
+  await iva.run();
+
+  const refusal = iva.finals().at(-1) ?? "";
+  assert.match(
+    refusal,
+    /Ваша Iva \(\d+\.\d+\.\d+\) слишком старая, чтобы обновиться сама\./u,
+  );
+  assert.equal(
+    refusal.includes(
+      "curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/repair.sh | bash",
+    ),
+    true,
+    refusal,
+  );
+  assert.match(refusal, /Данные и \.env остаются на месте\./u);
+  assert.doesNotMatch(refusal, /Повторить: \/update/u);
+  // Ничего не собрано и не переключено.
+  assert.equal(
+    iva.lines().some((line) => line.startsWith("handoff ")),
+    false,
+    "nothing was built",
+  );
+  assert.equal(existsSync(join(iva.home, "current")), false);
+  assert.equal(existsSync(iva.jobPath), false);
+  assert.equal(process.exitCode, 1);
+});

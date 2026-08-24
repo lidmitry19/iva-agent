@@ -92,6 +92,18 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | b
 
 Do not reset or clean the checkout. If the histories cannot be combined safely, the existing version and user files remain in place and the full reason is recorded under `data/logs/`.
 
+### Update says my version is too old
+
+Symptoms: `iva update` — in the terminal or in the chat — answers `Your Iva (0.3.x) is too old to update itself` and stops. Cause: every release names the oldest updater able to install it (`update-compat.json`, field `minUpdater`), and the installed CLI is older than that. It stops before touching anything: the installation keeps running the version it ran before, and no unit, version or data was written.
+
+Reinstall from the current tree — one command, and it is the only way out:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/repair.sh | bash
+```
+
+Your data and `.env` stay in place: `.env`, `data/`, `vault/` and `attachments/` are copied byte for byte, and the whole old installation is kept beside the new one as `~/iva-backup-<timestamp>`.
+
 ### gh not available warnings
 
 Cause: the nightly Brain pass backs your vault up to a private `iva-vault` GitHub repo through `gh`; unauthenticated `gh` means no off-box backup.
