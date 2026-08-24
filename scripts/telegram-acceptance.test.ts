@@ -788,25 +788,49 @@ test("a reply to a closed session is delivered as a new turn exactly once", asyn
   );
 });
 
-test("a reply to a closed session that cannot start a new turn is terminal, not retried", async () => {
-  let attempts = 0;
+test("a new turn refused by an unavailable eve is retained, then delivered on the next healthy cycle", async () => {
+  const attempts: unknown[] = [];
+  let eveIsDown = true;
   const priorError = console.error;
   console.error = () => {};
   try {
     const delivery = productionTelegramDelivery(async (_update, input) => {
-      attempts++;
+      attempts.push(input);
       if (inputResponsesOf(input).length > 0)
         throw new Error(CLOSED_SESSION_ERROR);
-      throw new Error("injected new-turn failure");
+      if (eveIsDown) throw new Error("eve is restarting");
+      return { id: "new-turn" };
+    });
+    const update = replyToBotUpdate(1102, "и что дальше?");
+    // Сессия не найдена, но новый ход упал по недоступности eve — сообщение владельца
+    // не теряется (ADR-0002): транзиентный отказ, мост сохраняет апдейт.
+    assert.equal(await delivery(update), false);
+    eveIsDown = false;
+    assert.equal(await delivery(update), true);
+  } finally {
+    console.error = priorError;
+  }
+  assert.equal(attempts.length, 4, "по две попытки на каждый проход моста");
+  assert.equal(inputResponsesOf(attempts[3]).length, 0);
+});
+
+test("a new turn that is itself refused as a closed session is terminal, not retried", async () => {
+  let attempts = 0;
+  const priorError = console.error;
+  console.error = () => {};
+  try {
+    const delivery = productionTelegramDelivery(async () => {
+      attempts++;
+      throw new Error(CLOSED_SESSION_ERROR);
     });
     assert.equal(
-      await delivery(replyToBotUpdate(1102, "и что дальше?")),
+      await delivery(replyToBotUpdate(1104, "и что дальше?")),
       TELEGRAM_CLOSED_SESSION_KIND,
     );
   } finally {
     console.error = priorError;
   }
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 2, "перемаршрутизация пробуется ровно один раз");
 });
 
 test("an ordinary send failure stays transient and never claims the closed-session class", async () => {

@@ -326,7 +326,11 @@ export async function handleAcceptedTelegramWebhook<TState>(
             accepted = true;
             return session;
           } catch (rerouteError) {
-            closedSession = true;
+            // Новый ход упал сам по себе — это уже не про закрытую сессию, а про
+            // недоступную eve. Терять сообщение владельца нельзя (ADR-0002): ответ
+            // остаётся транзиентным 503, мост сохраняет апдейт и повторит его.
+            // Терминальным остаётся только тот же класс закрытой сессии.
+            closedSession = isClosedSessionError(rerouteError);
             console.error(
               `[telegram] new message for a closed session was not accepted (update ${updateLabel}):`,
               rerouteError,
