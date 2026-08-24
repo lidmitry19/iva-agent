@@ -829,8 +829,10 @@ export function traceBridgeDelivery(
   accepted: unknown,
   ms: number,
 ): void {
-  emitBridge(update, accepted ? "delivered" : "rejected", {
-    accepted: accepted === "handled" ? "handled" : Boolean(accepted),
+  // "closed-session" — отказ, а не доставка: ход не начался и уже не начнётся.
+  const terminal = accepted === "closed-session";
+  emitBridge(update, accepted && !terminal ? "delivered" : "rejected", {
+    accepted: accepted === "handled" || terminal ? accepted : Boolean(accepted),
     ms,
   });
 }

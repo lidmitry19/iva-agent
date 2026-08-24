@@ -92,7 +92,7 @@ if (
     sessionId: null,
     turnId: null,
   });
-} else if (mode === "direct-retry") {
+} else if (mode === "direct-retry" || mode === "closed-session") {
   status.setChatStatus(privateKey, {
     status: "idle",
     continuationToken: "1::",
@@ -349,6 +349,20 @@ let getUpdatesCalls = 0;
 let directAcceptanceAttempts = 0;
 let statusBeforeRetry: ChatStatus | null = null;
 
+// Ответ eve на reply в закрытую сессию: тот же заголовок приёмки, но терминальный класс.
+const closedSessionResponse = () => ({
+  ok: false,
+  status: 409,
+  headers: {
+    get: (name: string) =>
+      String(name).toLowerCase() === "x-iva-telegram-acceptance"
+        ? "closed-session"
+        : null,
+  },
+  body: null,
+  json: () => Promise.resolve({}),
+});
+
 const jsonResponse = (payload: unknown, statusCode = 200) => ({
   ok: statusCode >= 200 && statusCode < 300,
   status: statusCode,
@@ -434,6 +448,21 @@ const fetchHarness = async (url: unknown, options: FetchOptions = {}) => {
       delivery.message?.chat?.id === 1
     ) {
       return jsonResponse({}, 503);
+    }
+    if (
+      mode === "closed-session" &&
+      deliveryRoute === "/eve/v1/telegram/accepted"
+    ) {
+      directAcceptanceAttempts++;
+      status.setChatStatus(privateKey, {
+        status: "running",
+        ingressId: "33333333333333333333333333333333",
+        ingressAt: Date.now(),
+        statusMessageId: 79,
+        sessionId: null,
+        turnId: null,
+      });
+      return closedSessionResponse();
     }
     if (
       mode === "direct-retry" &&
@@ -648,6 +677,7 @@ const fetchHarness = async (url: unknown, options: FetchOptions = {}) => {
     if (
       mode === "direct-success" ||
       mode === "direct-retry" ||
+      mode === "closed-session" ||
       mode === "direct-timeout" ||
       mode === "direct-timeout-twice"
     ) {
@@ -655,11 +685,15 @@ const fetchHarness = async (url: unknown, options: FetchOptions = {}) => {
         return jsonResponse({
           ok: true,
           result: [
-            mode === "direct-retry"
+            mode === "direct-retry" || mode === "closed-session"
               ? replyToBotUpdate(101, "direct reply")
               : privateUpdate(101, "direct message"),
           ],
         });
+      }
+      // Ещё один пустой проход: терминальный апдейт обязан не вернуться в доставку.
+      if (mode === "closed-session" && getUpdatesCalls === 2) {
+        return jsonResponse({ ok: true, result: [] });
       }
       if (mode === "direct-timeout-twice" && getUpdatesCalls === 2) {
         return jsonResponse({ ok: true, result: [] });

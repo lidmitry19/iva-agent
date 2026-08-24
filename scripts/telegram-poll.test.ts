@@ -39,7 +39,10 @@ type RouteOptions = {
   shouldQueueImpl: (update: Update) => boolean;
   enqueueImpl: (chatKey: string, update: Update) => Promise<{ count: number }>;
   acknowledgeImpl: (update: Update, count: number) => Promise<void>;
-  deliverImpl: (update: Update, options: DeliverOptions) => Promise<boolean>;
+  deliverImpl: (
+    update: Update,
+    options: DeliverOptions,
+  ) => Promise<boolean | "handled" | "closed-session">;
   statusImpl: (chatKey: string) => StatusRecord | null;
   setStatusIfImpl: (
     chatKey: string,
@@ -491,6 +494,66 @@ test("reply-to-bot bypass clears its failed early status before delivery returns
   assert.equal(result, "rejected");
   assert.equal(resetBeforeReturn, true);
   assert.equal(notifications, 1);
+});
+
+test("a reply to a closed session ends the update instead of returning it to the inbox", async () => {
+  let current: StatusRecord = {
+    status: "idle",
+    generation: 3,
+    updatedAt: 900,
+  };
+  const logs: string[] = [];
+  let notifications = 0;
+  let deliveries = 0;
+  const deleted: number[] = [];
+  const result = await routeMessageUpdate(
+    routedUpdate,
+    routeDeps({
+      replyToBotImpl: () => true,
+      statusImpl: () => current,
+      setStatusIfImpl: (_key, _expected, patch) => {
+        current = {
+          ...current,
+          ...patch,
+          generation: current.generation + 1,
+          updatedAt: 1_000,
+        };
+        for (const field of Object.keys(current)) {
+          if (current[field] === null) delete current[field];
+        }
+        return current;
+      },
+      deleteMessageImpl: async (_key, messageId) => {
+        deleted.push(messageId);
+      },
+      sendFailureImpl: async () => {
+        notifications++;
+      },
+      deliverImpl: async () => {
+        deliveries++;
+        // Ход дошёл до раннего статуса и упал на доставке inputResponses.
+        current = {
+          status: "running",
+          generation: 4,
+          updatedAt: 1_000,
+          ingressId: "closed-session-ingress",
+          ingressAt: 1_000,
+          statusMessageId: 91,
+        };
+        return "closed-session";
+      },
+      logImpl: (...parts) => logs.push(parts.map(String).join(" ")),
+    }),
+  );
+
+  assert.equal(result, "terminal-drop");
+  assert.equal(deliveries, 1, "терминальный класс не ретраится");
+  assert.equal(current.status, "idle");
+  assert.deepEqual(deleted, [91]);
+  assert.equal(notifications, 1);
+  assert.deepEqual(logs, [
+    "dropped update 10 for 1: — the target session is closed",
+  ]);
 });
 
 test("direct failure cleanup never clobbers a turn that acquired a session", async () => {

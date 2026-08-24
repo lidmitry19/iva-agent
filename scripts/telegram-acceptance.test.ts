@@ -26,6 +26,7 @@ import {
 import {
   addTelegramQueueReceipt,
   handleAcceptedTelegramWebhook,
+  TELEGRAM_CLOSED_SESSION_KIND,
   TELEGRAM_QUEUE_RECEIPT_FIELD,
   wrapTelegramQueueOnMessage,
 } from "#lib/telegram-acceptance.ts";
@@ -77,7 +78,7 @@ type TestUpdate = {
     [key: string]: unknown;
   };
 };
-type DeliveryResult = true | false | "handled";
+type DeliveryResult = true | false | "handled" | "closed-session";
 type SendImpl = (
   update: TestUpdate,
   input: unknown,
@@ -239,11 +240,15 @@ function productionTelegramDelivery(
       routeArgs,
       { completedUpdatesFile },
     );
-    return response.ok
-      ? response.headers.get("x-iva-telegram-acceptance") === "handled"
-        ? "handled"
-        : true
-      : false;
+    if (!response.ok) {
+      return response.headers.get("x-iva-telegram-acceptance") ===
+        TELEGRAM_CLOSED_SESSION_KIND
+        ? TELEGRAM_CLOSED_SESSION_KIND
+        : false;
+    }
+    return response.headers.get("x-iva-telegram-acceptance") === "handled"
+      ? "handled"
+      : true;
   };
 }
 
@@ -721,4 +726,104 @@ test("Trace: обёртка пишет состав контекста и свя
   // Принятый апдейт помечен для старта хода, отброшенный — нет.
   assert.equal(trace.traceBoundUpdate("77:"), "tg:77:5");
   assert.equal(trace.traceBoundUpdate("78:"), "");
+});
+
+// --- Reply на закрытую сессию (issue #203) ---
+// eve строит inputResponses из reply на сообщение бота. Сессия под цитатой закрывается
+// штатно (ротация, ночной сброс, /new, рестарт при апдейте), и тогда send падает
+// навсегда: доставить inputResponses уже некуда.
+const CLOSED_SESSION_ERROR =
+  "Cannot deliver inputResponses — the target session was not found via continuation token.";
+
+const replyToBotUpdate = (updateId: number, text: string): TestUpdate => ({
+  ...privateUpdate(updateId, text),
+  message: {
+    ...privateUpdate(updateId, text).message,
+    reply_to_message: {
+      message_id: updateId - 1,
+      date: 1,
+      chat: { id: 1, type: "private" },
+      from: { id: 999, is_bot: true, first_name: "Iva" },
+      text: "старый ответ бота",
+    },
+  },
+});
+
+const inputResponsesOf = (input: unknown): unknown[] =>
+  typeof input === "object" && input !== null && "inputResponses" in input
+    ? ((input as { inputResponses?: unknown[] }).inputResponses ?? [])
+    : [];
+
+test("a reply to a closed session is delivered as a new turn exactly once", async () => {
+  const attempts: unknown[] = [];
+  const priorError = console.error;
+  const logs: string[] = [];
+  console.error = (...parts: unknown[]) =>
+    logs.push(parts.map(String).join(" "));
+  try {
+    const delivery = productionTelegramDelivery(async (_update, input) => {
+      attempts.push(input);
+      if (inputResponsesOf(input).length > 0)
+        throw new Error(CLOSED_SESSION_ERROR);
+      return { id: "new-turn" };
+    });
+    assert.equal(await delivery(replyToBotUpdate(1101, "и что дальше?")), true);
+  } finally {
+    console.error = priorError;
+  }
+
+  assert.equal(attempts.length, 2, "ровно одна перемаршрутизация");
+  assert.equal(inputResponsesOf(attempts[0]).length, 1);
+  assert.equal(inputResponsesOf(attempts[1]).length, 0);
+  // Текст и контекст хода те же — теряется только привязка к закрытой сессии.
+  assert.deepEqual(
+    (attempts[1] as { message: unknown }).message,
+    (attempts[0] as { message: unknown }).message,
+  );
+  assert.deepEqual(
+    logs.filter((line) => line.includes("closed session")),
+    [
+      "[telegram] reply to a closed session; delivering as a new message (update 1101)",
+    ],
+  );
+});
+
+test("a reply to a closed session that cannot start a new turn is terminal, not retried", async () => {
+  let attempts = 0;
+  const priorError = console.error;
+  console.error = () => {};
+  try {
+    const delivery = productionTelegramDelivery(async (_update, input) => {
+      attempts++;
+      if (inputResponsesOf(input).length > 0)
+        throw new Error(CLOSED_SESSION_ERROR);
+      throw new Error("injected new-turn failure");
+    });
+    assert.equal(
+      await delivery(replyToBotUpdate(1102, "и что дальше?")),
+      TELEGRAM_CLOSED_SESSION_KIND,
+    );
+  } finally {
+    console.error = priorError;
+  }
+  assert.equal(attempts, 2);
+});
+
+test("an ordinary send failure stays transient and never claims the closed-session class", async () => {
+  let attempts = 0;
+  const priorError = console.error;
+  console.error = () => {};
+  try {
+    const delivery = productionTelegramDelivery(async () => {
+      attempts++;
+      throw new Error("eve is restarting");
+    });
+    assert.equal(
+      await delivery(replyToBotUpdate(1103, "и что дальше?")),
+      false,
+    );
+  } finally {
+    console.error = priorError;
+  }
+  assert.equal(attempts, 1, "транзиентный сбой не перемаршрутизируется");
 });

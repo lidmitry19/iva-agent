@@ -21,6 +21,7 @@ import {
   setChatStatusIf,
 } from "#lib/run-status.ts";
 import { tr } from "#lib/i18n.ts";
+import { TELEGRAM_CLOSED_SESSION_KIND } from "#lib/telegram-acceptance.ts";
 import {
   ACCEPTANCE_ROUTE,
   ALLOWED,
@@ -109,6 +110,12 @@ async function deliverDirectUpdate(
   // the synthetic /stop callback.
   if (!update.message || key === null) {
     const accepted = await deliverImpl(update);
+    if (accepted === TELEGRAM_CLOSED_SESSION_KIND) {
+      logImpl(
+        `dropped update ${update.update_id} for ${key ?? "unknown chat"} — the target session is closed`,
+      );
+      return "terminal-drop";
+    }
     return accepted ? "delivered" : "rejected";
   }
 
@@ -165,6 +172,16 @@ async function deliverDirectUpdate(
     timeoutMs: DIRECT_ACCEPTANCE_TIMEOUT_MS,
     retryAcceptanceTimeout: false,
   });
+  // Reply на сообщение бота, чья сессия закрыта: eve не смогла ни продолжить её, ни
+  // начать новый ход. Апдейт умирает здесь — владелец снимет его с хранения, иначе
+  // мост вечно перечитывает одну и ту же голову (issue #203).
+  if (accepted === TELEGRAM_CLOSED_SESSION_KIND) {
+    logImpl(
+      `dropped update ${update.update_id} for ${key} — the target session is closed`,
+    );
+    if (!acceptanceFailureReported) await onAcceptanceFailure();
+    return "terminal-drop";
+  }
   // Defensive fallback for injected/custom deliverers and for a pacing deadline
   // that expires before fetch starts.
   if (!accepted && !acceptanceFailureReported) await onAcceptanceFailure();
@@ -175,7 +192,12 @@ async function deliverDirectUpdate(
 }
 
 export type RouteMessageResult =
-  "delivered" | "rejected" | "dropped" | "enqueue-failed" | "queued";
+  | "delivered"
+  | "rejected"
+  | "dropped"
+  | "enqueue-failed"
+  | "queued"
+  | "terminal-drop";
 
 export async function routeMessageUpdate(
   update: TelegramQueueUpdate,
@@ -396,7 +418,14 @@ export async function drainReadyQueueHeads({
       inFlight.delete(key);
       continue;
     }
-    if (accepted === "handled") {
+    if (accepted === TELEGRAM_CLOSED_SESSION_KIND) {
+      // Ход не начнётся никогда: голову снимаем тем же ack, что и обработанную,
+      // иначе очередь этого чата встаёт на ней навсегда (issue #203).
+      log(
+        `dropped queued update ${item.updateId} for ${key} — the target session is closed`,
+      );
+      inFlight.delete(key);
+    } else if (accepted === "handled") {
       inFlight.delete(key);
     } else {
       const acceptedStatus = statusImpl(key);

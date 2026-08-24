@@ -212,7 +212,15 @@ export async function promoteReadyInbox({
     );
     if (!batch) continue;
     const routed = await routeImpl(batch.update);
-    if (routed !== "queued" && routed !== "delivered") continue;
+    // terminal-drop — исход, после которого повторять доставку нечем и незачем:
+    // владение снимается ровно так же, как после принятого хода (issue #203).
+    if (
+      routed !== "queued" &&
+      routed !== "delivered" &&
+      routed !== "terminal-drop"
+    ) {
+      continue;
+    }
     for (const updateId of batch.updateIds) {
       await acknowledgeImpl(key, updateId);
     }

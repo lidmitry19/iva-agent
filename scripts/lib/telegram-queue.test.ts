@@ -50,7 +50,7 @@ type DrainOptions = {
   deliverImpl: (
     update: TelegramQueueUpdate,
     options: { timeoutMs: number },
-  ) => Promise<boolean>;
+  ) => Promise<boolean | "handled" | "closed-session">;
   acknowledgeImpl: (chatKey: string, updateId: number) => Promise<void>;
   settleUntil: Map<string, number>;
   inFlight?: Map<string, InFlightGate>;
@@ -517,6 +517,41 @@ void test("drain keeps the head before acceptance and advances exactly one item 
     delivered,
     [101, 101],
     "a retry may duplicate only the durable head",
+  );
+});
+
+void test("a terminally closed session releases the queue head instead of blocking the chat", async () => {
+  let document = enqueueItem(
+    enqueueItem(
+      { version: 1, queues: {} },
+      "1:",
+      createQueueItem(privateUpdate(101, "reply to a closed session"), 1),
+    ).document,
+    "1:",
+    createQueueItem(privateUpdate(102, "next"), 2),
+  ).document;
+  const delivered: number[] = [];
+  const options: DrainOptions = {
+    loadImpl: async () => document,
+    runningImpl: () => false,
+    deliverImpl: async (update) => {
+      delivered.push(update.update_id);
+      return update.update_id === 101 ? "closed-session" : true;
+    },
+    acknowledgeImpl: async (key, updateId) => {
+      document = removeQueueHead(document, key, updateId);
+    },
+    settleUntil: new Map(),
+    inFlight: new Map<string, InFlightGate>(),
+  };
+
+  assert.equal(await drainReadyQueueHeads(options), 1);
+  assert.equal(queueHead(document, "1:")!.updateId, 102);
+  assert.equal(await drainReadyQueueHeads(options), 0);
+  assert.deepEqual(
+    delivered,
+    [101, 102],
+    "терминальная голова уходит с одной попытки и не держит очередь",
   );
 });
 

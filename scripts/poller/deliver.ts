@@ -1,6 +1,7 @@
 import {
   addTelegramQueueReceipt,
   TELEGRAM_ACCEPTANCE_KIND_HEADER,
+  TELEGRAM_CLOSED_SESSION_KIND,
 } from "#lib/telegram-acceptance.ts";
 import { classifyDeliverStatus } from "../lib/deliver-policy.ts";
 import { tr } from "#lib/i18n.ts";
@@ -43,6 +44,8 @@ const errorMessage = (error: unknown) => (error as ErrorLike).message;
 // other queues or Telegram polling.
 // Returns true when eve accepted the update. False is never an acknowledgement:
 // the caller must retain durable ownership or surface the failed synthetic action.
+// "closed-session" — единственный терминальный исход: eve сообщила заголовком, что
+// апдейт нельзя доставить никогда. Владелец обязан снять его с хранения, а не ретраить.
 const CONFIG_RETRY_MS = 60_000;
 const BOUNDED_ATTEMPTS = 30;
 async function deliver(
@@ -98,6 +101,12 @@ async function deliver(
       const acceptanceKind = expectsAcceptance
         ? res.headers.get(TELEGRAM_ACCEPTANCE_KIND_HEADER)
         : null;
+      // Терминальный класс: ответ на сообщение бота, чья сессия закрыта, и новым ходом
+      // он тоже не прошёл. Повтор даст ту же ошибку вечно (issue #203) — доставка
+      // кончается здесь, каким бы ни был режим ретрая.
+      if (acceptanceKind === TELEGRAM_CLOSED_SESSION_KIND) {
+        return TELEGRAM_CLOSED_SESSION_KIND;
+      }
       if (
         res.ok &&
         (expectedStatus === undefined || res.status === expectedStatus) &&

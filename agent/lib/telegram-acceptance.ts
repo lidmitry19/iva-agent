@@ -20,6 +20,9 @@ import { traceInboundOutcome } from "./trace.ts";
 export const TELEGRAM_ACCEPTANCE_ROUTE = "/eve/v1/telegram/accepted";
 export const TELEGRAM_QUEUE_RECEIPT_FIELD = "iva_durable_queue_receipt";
 export const TELEGRAM_ACCEPTANCE_KIND_HEADER = "x-iva-telegram-acceptance";
+// Ответ на сообщение бота, чья сессия уже закрыта: eve не находит её по continuation-токену
+// и падает навсегда. Bridge узнаёт этот класс по заголовку и хоронит апдейт вместо ретрая.
+export const TELEGRAM_CLOSED_SESSION_KIND = "closed-session";
 
 type ReceiptContext = { receipt: string | null; handled: boolean };
 type CompletedLedger = { botId: string; updates: number[] };
@@ -40,6 +43,37 @@ let missingWebhookSecretReported = false;
 
 function validReceipt(value: unknown): value is string {
   return typeof value === "string" && RECEIPT_PATTERN.test(value);
+}
+
+// Единственный признак класса, который отдаёт eve: текст ошибки из createSendFn
+// (dist/src/channel/send.js). Он бросается ровно тогда, когда inputResponses некуда
+// доставить, — остальные сбои send остаются транзиентными и ретраятся как раньше.
+const CLOSED_SESSION_PATTERN =
+  /target session was not found via continuation token/iu;
+
+function isClosedSessionError(error: unknown): boolean {
+  return error instanceof Error && CLOSED_SESSION_PATTERN.test(error.message);
+}
+
+// Сессии закрываются штатно: ротация, ночной сброс, /new, рестарт при апдейте. Reply на
+// старое сообщение бота eve превращает в inputResponses, и такой ход не начнётся уже
+// никогда. Тот же текст без inputResponses — обычный новый ход: цитата теряет контекст
+// своей сессии, зато пользователь получает ответ.
+function turnWithoutInputResponses(
+  input: unknown,
+): Record<string, unknown> | null {
+  if (!isRecord(input)) return null;
+  if (!Array.isArray(input.inputResponses) || input.inputResponses.length === 0)
+    return null;
+  const message = input.message;
+  const hasMessage =
+    typeof message === "string"
+      ? message.trim().length > 0
+      : Array.isArray(message) && message.length > 0;
+  if (!hasMessage) return null;
+  const newTurn = { ...input };
+  delete newTurn.inputResponses;
+  return newTurn;
 }
 
 function hasValidWebhookSecret(request: Request): boolean {
@@ -266,13 +300,40 @@ export async function handleAcceptedTelegramWebhook<TState>(
   return receiptContext.run({ receipt, handled: false }, async () => {
     const background: Promise<unknown>[] = [];
     let accepted = false;
+    let closedSession = false;
+    const updateLabel = updateId === null ? "unknown" : String(updateId);
 
     const wrappedArgs: RouteHandlerArgs<TState> = {
       ...args,
       send: async (...sendArgs: Parameters<typeof args.send>) => {
-        const session = await args.send(...sendArgs);
-        accepted = true;
-        return session;
+        try {
+          const session = await args.send(...sendArgs);
+          accepted = true;
+          return session;
+        } catch (error) {
+          if (!isClosedSessionError(error)) throw error;
+          const [input, ...rest] = sendArgs;
+          const newTurn = turnWithoutInputResponses(input);
+          if (newTurn === null) {
+            closedSession = true;
+            throw error;
+          }
+          console.error(
+            `[telegram] reply to a closed session; delivering as a new message (update ${updateLabel})`,
+          );
+          try {
+            const session = await args.send(newTurn, ...rest);
+            accepted = true;
+            return session;
+          } catch (rerouteError) {
+            closedSession = true;
+            console.error(
+              `[telegram] new message for a closed session was not accepted (update ${updateLabel}):`,
+              rerouteError,
+            );
+            throw error;
+          }
+        }
       },
       waitUntil: (task: Promise<unknown>) => {
         background.push(Promise.resolve(task));
@@ -299,6 +360,17 @@ export async function handleAcceptedTelegramWebhook<TState>(
         status: 204,
         headers: {
           [TELEGRAM_ACCEPTANCE_KIND_HEADER]: accepted ? "turn" : "handled",
+        },
+      });
+    }
+    // Терминальный класс: сессия под цитатой закрыта, а новым ходом это сообщение
+    // доставить не удалось. Ретрай бессмыслен и вешал бы мост (issue #203), поэтому
+    // ответ отличается от транзиентного 503 — мост хоронит апдейт по этому заголовку.
+    if (closedSession) {
+      return new Response("Telegram reply targeted a closed session", {
+        status: 409,
+        headers: {
+          [TELEGRAM_ACCEPTANCE_KIND_HEADER]: TELEGRAM_CLOSED_SESSION_KIND,
         },
       });
     }

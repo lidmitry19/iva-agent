@@ -542,6 +542,30 @@ test("a direct acceptance 503 resets immediately, notifies once, then retries", 
   assert.deepEqual(result.queue, { version: 1, queues: {} });
 });
 
+test("a reply to a closed session is delivered once, then leaves the durable inbox", (t: TestContext) => {
+  const dataDir = makeDataDir(t, "closed-session");
+  const result = runHarness("closed-session", dataDir);
+
+  assert.deepEqual(
+    result.deliveryRoutes,
+    ["/eve/v1/telegram/accepted"],
+    "терминальный класс не повторяется ни в этом проходе, ни в следующем",
+  );
+  // Ранний «Работаю…» убран, чат снова свободен, пользователю сказано, что вышло.
+  assert.deepEqual(result.deletedMessages, [{ chat_id: "1", message_id: 79 }]);
+  assert.equal(result.finalStatus.status, "idle");
+  assert.deepEqual(
+    result.failureNotices.map(({ chat_id, text }) => [chat_id, text]),
+    [["1", "Couldn't process the message - repeat it or use /new"]],
+  );
+  assert.deepEqual(result.offset, { offset: 102 });
+  assert.deepEqual(
+    ownedUpdates(result),
+    [],
+    "отравленный апдейт не остаётся ни в inbox, ни в очереди",
+  );
+});
+
 test("a direct acceptance timeout rejects once and returns to Telegram polling", (t: TestContext) => {
   const dataDir = makeDataDir(t, "direct-timeout");
   const result = runHarness("direct-timeout", dataDir, "none", {

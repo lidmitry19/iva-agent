@@ -283,6 +283,100 @@ void test("callback rejection, downstream drop, and enqueue failure all retain i
   }
 });
 
+void test("a terminally dropped update leaves the inbox instead of looping forever", async () => {
+  let document = inboxDocument(update(101, "reply to a closed session"));
+  const routed: number[] = [];
+  const remaining = await promoteReadyInbox({
+    now: () => 1_000,
+    collectorOptions: { quietMs: 800 },
+    loadImpl: () => Promise.resolve(document),
+    routeImpl: (candidate) => {
+      routed.push(candidate.update_id);
+      return Promise.resolve("terminal-drop");
+    },
+    acknowledgeImpl: (key, updateId) => {
+      document = removeQueueHead(document, key, updateId);
+      return Promise.resolve();
+    },
+  });
+
+  assert.equal(remaining, 0);
+  assert.deepEqual(routed, [101]);
+  assert.deepEqual(document.queues, {});
+});
+
+void test("property: terminal results never loop while transient results never lose an update", async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(fc.constantFrom("terminal-drop", "rejected", "delivered"), {
+        minLength: 1,
+        maxLength: 8,
+      }),
+      fc.integer({ min: 1, max: 6 }),
+      async (outcomes, passes) => {
+        // Свой чат на каждый апдейт: иначе коллектор склеит их в одну голову.
+        let document = outcomes.reduce<TelegramQueueDocument>(
+          (accumulator, _outcome, index) => {
+            const candidate = update(200 + index, `part-${index}`);
+            assert.ok(candidate.message);
+            candidate.message.chat = { id: 200 + index, type: "private" };
+            const key = inboxKeyFor(candidate);
+            assert.ok(key);
+            return enqueueItem(accumulator, key, createQueueItem(candidate, 0))
+              .document;
+          },
+          { version: 1, queues: {} },
+        );
+        const verdicts = new Map(
+          outcomes.map((outcome, index) => [200 + index, outcome]),
+        );
+        const deliveries: number[] = [];
+        const attempts = new Map<number, number>();
+
+        for (let pass = 0; pass < passes; pass++) {
+          await promoteReadyInbox({
+            now: () => 1_000,
+            collectorOptions: { quietMs: 0 },
+            loadImpl: () => Promise.resolve(document),
+            routeImpl: (candidate) => {
+              const verdict = verdicts.get(candidate.update_id);
+              assert.ok(verdict);
+              attempts.set(
+                candidate.update_id,
+                (attempts.get(candidate.update_id) ?? 0) + 1,
+              );
+              if (verdict === "delivered") deliveries.push(candidate.update_id);
+              return Promise.resolve(verdict);
+            },
+            acknowledgeImpl: (key, updateId) => {
+              document = removeQueueHead(document, key, updateId);
+              return Promise.resolve();
+            },
+          });
+        }
+
+        // Терминальный апдейт живёт ровно один проход, доставленный уходит в агента
+        // ровно один раз, транзиентный ретраится каждый проход и остаётся на месте.
+        for (const [updateId, verdict] of verdicts) {
+          const seen = attempts.get(updateId) ?? 0;
+          assert.equal(
+            seen,
+            verdict === "rejected" ? passes : 1,
+            `${verdict} ${String(updateId)}`,
+          );
+        }
+        assert.equal(new Set(deliveries).size, deliveries.length);
+        assert.equal(
+          Object.values(document.queues).flat().length,
+          outcomes.filter((outcome) => outcome === "rejected").length,
+        );
+        return true;
+      },
+    ),
+    { seed: SEED, numRuns: 300 },
+  );
+});
+
 void test("admission owns trusted input and drops group noise before any offset may move", async () => {
   const owned: Array<[string, number]> = [];
   assert.equal(
