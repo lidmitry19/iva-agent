@@ -183,12 +183,11 @@ const SHA256SUM = `#!/bin/sh
 echo "sha256sum $*" >> "$IVA_TEST_CALLS"
 last=""
 for arg in "$@"; do last="$arg"; done
-name="$(basename "$last")"
-case "$name" in
-  iva-uv-*) artifact=uv; expected=${PINNED_ARTIFACTS.uv.sha256} ;;
-  iva-nvm-*) artifact=nvm; expected=${PINNED_ARTIFACTS.nvm.sha256} ;;
-  iva-agent-browser-*) artifact=agent-browser; expected=${PINNED_ARTIFACTS.agentBrowser.sha256} ;;
-  iva-gws-*) artifact=gws; expected=${PINNED_ARTIFACTS.gws.sha256} ;;
+case "$last" in
+  */iva-uv-*) artifact=uv; expected=${PINNED_ARTIFACTS.uv.sha256} ;;
+  */iva-nvm-*) artifact=nvm; expected=${PINNED_ARTIFACTS.nvm.sha256} ;;
+  */iva-agent-browser-*) artifact=agent-browser; expected=${PINNED_ARTIFACTS.agentBrowser.sha256} ;;
+  */iva-gws-*) artifact=gws; expected=${PINNED_ARTIFACTS.gws.sha256} ;;
   *) exit 2 ;;
 esac
 if [ "$IVA_TEST_CORRUPT_ARTIFACT" = "$artifact" ]; then
@@ -242,6 +241,15 @@ const COMMAND_MASK = `command() {
  */
 const NPM = `#!/bin/sh
 echo "npm $*" >> "$IVA_TEST_CALLS"
+# What npm really got: a local path is a tarball only if it is a file with a tarball
+# extension, otherwise npm opens <path>/package.json and dies with ENOTDIR.
+for arg in "$@"; do
+  case "$arg" in
+    *iva-agent-browser-*|*iva-gws-*)
+      [ -f "$arg" ] && echo "verified tarball file $arg" >> "$IVA_TEST_CALLS"
+      ;;
+  esac
+done
 case "$*" in
   *iva-agent-browser-*) [ "$IVA_TEST_FAIL_VERIFIED_NPM" = agent-browser ] && exit 71 ;;
   *iva-gws-*) [ "$IVA_TEST_FAIL_VERIFIED_NPM" = gws ] && exit 71 ;;
@@ -739,6 +747,31 @@ void test("a verified npm install failure leaves no downloaded tarball", (t) => 
     /couldn't install agent-browser/u,
   );
   assert.match(world.calls(), /^npm i -g .*iva-agent-browser-/mu);
+  assert.deepEqual(leftovers(world.tmp), []);
+});
+
+void test("npm is handed the tarball itself, and the download outlives nothing", (t) => {
+  const world = createWorld(t);
+  const result = world.run();
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const calls = world.calls();
+  // npm takes a local path without a tarball extension for a package directory and opens
+  // <path>/package.json in it, which is ENOTDIR when the path is the downloaded file.
+  for (const [label, artifact] of [
+    ["agent-browser", PINNED_ARTIFACTS.agentBrowser],
+    ["gws", PINNED_ARTIFACTS.gws],
+  ] as const) {
+    const file = artifact.url.slice(artifact.url.lastIndexOf("/") + 1);
+    assert.ok(file.endsWith(".tgz"), artifact.url);
+    assert.match(
+      calls,
+      new RegExp(
+        `^verified tarball file .*/iva-${label}-[^/\\s]+/${file.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`,
+        "mu",
+      ),
+    );
+  }
   assert.deepEqual(leftovers(world.tmp), []);
 });
 
@@ -1690,8 +1723,11 @@ void test("a re-run over a finished install skips the stages that are already do
 
   const firstCalls = world.calls(join(world.dir, "first.log"));
   assert.match(firstCalls, /^npm ci$/mu);
-  assert.match(firstCalls, /^npm i -g .*\/iva-agent-browser-[^/\s]+$/mu);
-  assert.match(firstCalls, /^npm i -g .*\/iva-gws-[^/\s]+$/mu);
+  assert.match(
+    firstCalls,
+    /^npm i -g .*\/iva-agent-browser-[^/\s]+\/[^/\s]+$/mu,
+  );
+  assert.match(firstCalls, /^npm i -g .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu);
   assert.match(firstCalls, /^npm exec -- eve build$/mu);
   // A finished install keeps nothing either.
   assert.deepEqual(leftovers(world.tmp), []);
@@ -1754,9 +1790,9 @@ void test("a first install into an empty directory still runs every stage", (t) 
   const calls = world.calls();
   for (const stage of [
     /^npm ci$/mu,
-    /^npm i -g .*\/iva-agent-browser-[^/\s]+$/mu,
+    /^npm i -g .*\/iva-agent-browser-[^/\s]+\/[^/\s]+$/mu,
     /^agent-browser install --with-deps$/mu,
-    /^npm i -g .*\/iva-gws-[^/\s]+$/mu,
+    /^npm i -g .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu,
     /^npm exec -- eve build$/mu,
   ])
     assert.match(calls, stage);

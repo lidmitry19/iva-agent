@@ -37,6 +37,7 @@ AGENT_BROWSER_TARBALL_SHA256="a4744fb189e598467abcfb3acdde07118d9e5cb43dc3b31727
 GWS_TARBALL_URL="https://registry.npmjs.org/@googleworkspace/cli/-/cli-0.22.5.tgz"
 GWS_TARBALL_SHA256="b3d415a6d1b09589b13f6a71451d3d3927c4dc4701822d6aae549f8ff8f3380a"
 CHECKSUM_MISMATCH_RC=86
+VERIFIED_DOWNLOAD_DIR=""
 VERIFIED_DOWNLOAD=""
 
 # Every apt run below has to be unattended. On Ubuntu 24.04 with a pending kernel upgrade,
@@ -65,7 +66,8 @@ IVA_LANG=en
 t() { if [ "$IVA_LANG" = ru ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 
 cleanup_verified_download() {
-  if [ -n "$VERIFIED_DOWNLOAD" ]; then rm -f -- "$VERIFIED_DOWNLOAD" || true; fi
+  if [ -n "$VERIFIED_DOWNLOAD_DIR" ]; then rm -rf -- "$VERIFIED_DOWNLOAD_DIR" || true; fi
+  VERIFIED_DOWNLOAD_DIR=""
   VERIFIED_DOWNLOAD=""
 }
 
@@ -79,12 +81,16 @@ sha256_file() {
   fi
 }
 
-# Download into a file owned by this run. Nothing executes or reaches npm before the
-# exact published bytes match the digest pinned beside their immutable URL.
+# Download into a directory owned by this run, keeping the published file name. npm reads
+# a local path without a .tgz/.tar.gz/.tar extension as a package directory and opens
+# <path>/package.json inside it, so a bare mktemp file died with ENOTDIR; the installer
+# scripts are indifferent to the name. Nothing executes or reaches npm before the exact
+# published bytes match the digest pinned beside their immutable URL.
 download_verified() {
   local label="$1" url="$2" expected="$3" actual="" rc=0
   cleanup_verified_download
-  VERIFIED_DOWNLOAD="$(mktemp "${TMPDIR:-/tmp}/iva-$label-XXXXXX")" || return
+  VERIFIED_DOWNLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/iva-$label-XXXXXX")" || return
+  VERIFIED_DOWNLOAD="$VERIFIED_DOWNLOAD_DIR/${url##*/}"
   if curl -fsSL "$url" -o "$VERIFIED_DOWNLOAD"; then
     :
   else
