@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import { PROBE_FLAG as AUTHORED_PROBE_FLAG } from "#lib/eve-health.ts";
 import {
   PROBE_FLAG,
+  awaitHealthy,
   awaitServing,
   probeEnvironment,
   probeVersion,
@@ -156,6 +157,65 @@ test("a service that never answers ends the wait on the deadline", async () => {
   assert.match(result.log, new RegExp(`nothing answered on port ${port}`, "u"));
   // Bounded: an update that hangs here never finishes and never rolls back.
   assert.ok(Date.now() - began < 10_000, `waited ${Date.now() - began}ms`);
+});
+
+test("the wait ends when the unit is active and the service answers", async (t) => {
+  const port = await freePort();
+  const server = createServer((_request, response) =>
+    response.writeHead(200).end("ok"),
+  );
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const states = ["activating", "activating", "active"];
+  setTimeout(() => server.listen(port, "127.0.0.1"), 100);
+
+  const result = await awaitHealthy({
+    unit: "iva.service",
+    port,
+    state: () => states.shift() ?? "active",
+    timeoutMs: 15_000,
+    intervalMs: 50,
+  });
+  assert.deepEqual(result, { ok: true, log: "" });
+});
+
+test("an active unit whose service never answers ends on the deadline", async () => {
+  // The whole point of asking both: this is exactly what a restart loop looks like
+  // through `is-active` alone, and it is what repair.sh used to call repaired.
+  const port = await freePort();
+  const began = Date.now();
+
+  const result = await awaitHealthy({
+    unit: "iva.service",
+    port,
+    state: () => "active",
+    timeoutMs: 600,
+    intervalMs: 50,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.log, /iva\.service was active/u);
+  assert.match(result.log, new RegExp(`nothing answered on port ${port}`, "u"));
+  assert.ok(Date.now() - began < 10_000, `waited ${Date.now() - began}ms`);
+});
+
+test("a failed unit ends the wait at once instead of on the deadline", async () => {
+  const port = await freePort();
+  const began = Date.now();
+  let asked = 0;
+
+  const result = await awaitHealthy({
+    unit: "iva.service",
+    port,
+    state: () => {
+      asked++;
+      return "failed";
+    },
+    timeoutMs: 90_000,
+    intervalMs: 1000,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.log, /iva\.service is failed/u);
+  assert.equal(asked, 1);
+  assert.ok(Date.now() - began < 5000, `waited ${Date.now() - began}ms`);
 });
 
 test("a service that answers with an error is not serving", async (t) => {

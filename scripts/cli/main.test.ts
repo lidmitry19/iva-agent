@@ -154,5 +154,6 @@ void test("main composition exposes the exact legacy command key set without exe
     "-h",
     "_install-units",
     "_activate-units",
+    "_await-healthy",
   ]);
 });

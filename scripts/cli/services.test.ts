@@ -525,6 +525,63 @@ void test("a falsy null restart throw retains the legacy success path", () => {
   );
 });
 
+void test("the health wait reports the unit, its port and success only when it serves", async () => {
+  const events: string[] = [];
+  const runtime = runtimeFixture(events);
+  const commands = createServiceCommands(
+    {
+      ...runtime,
+      // The .env of /srv/iva does not exist here, so the port is the default one.
+      systemd: {
+        ...runtime.systemd,
+        query: (...args: string[]) => {
+          events.push(`systemd.query:${args.join("|")}`);
+          return { code: 0, out: "active" };
+        },
+      },
+    },
+    lifecycleFixture(events),
+    dependencyFixture(events, {
+      awaitHealthy: ({ unit, port, state }) => {
+        events.push(`dependencies.awaitHealthy:${unit}:${port}:${state()}`);
+        return Promise.resolve({ ok: true, log: "" });
+      },
+    }),
+  );
+
+  await commands.cmdAwaitHealthy();
+
+  assert.deepEqual(events, [
+    "runtime.requireSystemd",
+    "systemd.query:is-active|iva.service",
+    "dependencies.awaitHealthy:iva.service:8723:active",
+    "runtime.ok:iva.service is active and answering on port 8723",
+  ]);
+});
+
+void test("a service that never comes up fails the wait and names the journal", async () => {
+  const events: string[] = [];
+  const commands = createServiceCommands(
+    runtimeFixture(events),
+    lifecycleFixture(events),
+    dependencyFixture(events, {
+      awaitHealthy: () =>
+        Promise.resolve({ ok: false, log: "iva.service is failed" }),
+    }),
+  );
+
+  await assert.rejects(commands.cmdAwaitHealthy(), (error: Error) => {
+    assert.equal(
+      error.message,
+      "iva.service did not come up: iva.service is failed." +
+        " Check: journalctl --user -u iva.service -n 100 --no-pager",
+    );
+    return true;
+  });
+  // Nothing said it was up.
+  assert.deepEqual(events, ["runtime.requireSystemd"]);
+});
+
 void test("every command requires systemd before its own side effects", () => {
   for (const commandName of [
     "status",
@@ -533,6 +590,7 @@ void test("every command requires systemd before its own side effects", () => {
     "start",
     "stop",
     "logs",
+    "awaitHealthy",
   ] as const) {
     const events: string[] = [];
     const unavailable = new Error("systemd unavailable");
@@ -553,6 +611,7 @@ void test("every command requires systemd before its own side effects", () => {
       start: commands.cmdStart,
       stop: commands.cmdStop,
       logs: () => commands.cmdLogs([]),
+      awaitHealthy: commands.cmdAwaitHealthy,
     }[commandName];
 
     assert.throws(invoke, unavailable);

@@ -149,6 +149,7 @@ ${C.b}Commands:${C.x}
         `systemd units enabled and active: ${SERVICES.length + TIMERS.length}`,
       );
     },
+    "_await-healthy": services.cmdAwaitHealthy,
   };
 
   return {

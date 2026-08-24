@@ -14,6 +14,11 @@ const LOG_TAIL = 4000;
  */
 export const PROBE_FLAG = "IVA_HEALTH_PROBE";
 const BUSY_PORT = "the probe port was already answering";
+/** How long a restarted service is given to answer. Every caller waits the same. */
+export const SERVING_TIMEOUT_MS = 90_000;
+/** What `systemctl --user is-active` prints for a unit systemd has given up on. */
+const FAILED = "failed";
+const ACTIVE = "active";
 /** What a start that lost the port to somebody else says, whatever starts it. */
 const TAKEN = /EADDRINUSE/u;
 
@@ -104,7 +109,7 @@ const wait = (ms: number): Promise<void> =>
  */
 export async function awaitServing({
   port,
-  timeoutMs = 90_000,
+  timeoutMs = SERVING_TIMEOUT_MS,
   intervalMs = 1000,
 }: {
   readonly port: number;
@@ -119,6 +124,53 @@ export async function awaitServing({
       return {
         ok: false,
         log: `nothing answered on port ${port} within ${timeoutMs}ms (${attempt} attempts)`,
+      };
+    await wait(intervalMs);
+  }
+}
+
+export type HealthyOptions = {
+  readonly unit: string;
+  readonly port: number;
+  /** The unit's state, exactly as `systemctl --user is-active` prints it. */
+  readonly state: () => string;
+  readonly timeoutMs?: number;
+  readonly intervalMs?: number;
+};
+
+/**
+ * Wait until the unit is active AND the service answers on its own port. Both, because
+ * neither alone is the service being up: a unit in a restart loop reads `active` in the
+ * moment between two crashes, and an accepted `systemctl restart` says nothing at all.
+ * Whoever restarted the service asks this before telling the user it is back.
+ */
+export async function awaitHealthy({
+  unit,
+  port,
+  state,
+  timeoutMs = SERVING_TIMEOUT_MS,
+  intervalMs = 1000,
+}: HealthyOptions): Promise<ProbeResult> {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 1; ; attempt++) {
+    const current = state();
+    // systemd has stopped restarting it: waiting out the deadline only delays this answer.
+    if (current === FAILED)
+      return {
+        ok: false,
+        log: `${unit} is failed after ${attempt} attempt(s)`,
+      };
+    if (
+      current === ACTIVE &&
+      (await answering(port, Math.min(intervalMs * 2, 2000)))?.ok
+    )
+      return { ok: true, log: "" };
+    if (Date.now() >= deadline)
+      return {
+        ok: false,
+        log:
+          `${unit} was ${current || "unknown"} and nothing answered on port ${port} ` +
+          `within ${timeoutMs}ms (${attempt} attempts)`,
       };
     await wait(intervalMs);
   }

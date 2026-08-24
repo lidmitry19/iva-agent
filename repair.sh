@@ -324,9 +324,23 @@ trap - ERR INT TERM
 activated=0
 safe_remove "$state_dir"
 
-say "Iva is repaired and updated."
-say "Your complete backup: $backup"
-say "Remove the backup manually after checking Iva."
+# An accepted `restart` is not a service that came up: a unit in a restart loop accepts
+# every one of them. Asked after the traps are down, because the way back from a repair
+# that did not take is the backup, not the broken installation it replaced.
+healthy=1
+if [ "$SKIP_RESTART" != "1" ]; then
+  node "$INSTALL_DIR/bin/iva.mjs" _await-healthy || healthy=0
+fi
+
+if [ "$healthy" = "1" ]; then
+  say "Iva is repaired and updated."
+  say "Your complete backup: $backup"
+  say "Remove the backup manually after checking Iva."
+else
+  say "Iva did not come up after the repair. Check: journalctl --user -u iva.service -n 100 --no-pager"
+  say "Your complete backup: $backup"
+fi
 if [ -s "$recovery/conflicts.txt" ]; then
   say "Files needing review: $recovery/conflicts.txt"
 fi
+[ "$healthy" = "1" ] || exit 1

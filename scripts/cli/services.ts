@@ -1,6 +1,11 @@
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import {
+  awaitHealthy as defaultAwaitHealthy,
+  servicePort,
+} from "../lib/health-probe.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
+import { SystemdControlError } from "../lib/systemd-control.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
 import { createVersionStore, parseVersionName } from "../lib/version-store.ts";
 import { builtWith, versionOverlay } from "../lib/version-update.ts";
@@ -19,6 +24,7 @@ type ServiceCommandDependencies = {
   readonly quarantinePath?: typeof defaultQuarantinePath;
   readonly resetStateTargets?: typeof defaultResetStateTargets;
   readonly exit?: (code: number) => never;
+  readonly awaitHealthy?: typeof defaultAwaitHealthy;
 };
 
 /** Create the service commands without touching the filesystem, processes, or systemd. */
@@ -29,6 +35,7 @@ export function createServiceCommands(
 ) {
   const {
     ROOT,
+    ENV_PATH,
     UNIT_DIR,
     SERVICES,
     TIMERS,
@@ -48,6 +55,7 @@ export function createServiceCommands(
     dependencies.resetStateTargets ?? defaultResetStateTargets;
   const exit =
     dependencies.exit ?? ((code: number): never => process.exit(code));
+  const awaitHealthy = dependencies.awaitHealthy ?? defaultAwaitHealthy;
 
   function cmdStatus(): void {
     requireSystemd();
@@ -203,6 +211,32 @@ export function createServiceCommands(
     ok("Stopped");
   }
 
+  /**
+   * Prove the agent came back, for a caller whose only other evidence is that
+   * `restart` was accepted — which a unit in a restart loop grants every time.
+   * Not async on purpose: a missing systemd is refused before any waiting starts.
+   */
+  function cmdAwaitHealthy(): Promise<void> {
+    requireSystemd();
+    const unit = SERVICES[0];
+    if (!unit) throw new Error("no service to wait for");
+    const port = servicePort(ENV_PATH);
+    return awaitHealthy({
+      unit,
+      port,
+      state: () => systemd.query("is-active", unit).out,
+    }).then((result) => {
+      if (!result.ok)
+        throw new SystemdControlError(
+          `${unit} did not come up: ${result.log}`,
+          {
+            unit,
+          },
+        );
+      ok(`${unit} is active and answering on port ${port}`);
+    });
+  }
+
   function cmdLogs(args: readonly string[]): void {
     requireSystemd();
     const unit = args.includes("poll")
@@ -218,5 +252,6 @@ export function createServiceCommands(
     cmdStart,
     cmdStop,
     cmdLogs,
+    cmdAwaitHealthy,
   };
 }

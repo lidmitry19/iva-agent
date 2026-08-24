@@ -49,7 +49,10 @@ void test("no arguments and every help alias preserve one exact successful respo
   ]) {
     assert.match(baseline.stdout, new RegExp(`\\biva ${command}`));
   }
-  assert.doesNotMatch(baseline.stdout, /_install-units|_activate-units/);
+  assert.doesNotMatch(
+    baseline.stdout,
+    /_install-units|_activate-units|_await-healthy/,
+  );
 
   for (const alias of ["help", "--help", "-h"]) {
     const result = runCli([alias, "ignored-tail"]);
