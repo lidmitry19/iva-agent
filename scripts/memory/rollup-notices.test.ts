@@ -39,8 +39,8 @@ test("what leaves the chat is decided by the policy, not by the script", () => {
   assert.match(block, /await deliverMemoryReport\(\{/u);
   assert.match(block, /settings,/u);
   assert.match(block, /ranBefore: RAN_BEFORE,/u);
-  // Оба шва отправки — только аргументы этого решения; своей отправки у свёртки нет.
-  assert.equal(source.split("sendTelegramHtml(").length - 1, 2);
+  // Оба шва отправки отчёта — только аргументы этого решения; своей отправки у свёртки нет.
+  assert.equal(block.split("sendTelegramHtml(").length - 1, 2);
   // Четвёртый аргумент — только имя хода для журнала (ADR-0010): что уходит в чат, он
   // не решает. Сама отправка остаётся тем же одним швом.
   assert.match(
@@ -54,6 +54,18 @@ test("what leaves the chat is decided by the policy, not by the script", () => {
   // Чат не настроен — решение о Notice всё равно принимается: send просто null.
   assert.match(block, /: null;/u);
   assert.match(block, /send,/u);
+});
+
+test("the CORE alert goes out through the throttle, not straight to the chat", () => {
+  const at = source.indexOf("async function alertOwner(");
+  assert.notEqual(at, -1, "the alert seam must stay one readable place");
+  const seam = source.slice(at, source.indexOf("\n}", at));
+  // Alert не выключается, поэтому не имеет права повторяться чаще раза в неделю: решает
+  // это дроссель, а не свёртка (ADR-0007).
+  assert.match(seam, /await alertOnce\(DATA_DIR, key, essence,/u);
+  assert.equal(seam.split("sendTelegramHtml(").length - 1, 1);
+  // Больше отправок в файле нет: два шва отчёта и один шов алерта.
+  assert.equal(source.split("sendTelegramHtml(").length - 1, 3);
 });
 
 test("the run reads the traces of past runs before it leaves its own", () => {
