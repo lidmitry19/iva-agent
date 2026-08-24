@@ -101,6 +101,66 @@ function asScalarText(value: unknown): string {
     : "";
 }
 
+// Пересылка. Bot API ≥7.0 присылает только forward_origin: поля forward_from,
+// forward_from_chat и forward_sender_name заменены им в 7.0 и больше не заполняются,
+// поэтому читаем одно поле. Метка едет в контекст модели и в дневник одинаково;
+// на allowlist она не влияет — доступ по-прежнему решает фактический отправитель.
+const FORWARD_PLAIN = "[forwarded]";
+const FORWARD_ID_LIMIT = 100;
+
+// Имя источника — чужой текст. Одна строка без скобок метки и с потолком длины,
+// иначе заголовок канала подделал бы метку соседней строкой.
+function forwardIdentifier(value: unknown): string {
+  return asText(value)
+    .replace(/[[\]]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, FORWARD_ID_LIMIT);
+}
+
+function forwardUserLabel(origin: Record<string, unknown>): string | null {
+  const user = asRecord(origin.sender_user);
+  if (!user) return null;
+  const username = forwardIdentifier(user.username);
+  if (username) return `[forwarded from @${username}]`;
+  const name = [
+    forwardIdentifier(user.first_name),
+    forwardIdentifier(user.last_name),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return name ? `[forwarded from ${name}]` : null;
+}
+
+// MessageOriginChannel держит источник в chat, MessageOriginChat — в sender_chat.
+function forwardChatLabel(origin: Record<string, unknown>): string | null {
+  const chat = asRecord(origin.chat) ?? asRecord(origin.sender_chat);
+  if (!chat) return null;
+  const username = forwardIdentifier(chat.username);
+  const name = [forwardIdentifier(chat.title), username ? `(@${username})` : ""]
+    .filter(Boolean)
+    .join(" ");
+  return name ? `[forwarded from channel ${name}]` : null;
+}
+
+// Метка пересылки для одной части сообщения; null — части переслали не откуда-то,
+// а написали здесь.
+function forwardLabel(raw: TelegramRawMessage): string | null {
+  const origin = asRecord(raw.forward_origin);
+  if (!origin) return null;
+  const type = asText(origin.type);
+  if (type === "user") return forwardUserLabel(origin) ?? FORWARD_PLAIN;
+  if (type === "hidden_user") {
+    const name = forwardIdentifier(origin.sender_user_name);
+    return name ? `[forwarded (hidden sender: ${name})]` : FORWARD_PLAIN;
+  }
+  if (type === "chat" || type === "channel")
+    return forwardChatLabel(origin) ?? FORWARD_PLAIN;
+  // Незнакомый origin — новый тип Bot API или мусор. Сам факт пересылки честнее
+  // молчания, а отправителя не выдумываем.
+  return FORWARD_PLAIN;
+}
+
 type TelegramLocation = {
   readonly latitude: number;
   readonly longitude: number;
@@ -332,11 +392,17 @@ type CarrierTextEntries = {
 };
 
 // Обычный текст и rich-fallback проходят один архивный и security-путь.
-function carrierTextEntries(text: string): CarrierTextEntries {
+// Метка пересылки идёт первой строкой: так она одинакова в дневнике и в контексте
+// и переживает усечение гейтом.
+function carrierTextEntries(
+  text: string,
+  label: string | null,
+): CarrierTextEntries {
   const userText = text.trim();
   if (!userText) return { entries: [], flagged: false };
-  const dailyPath = appendDaily("[text]", userText);
-  const sanitized = sanitizeInbound(userText);
+  const labelled = label === null ? userText : `${label}\n${userText}`;
+  const dailyPath = appendDaily("[text]", labelled);
+  const sanitized = sanitizeInbound(labelled);
   const flagged = logInboundFindings(sanitized);
   return {
     entries: gatedTextEntries(sanitized, dailyPath),
@@ -579,7 +645,7 @@ export async function runTelegramInbound(
   // uploadPolicy "disabled" → message.attachments пуст; берём ВСЁ из raw сами.
   if (singleReading?.rich) {
     await effects.startTyping();
-    const carrier = carrierTextEntries(singleReading.text);
+    const carrier = carrierTextEntries(singleReading.text, forwardLabel(raw));
     return withPre({
       auth: buildAuth(message),
       context: [
@@ -611,13 +677,16 @@ export async function runTelegramInbound(
 
   // 3. Текстовая реплика юзера → daily (verbatim) + inbound security-гейт.
   if (partsRaw.length === 1) {
-    const carrier = carrierTextEntries(singleReading?.text ?? "");
+    const label = forwardLabel(raw);
+    const carrier = carrierTextEntries(singleReading?.text ?? "", label);
 
     await effects.startTyping();
 
     // Санитайз: чистим невидимые/гомоглифы, флагуем инъекции (важно для ПЕРЕСЛАННОГО текста).
     // Обычный текст без сигналов — оставляем штатный поток нетронутым (context не переопределяем).
-    if (carrier.flagged)
+    // Пересылку переопределяем всегда: eve несёт модели голый текст, и без контекстной
+    // записи метка до модели не доедет.
+    if ((carrier.flagged || label !== null) && carrier.entries.length)
       return withPre({ auth: buildAuth(message), context: carrier.entries });
     return withPre({ auth: buildAuth(message) });
   }
@@ -626,8 +695,9 @@ export async function runTelegramInbound(
   const context: string[] = [];
   for (const [partIndex, partRaw] of partsRaw.entries()) {
     const reading = readings[partIndex];
+    const label = forwardLabel(partRaw);
     if (reading.rich) {
-      context.push(...carrierTextEntries(reading.text).entries);
+      context.push(...carrierTextEntries(reading.text, label).entries);
       context.push(...(await richMediaEntries(effects, reading.rich)));
       continue;
     }
@@ -646,10 +716,15 @@ export async function runTelegramInbound(
 
     const userText = reading.text.trim();
     if (!userText) continue;
-    const carrier = carrierTextEntries(userText);
+    const carrier = carrierTextEntries(userText, label);
     const carrierText = carrierReading.text.trim();
+    // Пересланная часть не «чистый носитель»: eve донесёт её текст без метки,
+    // поэтому помеченную запись отдаём контекстом даже на нулевой части.
     const isCleanCarrierText =
-      partIndex === 0 && userText === carrierText && !carrier.flagged;
+      partIndex === 0 &&
+      userText === carrierText &&
+      !carrier.flagged &&
+      label === null;
     if (!isCleanCarrierText) context.push(...carrier.entries);
   }
   return withPre({
