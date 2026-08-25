@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import fc from "fast-check";
+import { compareStableVersions } from "./lib/update-check.ts";
 import {
   formatWhatsNew,
   parseWhatsNew,
@@ -24,6 +25,15 @@ const CHANGELOG = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
 const RELEASE_BULLET =
   /^- (?:\p{Extended_Pictographic}[\uFE0F\u200D]*)+ \*\*.+?\*\*/u;
 
+/** Свежайший релиз проекта. Один источник для теста, как и для самого уведомления. */
+function newestRelease(): string {
+  const newest: string | undefined = /^## \[(\d+\.\d+\.\d+)\]/m.exec(
+    CHANGELOG,
+  )?.[1];
+  if (!newest) assert.fail("CHANGELOG has no topmost release");
+  return newest;
+}
+
 function versionBlock(readme: string, version: string): string[] {
   const lines = readme.split("\n");
   const start = lines.indexOf(`#### v${version}`);
@@ -36,37 +46,47 @@ function versionBlock(readme: string, version: string): string[] {
   return block;
 }
 
-test("both READMEs list the same releases in the same order", () => {
+// Инварианты, а не снимок дня: список релизов в README меняется каждый выпуск, и тест,
+// который его перечисляет, краснеет на следующем же.
+test("both READMEs list the same releases, newest first", () => {
   const en = parseWhatsNew(README).map((entry) => entry.version);
   const ru = parseWhatsNew(README_RU).map((entry) => entry.version);
   assert.deepEqual(en, ru);
-  assert.deepEqual(en, ["0.3.31", "0.3.30", "0.3.29", "0.3.28", "0.3.27"]);
+  assert.ok(en.length > 0, "the What's New section names no release");
+  for (let index = 1; index < en.length; index++)
+    assert.equal(
+      compareStableVersions(en[index], en[index - 1]),
+      1,
+      `v${en[index - 1]} must be newer than v${en[index]}`,
+    );
+  assert.equal(
+    en[0],
+    newestRelease(),
+    "the newest release of the CHANGELOG must open the What's New section",
+  );
 });
 
 test("a headline is the emoji and the bold opening of its bullet", () => {
-  const en = new Map(
-    parseWhatsNew(README).map((entry) => [entry.version, entry.headlines]),
-  );
-  assert.deepEqual(en.get("0.3.31"), [
-    "🔁 A reply to an old bot message no longer hangs the bot",
-  ]);
-  assert.deepEqual(en.get("0.3.30"), [
-    "🛑 An old CLI stops instead of breaking",
-    "🩺 `repair.sh` proves the service is up before saying so",
-  ]);
-  assert.equal(en.get("0.3.29")?.length, 5);
-  assert.equal(en.get("0.3.29")?.[2], "🗂️ CORE.md is edited, not rewritten");
-
-  const ru = new Map(
-    parseWhatsNew(README_RU).map((entry) => [entry.version, entry.headlines]),
-  );
-  assert.deepEqual(ru.get("0.3.31"), [
-    "🔁 Reply на старое сообщение бота больше не вешает бота",
-  ]);
-  assert.deepEqual(ru.get("0.3.30"), [
-    "🛑 Старый CLI останавливается, а не ломается",
-    "🩺 `repair.sh` доказывает, что сервис поднялся, прежде чем это сказать",
-  ]);
+  // Живые пункты последнего релиза, прочитанные вторым, независимым способом: версии
+  // в тест не вписываем — они меняются каждый выпуск.
+  const newest = newestRelease();
+  for (const readme of [README, README_RU]) {
+    const entry = parseWhatsNew(readme).find(
+      (candidate) => candidate.version === newest,
+    );
+    if (!entry) assert.fail(`no What's New block for v${newest}`);
+    const expected = versionBlock(readme, newest)
+      .filter((line) => line.startsWith("- "))
+      .map((line) => {
+        const [, emoji, headline] = /^- (\S+) \*\*(.+?)\*\*/u.exec(line) ?? [];
+        return `${emoji} ${headline}`;
+      });
+    assert.deepEqual(entry.headlines, expected);
+    for (const headline of entry.headlines) {
+      assert.ok(headline.length > 0);
+      assert.ok(!headline.includes("**"), headline);
+    }
+  }
 });
 
 test("older markup still parses: the text before the first colon", () => {
@@ -110,51 +130,64 @@ test("junk parses to nothing instead of throwing", () => {
 
 test("the selection is the releases after the installed one, newest first", () => {
   const entries = parseWhatsNew(README);
-  const between = whatsNewBetween(entries, "0.3.29", "0.3.31");
+  const listed = entries.map((entry) => entry.version);
+  const [newest, previous] = listed;
+  const oldest = listed[listed.length - 1];
+
+  // An install a couple of releases behind hears about every one of them, newest first.
+  const behind = Math.min(2, listed.length - 1);
+  const between = whatsNewBetween(entries, listed[behind], newest);
   assert.deepEqual(
     between.versions.map((entry) => entry.version),
-    ["0.3.31", "0.3.30"],
+    listed.slice(0, behind),
   );
   assert.equal(between.truncated, false);
 
-  const current = whatsNewBetween(entries, "0.3.31", "0.3.31");
+  const current = whatsNewBetween(entries, newest, newest);
   assert.deepEqual(current.versions, []);
   assert.equal(current.truncated, false);
 
   // The README keeps three dates, so an older install cannot be told everything.
-  const old = whatsNewBetween(entries, "0.3.18", "0.3.31");
+  const old = whatsNewBetween(entries, "0.0.1", newest);
   assert.equal(old.truncated, true);
   assert.deepEqual(
     old.versions.map((entry) => entry.version),
-    ["0.3.31", "0.3.30", "0.3.29", "0.3.28", "0.3.27"],
+    listed,
   );
+  // The oldest release the README still carries is the border of that verdict.
+  assert.equal(whatsNewBetween(entries, oldest, newest).truncated, false);
 
-  assert.deepEqual(whatsNewBetween(entries, "nightly", "0.3.31").versions, []);
-  assert.deepEqual(whatsNewBetween(entries, "0.3.29", "junk"), {
+  assert.deepEqual(whatsNewBetween(entries, "nightly", newest).versions, []);
+  assert.deepEqual(whatsNewBetween(entries, previous, "junk"), {
     versions: [],
     truncated: false,
   });
 });
 
 test("the block is bilingual, plain and carries the link", () => {
-  const selection = whatsNewBetween(
-    parseWhatsNew(README_RU),
-    "0.3.30",
-    "0.3.31",
+  const entriesRu = parseWhatsNew(README_RU);
+  const newest = entriesRu[0];
+  const previous = entriesRu[1].version;
+  const ru = formatWhatsNew(
+    whatsNewBetween(entriesRu, previous, newest.version),
+    "ru",
   );
-  const ru = formatWhatsNew(selection, "ru");
+  const lines = ru.split("\n");
+  assert.equal(lines[0], "Что нового:");
+  assert.equal(lines[1], `v${newest.version}`);
   assert.equal(
-    ru,
-    [
-      "Что нового:",
-      "v0.3.31",
-      "• 🔁 Reply на старое сообщение бота больше не вешает бота",
-      "Полный список: https://github.com/smixs/iva-agent/releases",
-    ].join("\n"),
+    lines.at(-1),
+    "Полный список: https://github.com/smixs/iva-agent/releases",
   );
+  // Одна строка на пункт релиза, в том же порядке; бэктики и звёздочки сняты.
+  const shown = lines.filter((line) => line.startsWith("• "));
+  assert.equal(shown.length, newest.headlines.length);
+  for (const [index, headline] of newest.headlines.entries())
+    assert.equal(shown[index], `• ${headline.replaceAll("`", "")}`);
 
+  const entriesEn = parseWhatsNew(README);
   const en = formatWhatsNew(
-    whatsNewBetween(parseWhatsNew(README), "0.3.30", "0.3.31"),
+    whatsNewBetween(entriesEn, entriesEn[1].version, entriesEn[0].version),
     "en",
     "https://example.test/releases",
   );
@@ -213,10 +246,7 @@ test("the budget cuts whole releases, never a headline", () => {
 // the release is what fails here, not the notice at run time.
 
 test("the newest CHANGELOG release is in both READMEs, in the notice format", () => {
-  const newest: string | undefined = /^## \[(\d+\.\d+\.\d+)\]/m.exec(
-    CHANGELOG,
-  )?.[1];
-  assert.ok(newest, "CHANGELOG has no topmost release");
+  const newest = newestRelease();
   // The guard has teeth: the old markup and a bare bold opening both fail it.
   for (const bullet of [
     "- A headline without an emoji: the text.",
