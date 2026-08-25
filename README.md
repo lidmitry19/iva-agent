@@ -161,7 +161,13 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.3.31 · 24.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.3.32 · 25.08.2026 — expand the latest releases</b></summary>
+
+### 25.08.2026
+
+#### v0.3.32
+
+- 📣 **The new-version notice now says what is new**: the daily “a new Iva version is available” Alert lists the headline of every release between yours and the fresh one, in your language, newest first, with a link to the full list. The source is the What's New section of the README at the offered commit - no second changelog to maintain; a README that fails to parse costs the block, never the notice. Every bullet in this section now opens with an emoji and a bold headline - that headline is exactly what the notice shows.
 
 ### 24.08.2026
 
@@ -191,15 +197,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🕒 **Timezones come back in canonical spelling**: Intl accepted `europe/moscow` in `.env`, systemd rejected `OnCalendar=*-*-* 05:00:00 europe/moscow`, and the nightly timer never came up. The validator now returns what Intl resolves — `Europe/Moscow`; aliases canonicalize (`US/Pacific` → `America/Los_Angeles`); property tests pin idempotence and insensitivity to case and padding (#190).
 - 👁️ **A vision model per provider**: instead of a constant in code, a variable in `.env` each, blank meaning the provider default — `OLLAMA_VISION_MODEL` (`gemma4:31b`), `OPENCODE_VISION_MODEL` (`qwen3.7-plus`), `OPENROUTER_VISION_MODEL` (`google/gemini-2.5-flash`); Codex has none, the subscription is multimodal. `iva config` asks for the vision model right after the text model and writes it next to `*_MODEL`. The OpenCode Go default comes from live runs on 18.08: `gpt-5.6-luna` answers 400 to any image, `minimax-m3` wraps its answer in `<think>` inside `content`, `qwen3.7-plus` returns a clean description with OCR in 4–6 seconds.
 - 💬 **Three Telegram fixes**: the Stop button only in private chats — its callback has been rejected in groups since the last release, and the button hung there dead. Messages buffered during a rolling update pass the inbound gate with the same warning to the model and the same `[security] inbound flagged` line as fresh ones — the verdict used to be ignored. Prose that looks like a code placeholder (`the price is  50  dollars`, tables with padded numbers) is no longer cut out of an HTML reply: the placeholder moved to the Private Use Area, such code points from outside are stripped first, and a seeded property test walks digits, space runs and code spans mixed in prose.
-
-### 18.08.2026
-
-#### v0.3.27
-
-- 🔌 **MCP servers of a plugin, both transports**: `streamable-http` and `sse` in `mcp.json` become a generated eve connection `mcp-<name>--<server>`, and `${VAR}` in a header is filled at run time from `data/custom/plugins/<name>.env`, so no token is baked into a build. `stdio` runs as the systemd unit `iva-mcp-<name>-<server>.service` behind Iva's own MCP proxy (`services/mcp-proxy/`, `@modelcontextprotocol/sdk`): the agent reaches it over `127.0.0.1:<port>/mcp` with a bearer, and the token lives in `data/plugin-data/<name>/mcp-<server>.token` at mode 0600. The server sees only `PATH`, `HOME`, `PLUGIN_ROOT`, `PLUGIN_DATA`, its own env from `mcp.json` and `<name>.env` — nothing of the agent's environment reaches it. A second switch joins the first: `trusted`, through `iva plugin trust | untrust`, and `add` prints the processes and asks `Start these processes on this machine? [y/N]` (`--trust` answers yes; a shell without a terminal answers no). Ports are handed out from 8730, once, and stay until the plugin is removed. Proven end to end against a real stdio server and a real client from the SDK, not fakes.
-- 🧩 **Plugin services**: `sh.iva/services/<svc>/service.json` with `{command,args,port}` becomes the unit `iva-plugin-<name>-<svc>.service` — env `IVA_SERVICE_PORT`, `IVA_DATA_DIR`, `PLUGIN_ROOT` and `PLUGIN_DATA`, the service's own folder as the working directory, started only while the plugin is enabled and trusted. `iva plugin update` restarts the units of a plugin whose content changed, `iva update` brings them back right after the flip, and `iva doctor` lists the units, prints `is-active` and calls `GET /health` on every MCP proxy. `sh.iva/` is now two kinds: an eve Extension (`sh.iva/package.json`, built into a version) and services, which never rebuild one.
-- 🛒 **The default Marketplace is live — `smixs/iva-plugins`**: the list sits at [github.com/smixs/iva-plugins](https://github.com/smixs/iva-plugins) and carries two plugins. `trace` is the Trace viewer: the schema of Iva with the path of a turn lit across it, the feed of turns, replay at ×1, ×2 and ×4, tiles for today, 7 and 14 days; it listens on loopback only, and `iva trace open` prints the ready ssh tunnel command. `hello` is the demo code plugin authors copy: one skill, one tool. Three commands to get there: `iva plugin add trace`, `iva plugin trust trace`, `iva trace open`. Checked live from the public list: `list --available`, `add trace` pinned to a sha, `update`, `remove`.
-- 📖 **Plugin docs**: `docs/plugins.md` (Russian: `docs/ru/plugins.md`) — what a plugin is, how to install one (a folder, `owner/repo[/subdir][@ref]`, a git URL or a name from a Marketplace), how enabled differs from trusted, what `iva update` does to plugins, how to write your own (skills, an Extension under `sh.iva/`, `mcp.json`, services) and what you risk; `SECURITY.md` gains a Plugins section. Also: the `iva plugin` CLI is split into modules with no command changed, and on a development checkout `add` and `remove` of a code plugin stop promising a build that never happened and say plainly that no version was built there.
 
 </details>
 
