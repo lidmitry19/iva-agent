@@ -5,13 +5,21 @@ import { noticeLang } from "./lib/notice-policy.ts";
 import { acquireUpdateLock } from "./lib/version-store.ts";
 import { resolveDataDir } from "./lib/data-dir.ts";
 import {
+  gitAt,
   inspectUpstream,
   markVersionNotified,
   notificationChat,
   readNotifiedVersion,
   sendUpdateOffer,
   updateOffer,
+  type GitCommand,
 } from "./lib/update-check.ts";
+import {
+  formatWhatsNew,
+  parseWhatsNew,
+  RELEASE_NOTES_URL,
+  whatsNewBetween,
+} from "./lib/whats-new.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -32,10 +40,55 @@ type DailyUpdateOptions = {
   sendImpl?: (request: SendUpdateRequest) => Promise<unknown>;
   readStateImpl?: typeof readNotifiedVersion;
   writeStateImpl?: typeof markVersionNotified;
+  gitImpl?: GitCommand;
 };
 
 function dataDir(root: string, env: UpdateEnvironment): string {
   return resolveDataDir(root, env.ASSISTANT_DATA_DIR);
+}
+
+/**
+ * What the offered release brings, from the README at the very commit this check already
+ * fetched — no call over the network beyond the ones it made. The README is the one whose
+ * language the Notice speaks (ADR-0007).
+ *
+ * The block is garnish and the Notice is the product: a README that will not read or parse
+ * costs the block, never the message. Hence one line in the journal and an empty string out.
+ */
+async function whatsNewBlock({
+  root,
+  ref,
+  locale,
+  installedVersion,
+  remoteVersion,
+  gitImpl,
+}: {
+  root: string;
+  ref: string | undefined;
+  locale: string;
+  installedVersion: string | null | undefined;
+  remoteVersion: string;
+  gitImpl: GitCommand;
+}): Promise<string> {
+  if (!ref) return "";
+  const file = locale === "ru" ? "README.ru.md" : "README.md";
+  try {
+    const shown = await gitImpl(root, ["show", `${ref}:${file}`]);
+    if (typeof shown !== "string" && shown.code !== 0)
+      throw new Error(shown.stderr || `could not read ${file} at ${ref}`);
+    const text = typeof shown === "string" ? shown : (shown.stdout ?? "");
+    const selection = whatsNewBetween(
+      parseWhatsNew(text),
+      installedVersion,
+      remoteVersion,
+    );
+    return formatWhatsNew(selection, locale, RELEASE_NOTES_URL);
+  } catch (error) {
+    console.error(
+      `Update notice without What's New: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return "";
+  }
 }
 
 export async function runDailyUpdateCheck({
@@ -45,6 +98,7 @@ export async function runDailyUpdateCheck({
   sendImpl = sendUpdateOffer,
   readStateImpl = readNotifiedVersion,
   writeStateImpl = markVersionNotified,
+  gitImpl = gitAt,
 }: DailyUpdateOptions = {}) {
   const token = String(env.TELEGRAM_BOT_TOKEN ?? "").trim();
   const chatId = notificationChat(env);
@@ -57,7 +111,10 @@ export async function runDailyUpdateCheck({
   const lock = acquireUpdateLock(storage);
   if (!lock) return { status: "update-running" as const };
   try {
-    const info = await inspectImpl(upstreamQuery(root));
+    // One answer to «which repository», for the inspection and for the README it reads:
+    // on the versioned layout that is the mirror, never the install root.
+    const upstream = upstreamQuery(root);
+    const info = await inspectImpl(upstream);
     if (!info.hasVersionUpdate) return { status: "current" as const, info };
     if ((await readStateImpl(storage)) === info.remoteVersion) {
       return { status: "already-notified" as const, info };
@@ -65,13 +122,25 @@ export async function runDailyUpdateCheck({
 
     // The update prompt is an Alert (ADR-0007) and speaks the one language the owner picked:
     // settings.language first, AGENT_LANGUAGE after it — the same resolver the chat uses.
+    const locale = await noticeLang(env);
     const offer = updateOffer(
       info.localVersion,
       info.remoteVersion,
-      await noticeLang(env),
+      locale,
       info.updaterTooOld,
     );
-    await sendImpl({ token, chatId, offer });
+    // An Alert that only names two numbers leaves the owner to guess what the update
+    // brings; the What's New of the offered release says it, in their language.
+    const whatsNew = await whatsNewBlock({
+      root: upstream.root,
+      ref: info.remote,
+      locale,
+      installedVersion: info.localVersion,
+      remoteVersion: info.remoteVersion,
+      gitImpl,
+    });
+    const text = whatsNew ? `${offer.text}\n\n${whatsNew}` : offer.text;
+    await sendImpl({ token, chatId, offer: { ...offer, text } });
     await writeStateImpl(storage, info.remoteVersion);
     return { status: "notified" as const, info };
   } finally {

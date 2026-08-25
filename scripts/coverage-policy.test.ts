@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 231;
+const EXPECTED_PRODUCTION_COUNT = 232;
 const EXPECTED_INVENTORY_SHA256 =
-  "721706c151d5b0bfa8c7b281608c1cae84dfa887311a1557ade3cf7cbdc64557";
+  "86aabf4601bb6c5d5d5d270da189bbd2ff765c72a37b452f278c9cc23d1a1957";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -111,6 +111,11 @@ const EXPECTED_INVENTORY_SHA256 =
 // the lazy `#lib/i18n.ts` import that a test with its own table never takes - plus
 // `marketplace.ts` at 100%, `agent/lib/trace.ts` at 97.13% and `scripts/cli/trace.ts` at
 // 99.14%. Nothing new is unreported, so the blind spot stays 26.
+// The What's New reader of the update Alert came last, one path:
+// `scripts/lib/whats-new.ts`. Scoped coverage over `scripts/whats-new.test.ts` and
+// `scripts/lib/update-check.test.ts` reports it at 100% lines, 92.16% branches and 100%
+// functions, with `scripts/check-update.ts` at 92.64% lines beside it, so the blind spot
+// stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

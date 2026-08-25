@@ -46,8 +46,13 @@ type DailyUpdateOptions = {
     hasVersionUpdate: boolean;
     localVersion?: string;
     remoteVersion?: string;
+    remote?: string;
   }>;
   sendImpl?: (request: UpdateOfferRequest) => Promise<unknown>;
+  gitImpl?: (
+    root: string,
+    args: string[],
+  ) => Promise<{ code: number; stdout: string; stderr: string }>;
 };
 const require = createRequire(import.meta.url);
 const { runDailyUpdateCheck } = require("../check-update.mjs") as unknown as {
@@ -266,6 +271,100 @@ test("daily check sends one offer per version and records only successful sends"
   assert.equal(await readNotifiedVersion(join(root, "data")), "1.2.5");
 });
 
+const WHATS_NEW_README = [
+  "## Что нового",
+  "",
+  "<details>",
+  "",
+  "### 24.08.2026",
+  "",
+  "#### v1.2.4",
+  "",
+  "- 🔁 **Reply на старое сообщение больше не вешает бота**: и дальше текст.",
+  "",
+  "</details>",
+  "",
+].join("\n");
+
+test("the daily notice says what is new, in the language of the notice", async () => {
+  const root = mkdtempSync(join(tmpdir(), "iva-daily-whats-new-"));
+  const asked: string[][] = [];
+  const sent: UpdateOfferRequest[] = [];
+  const result = await runDailyUpdateCheck({
+    root,
+    env: {
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_DIGEST_CHAT_ID: "42",
+      AGENT_LANGUAGE: "ru",
+      ASSISTANT_DATA_DIR: "data",
+    },
+    inspectImpl: async () => ({
+      hasVersionUpdate: true,
+      localVersion: "1.2.3",
+      remoteVersion: "1.2.4",
+      remote: "deadbeef",
+    }),
+    // The ref the check already fetched, read the way the minUpdater marker is read.
+    gitImpl: async (_root, args) => {
+      asked.push(args);
+      return { code: 0, stdout: WHATS_NEW_README, stderr: "" };
+    },
+    sendImpl: async (request: UpdateOfferRequest) => sent.push(request),
+  });
+  assert.equal(result.status, "notified");
+  assert.deepEqual(asked, [["show", "deadbeef:README.ru.md"]]);
+  assert.match(sent[0].offer.text, /Доступна новая версия Ивы/);
+  assert.match(sent[0].offer.text, /\nЧто нового:\nv1\.2\.4\n/);
+  assert.match(
+    sent[0].offer.text,
+    /• 🔁 Reply на старое сообщение больше не вешает бота\n/,
+  );
+  assert.match(
+    sent[0].offer.text,
+    /Полный список: https:\/\/github\.com\/smixs\/iva-agent\/releases$/,
+  );
+  // Sent without parse_mode: no markdown marker may reach the chat.
+  assert.doesNotMatch(sent[0].offer.text, /[`*]/);
+});
+
+test("the daily notice survives a README it cannot read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "iva-daily-no-readme-"));
+  const sent: UpdateOfferRequest[] = [];
+  const logged: string[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.join(" "));
+  try {
+    const result = await runDailyUpdateCheck({
+      root,
+      env: {
+        TELEGRAM_BOT_TOKEN: "token",
+        TELEGRAM_DIGEST_CHAT_ID: "42",
+        ASSISTANT_DATA_DIR: "data",
+      },
+      inspectImpl: async () => ({
+        hasVersionUpdate: true,
+        localVersion: "1.2.3",
+        remoteVersion: "1.2.4",
+        remote: "deadbeef",
+      }),
+      gitImpl: async () => ({
+        code: 128,
+        stdout: "",
+        stderr: "fatal: path 'README.ru.md' does not exist in 'deadbeef'",
+      }),
+      sendImpl: async (request: UpdateOfferRequest) => sent.push(request),
+    });
+    assert.equal(result.status, "notified");
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].offer.text, /Доступна новая версия Ивы/);
+    assert.doesNotMatch(sent[0].offer.text, /Что нового/);
+    assert.equal(logged.length, 1, logged.join("\n"));
+    assert.match(logged[0], /What's New: fatal: path 'README\.ru\.md'/);
+  } finally {
+    console.error = consoleError;
+  }
+});
+
 test("daily check is silent without config, without a release, or during an update", async () => {
   const root = mkdtempSync(join(tmpdir(), "iva-daily-silent-"));
   assert.equal(
@@ -388,6 +487,35 @@ test("on the versioned layout the daily check reads the mirror and names the ins
   assert.deepEqual(asked, [
     { root: join(home, "repo"), head: sha.slice(0, 12) },
   ]);
+
+  // The README of the offered release is read from the same mirror, not from `current`:
+  // the install root is not a repository at all on this layout.
+  const readFrom: { root: string; args: string[] }[] = [];
+  const sent: UpdateOfferRequest[] = [];
+  const notified = await runDailyUpdateCheck({
+    root: join(home, "current"),
+    env: { TELEGRAM_BOT_TOKEN: "token", TELEGRAM_ALLOWED_USER_IDS: "1" },
+    inspectImpl: async () => ({
+      hasVersionUpdate: true,
+      localVersion: "0.3.15",
+      remoteVersion: "0.3.16",
+      remote: "deadbeef",
+    }),
+    gitImpl: async (root, args) => {
+      readFrom.push({ root, args });
+      return {
+        code: 0,
+        stdout: "#### v0.3.16\n\n- 🔁 **Заголовок релиза**: и текст.\n",
+        stderr: "",
+      };
+    },
+    sendImpl: async (request: UpdateOfferRequest) => sent.push(request),
+  });
+  assert.equal(notified.status, "notified");
+  assert.deepEqual(readFrom, [
+    { root: join(home, "repo"), args: ["show", "deadbeef:README.ru.md"] },
+  ]);
+  assert.match(sent[0].offer.text, /• 🔁 Заголовок релиза/);
 });
 
 // Предложение обновиться — алерт (ADR-0007), и говорит он на языке, выбранном в /menu, а не на
@@ -404,7 +532,15 @@ const result = await runDailyUpdateCheck({
     ASSISTANT_DATA_DIR: process.env.ASSISTANT_DATA_DIR,
     AGENT_LANGUAGE: process.env.AGENT_LANGUAGE,
   },
-  inspectImpl: async () => ({ hasVersionUpdate: true, localVersion: "1.2.3", remoteVersion: "1.2.4" }),
+  inspectImpl: async () => ({ hasVersionUpdate: true, localVersion: "1.2.3", remoteVersion: "1.2.4", remote: "deadbeef" }),
+  // The What's New of the offered release comes from the README of the same language.
+  gitImpl: async (root, args) => ({
+    code: 0,
+    stdout: args[1].endsWith("README.ru.md")
+      ? "#### v1.2.4\\n\\n- 🔁 **Русский заголовок**: и текст.\\n"
+      : "#### v1.2.4\\n\\n- 🔁 **An English headline**: and the text.\\n",
+    stderr: "",
+  }),
   sendImpl: async (request) => texts.push(request.offer.text),
 });
 process.stdout.write(JSON.stringify({ status: result.status, texts }));
@@ -443,11 +579,19 @@ test("the update offer speaks the language picked in /menu, not the one left in 
   assert.equal(english.length, 1);
   assert.match(english[0], /A new Iva version is available/);
   assert.doesNotMatch(english[0], /Доступна новая версия/);
+  // The What's New block obeys the same choice: English notice, English README.
+  assert.match(
+    english[0],
+    /\nWhat's new:\nv1\.2\.4\n• 🔁 An English headline\n/,
+  );
+  assert.match(english[0], /\nFull list: https:\/\/github\.com\//);
 
   const russian = offerProbe("ru", "en");
   assert.equal(russian.length, 1);
   assert.match(russian[0], /Доступна новая версия Ивы/);
   assert.doesNotMatch(russian[0], /A new Iva version/);
+  assert.match(russian[0], /\nЧто нового:\nv1\.2\.4\n• 🔁 Русский заголовок\n/);
+  assert.match(russian[0], /\nПолный список: https:\/\/github\.com\//);
 });
 
 const RELEASE = fc
