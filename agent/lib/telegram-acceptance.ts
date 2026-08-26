@@ -16,9 +16,9 @@ import {
 import { dataDir } from "./data-dir.ts";
 import { chatKeyOf } from "./run-status.ts";
 import { traceInboundOutcome } from "./trace.ts";
+import { TELEGRAM_QUEUE_RECEIPT_FIELD } from "./telegram-parts.ts";
 
 export const TELEGRAM_ACCEPTANCE_ROUTE = "/eve/v1/telegram/accepted";
-export const TELEGRAM_QUEUE_RECEIPT_FIELD = "iva_durable_queue_receipt";
 export const TELEGRAM_ACCEPTANCE_KIND_HEADER = "x-iva-telegram-acceptance";
 // Ответ на сообщение бота, чья сессия уже закрыта: eve не находит её по continuation-токену
 // и падает навсегда. Bridge узнаёт этот класс по заголовку и хоронит апдейт вместо ретрая.

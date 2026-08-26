@@ -17,6 +17,7 @@ import {
   type TelegramMediaEffects,
 } from "./telegram-media.ts";
 import {
+  contentKeyNames,
   mediaFromRaw,
   messageParts,
   type TelegramRawMessage,
@@ -356,6 +357,52 @@ async function noAccessNote(
   }
 }
 
+// Список полей в Notice — подсказка, а не дамп сообщения.
+const UNREADABLE_FIELD_LIMIT = 5;
+
+// Ни текста, ни подписи, ни rich, ни файла, ни точки на карте — читать нечего.
+function nothingReadable(
+  partsRaw: readonly TelegramRawMessage[],
+  readings: readonly TelegramMessageTextReading[],
+): boolean {
+  return partsRaw.every(
+    (partRaw, index) =>
+      !readings[index].text.trim() &&
+      !readings[index].caption.trim() &&
+      readings[index].rich === null &&
+      mediaFromRaw(partRaw) === null &&
+      telegramLocation(partRaw) === null,
+  );
+}
+
+// Сообщение дошло, но прочитать в нём нечего. Молчание тут читается как поломка,
+// поэтому в личке отвечаем одной строкой и называем поля, которые принесло Bot API:
+// так владелец видит новое поле раньше, чем оно попадёт в конверт. Группа и канал
+// молчат по-прежнему — там непрочитанное сообщение чаще адресовано не боту.
+async function unreadableNote(
+  message: TelegramInboundMessage,
+  effects: TelegramInboundEffects,
+  partsRaw: readonly TelegramRawMessage[],
+  readings: readonly TelegramMessageTextReading[],
+): Promise<void> {
+  if (message.chat.type !== "private" || message.from?.isBot === true) return;
+  if (!nothingReadable(partsRaw, readings)) return;
+  const names = contentKeyNames(partsRaw);
+  const shown = names.slice(0, UNREADABLE_FIELD_LIMIT).join(", ");
+  const list = names.length > UNREADABLE_FIELD_LIMIT ? `${shown}, …` : shown;
+  const fields = list ? tr(` (fields: ${list})`, ` (поля: ${list})`) : "";
+  try {
+    await effects.sendMessage(
+      tr(
+        `I can't read this message${fields}. Send it as text or a file.`,
+        `Не могу прочитать это сообщение${fields}. Пришли текстом или файлом.`,
+      ),
+    );
+  } catch {
+    /* молча игнорируем сбой ответа */
+  }
+}
+
 // Текстовая часть после гейта: помеченный вход едет с предупреждением, усечённый —
 // с пометкой и ссылкой на полную запись в Vault.
 function gatedTextEntries(
@@ -508,6 +555,7 @@ export async function runTelegramInbound(
             : shouldDispatch(partMessage, effects.botUsername);
         });
   if (!shouldDispatchAny) {
+    await unreadableNote(message, effects, partsRaw, readings);
     return null;
   }
   await effects.onAccepted();

@@ -10,6 +10,11 @@ import {
 import { createHash, randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
+import {
+  TELEGRAM_MESSAGE_ENVELOPE_KEYS,
+  TELEGRAM_MESSAGE_TEXT_KEYS,
+} from "#lib/telegram-parts.ts";
+
 export type TelegramId = string | number;
 
 export type TelegramPeer = {
@@ -280,20 +285,6 @@ export const TELEGRAM_QUEUE_ACK_ROLLED_BACK = "ETELEGRAM_QUEUE_ACK_ROLLED_BACK";
 export const TELEGRAM_QUEUE_FATAL_DURABILITY =
   "ETELEGRAM_QUEUE_FATAL_DURABILITY";
 export const TELEGRAM_QUEUE_ACK_PENDING_SUFFIX = ".ack-pending";
-
-const MEDIA_KEYS = [
-  "photo",
-  "voice",
-  "audio",
-  "video",
-  "video_note",
-  "animation",
-  "sticker",
-  "document",
-  "location",
-  "contact",
-  "poll",
-];
 
 export function emptyQueueDocument(): TelegramQueueDocument {
   return { version: TELEGRAM_QUEUE_VERSION, queues: Object.fromEntries([]) };
@@ -707,10 +698,20 @@ function messageTextAndEntities(message: TelegramQueueMessage): {
   return { text: "", entities: undefined };
 }
 
+// Мост судит конверт, содержимое судит inbound pipeline. Сообщение несёт содержимое,
+// когда у него есть хотя бы один собственный ключ вне конверта Bot API
+// (`TELEGRAM_MESSAGE_ENVELOPE_KEYS`): перечислять виды содержимого мост не умеет и не
+// должен. Поэтому новое поле Bot API доезжает до агента само, а судит его единственный
+// читатель — `agent/lib/telegram-rich-message.ts`. Незнакомое сообщение из одних
+// метаданных стоит одного HTTP-раунда и Notice, но не потерянного сообщения (ADR-0002).
 function hasMessagePayload(message: TelegramQueueMessage): boolean {
   const { text } = messageTextAndEntities(message);
-  return Boolean(
-    text.trim() || MEDIA_KEYS.some((key) => message[key] !== undefined),
+  if (text.trim()) return true;
+  return Object.keys(message).some(
+    (key) =>
+      message[key] !== undefined &&
+      !TELEGRAM_MESSAGE_ENVELOPE_KEYS.has(key) &&
+      !TELEGRAM_MESSAGE_TEXT_KEYS.has(key),
   );
 }
 
@@ -735,10 +736,7 @@ export function shouldQueueBusyUpdate(
   if (
     !message ||
     message.from?.is_bot === true ||
-    !parts.some(
-      (part: unknown) =>
-        part && hasMessagePayload(part as TelegramQueueMessage),
-    )
+    !parts.some((part: unknown) => isRecord(part) && hasMessagePayload(part))
   ) {
     return false;
   }

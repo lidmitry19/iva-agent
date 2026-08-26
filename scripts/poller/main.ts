@@ -21,6 +21,7 @@ import {
   admitTelegramUpdate,
   promoteReadyInbox,
   TELEGRAM_INBOX_FILE,
+  terminalDropLine,
 } from "./inbox.ts";
 import {
   acquireTelegramProcessLock,
@@ -237,7 +238,7 @@ export async function main({
       }
       offset = update.update_id + 1;
       if (admitted === "terminal-drop") {
-        log(`drop update ${update.update_id} — terminal ingress policy`);
+        log(terminalDropLine(update));
       }
       await saveOffset(offset, delivered);
     }

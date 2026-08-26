@@ -4,6 +4,88 @@ function isTelegramRawMessage(value: unknown): value is TelegramRawMessage {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Наши пометки на сыром Telegram Message. Квитанцию durable-очереди вешает и снимает
+// канал (telegram-acceptance.ts); имя стоит здесь, рядом с остальными пометками,
+// потому что конверт ниже обязан знать их все.
+export const TELEGRAM_QUEUE_RECEIPT_FIELD = "iva_durable_queue_receipt";
+
+// Конверт Bot API `Message`: поля маршрутизации, авторства, времени, ответа и
+// оформления — те, что никогда не несут пользовательского содержимого, — плюс наши
+// собственные пометки. Всё остальное в сообщении считается содержимым.
+//
+// Инвариант, ради которого список перечисляет метаданные, а не виды содержимого:
+// новое поле Bot API доезжает до агента само. Содержимое судит один читатель —
+// `telegram-rich-message.ts`, а незнакомое сообщение из одних метаданных стоит
+// одного HTTP-раунда и Notice, но не потерянного сообщения (ADR-0002).
+export const TELEGRAM_MESSAGE_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
+  "message_id",
+  "message_thread_id",
+  "from",
+  "sender_chat",
+  "sender_boost_count",
+  "sender_business_bot",
+  "date",
+  "business_connection_id",
+  "chat",
+  "forward_origin",
+  "is_topic_message",
+  "is_automatic_forward",
+  "reply_to_message",
+  "external_reply",
+  "quote",
+  "reply_to_story",
+  "via_bot",
+  "edit_date",
+  "has_protected_content",
+  "is_from_offline",
+  "media_group_id",
+  "author_signature",
+  "paid_star_count",
+  "effect_id",
+  "link_preview_options",
+  "reply_markup",
+  "show_caption_above_media",
+  "has_media_spoiler",
+  "iva_parts",
+  "iva_buffered",
+  TELEGRAM_QUEUE_RECEIPT_FIELD,
+]);
+
+// Текстовая проекция Message. Конверт её не судит: содержательность текста решает
+// чтение — текст из одних пробелов содержимым не считается, — а назвать такое поле
+// непрочитанным значило бы соврать.
+export const TELEGRAM_MESSAGE_TEXT_KEYS: ReadonlySet<string> = new Set([
+  "text",
+  "entities",
+  "caption",
+  "caption_entities",
+]);
+
+// Имя поля уезжает пользователю в текст и в журнал моста, поэтому печатаются только
+// имена вида Bot API: ключ с юникодом или пробелом не печатается вовсе.
+const FIELD_NAME_PATTERN = /^[a-z0-9_]+$/u;
+
+/** Поля вне конверта: сообщение их принесло, а прочитать их не удалось. */
+export function contentKeyNames(
+  parts: readonly TelegramRawMessage[],
+): string[] {
+  const names = new Set<string>();
+  for (const part of parts) {
+    if (!isTelegramRawMessage(part)) continue;
+    for (const key of Object.keys(part)) {
+      if (
+        part[key] !== undefined &&
+        !TELEGRAM_MESSAGE_ENVELOPE_KEYS.has(key) &&
+        !TELEGRAM_MESSAGE_TEXT_KEYS.has(key) &&
+        FIELD_NAME_PATTERN.test(key)
+      ) {
+        names.add(key);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
 export type TelegramRawMedia = {
   fileId: string;
   fileUniqueId?: string;

@@ -67,6 +67,25 @@ export function inboxKeyFor(
   return `callback:inline:${sender}`;
 }
 
+// Отброшенный апдейт обязан объяснить себя одной строкой: без имён полей «terminal
+// ingress policy» одинаково выглядит и на чужом сообщении, и на новом поле Bot API,
+// которое конверт ещё не знает. В журнале только имена: `iva logs poll` не несёт текста
+// сообщения (CONTRIBUTING.md).
+const LOG_FIELD_NAME = /^[a-z0-9_]+$/u;
+const LOG_FIELD_LIMIT = 12;
+
+export function terminalDropLine(update: TelegramQueueUpdate): string {
+  const line = `drop update ${update.update_id} — terminal ingress policy`;
+  const message: unknown = update.message;
+  if (typeof message !== "object" || message === null || Array.isArray(message))
+    return line;
+  const keys = Object.keys(message)
+    .filter((key) => LOG_FIELD_NAME.test(key))
+    .sort()
+    .slice(0, LOG_FIELD_LIMIT);
+  return `${line}; message keys: ${JSON.stringify(keys)}`;
+}
+
 function senderPolicy(
   sender: InboxSender | undefined,
   allowedUserIds: ReadonlySet<string>,

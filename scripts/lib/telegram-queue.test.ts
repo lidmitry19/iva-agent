@@ -16,6 +16,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import fc from "fast-check";
+import {
+  TELEGRAM_MESSAGE_ENVELOPE_KEYS,
+  TELEGRAM_MESSAGE_TEXT_KEYS,
+} from "#lib/telegram-parts.ts";
 import {
   acknowledgeQueueHead,
   createQueueItem,
@@ -1250,6 +1255,242 @@ void test("group command routing ignores null Telegram entities", () => {
   assert.doesNotThrow(() => shouldQueueBusyUpdate(nullOnly, options));
   assert.equal(shouldQueueBusyUpdate(nullOnly, options), false);
   assert.equal(shouldQueueBusyUpdate(update, options), true);
+});
+
+// --- конверт против содержимого ---------------------------------------------
+//
+// Мост судит конверт: содержимое — любой собственный ключ вне
+// TELEGRAM_MESSAGE_ENVELOPE_KEYS. Списка видов содержимого у моста нет, поэтому поле,
+// которого Bot API ещё не придумал, доезжает до агента само.
+//
+// КАК ВОСПРОИЗВЕСТИ ПАДЕНИЕ: fast-check печатает строку вида
+// `Property failed after N tests { seed: -1234567, path: "12:3:0", endOnFailure: true }`.
+// Подставь её вторым аргументом — fc.assert(prop, { seed: -1234567, path: "12:3:0" }) —
+// и прогон повторится байт в байт. Seed каждого прогона стоит в имени теста.
+const ENVELOPE_SEEDS = [1, 424242, 20260826];
+
+const BUSY_OPTIONS = {
+  allowedUserIds: new Set(["42"]),
+  botUsername: "my_bot",
+};
+
+// Апдейт Bot API 10.1 с боевого VPS: текстовой проекции нет вовсе, статья целиком
+// лежит в rich_message. До правки мост считал такое сообщение пустым и дропал его.
+const RICH_MESSAGE = {
+  blocks: [
+    { type: "paragraph", text: "Долгий текст, который не влез в 4096 знаков." },
+    {
+      type: "list",
+      items: [
+        {
+          label: "1.",
+          blocks: [
+            { type: "paragraph", text: { type: "bold", text: "Первый пункт" } },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+function richOnlyUpdate(
+  chat: TelegramChatShape = { id: 42, type: "private" },
+  extra: Record<string, unknown> = {},
+): TelegramQueueUpdate {
+  return {
+    update_id: 924_151_861,
+    message: {
+      message_id: 3401,
+      from: { id: 42, is_bot: false },
+      chat,
+      date: 1_780_000_000,
+      rich_message: RICH_MESSAGE,
+      ...extra,
+    },
+  };
+}
+
+type TelegramChatShape = { id: number; type: string };
+
+void test("REGRESSION: rich_message from an allowed private sender is admitted", () => {
+  assert.equal(shouldQueueBusyUpdate(richOnlyUpdate(), BUSY_OPTIONS), true);
+});
+
+void test("a message of envelope keys alone carries nothing, whitespace text included", () => {
+  assert.equal(
+    shouldQueueBusyUpdate(
+      {
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, is_bot: false },
+        },
+      },
+      BUSY_OPTIONS,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldQueueBusyUpdate(
+      {
+        update_id: 2,
+        message: {
+          message_id: 2,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, is_bot: false },
+          text: "   ",
+        },
+      },
+      BUSY_OPTIONS,
+    ),
+    false,
+  );
+});
+
+// Конверт минус структурные ключи: iva_parts задаёт форму пачки и проверяется
+// отдельным тестом, остальное годится как случайный шум конверта.
+const ENVELOPE_NOISE_KEYS = [...TELEGRAM_MESSAGE_ENVELOPE_KEYS].filter(
+  (key) => key !== "iva_parts" && key !== "from" && key !== "chat",
+);
+
+const LETTERS = "abcdefghijklmnopqrstuvwxyz_".split("");
+
+const contentKeyName = fc
+  .array(fc.constantFrom(...LETTERS), { minLength: 1, maxLength: 14 })
+  .map((letters) => letters.join(""))
+  .filter(
+    (key) =>
+      !TELEGRAM_MESSAGE_ENVELOPE_KEYS.has(key) &&
+      !TELEGRAM_MESSAGE_TEXT_KEYS.has(key),
+  );
+
+// Любое JSON-значение, юникод-мусор и пустая строка — всё это содержимое.
+// Не считается только undefined: такого ключа в сообщении фактически нет.
+const contentValue = fc.oneof(
+  fc.jsonValue(),
+  fc.string({ unit: "binary" }),
+  fc.constant(""),
+  fc.constant(null),
+);
+
+const envelopeNoise = fc
+  .uniqueArray(fc.constantFrom(...ENVELOPE_NOISE_KEYS), { maxLength: 8 })
+  .chain((keys) =>
+    fc
+      .tuple(
+        ...keys.map(() => fc.oneof(fc.jsonValue(), fc.constant(undefined))),
+      )
+      .map((values) =>
+        Object.fromEntries(keys.map((key, i) => [key, values[i]])),
+      ),
+  );
+
+function privateEnvelope(
+  noise: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+): TelegramQueueUpdate {
+  return {
+    update_id: 7,
+    message: {
+      ...noise,
+      message_id: 7,
+      date: 1,
+      chat: { id: 42, type: "private" },
+      from: { id: 42, is_bot: false },
+      ...extra,
+    },
+  };
+}
+
+for (const seed of ENVELOPE_SEEDS) {
+  void test(`PROPERTY: envelope keys alone never look like content (seed=${seed})`, () => {
+    fc.assert(
+      fc.property(envelopeNoise, (noise) => {
+        assert.equal(
+          shouldQueueBusyUpdate(privateEnvelope(noise), BUSY_OPTIONS),
+          false,
+          `payload=${JSON.stringify(noise)}`,
+        );
+      }),
+      { seed, numRuns: 500 },
+    );
+  });
+
+  void test(`PROPERTY: one key outside the envelope is content (seed=${seed})`, () => {
+    fc.assert(
+      fc.property(
+        envelopeNoise,
+        contentKeyName,
+        contentValue,
+        (noise, key, value) => {
+          assert.equal(
+            shouldQueueBusyUpdate(
+              privateEnvelope(noise, { [key]: value }),
+              BUSY_OPTIONS,
+            ),
+            true,
+            `key=${key} value=${JSON.stringify(value)}`,
+          );
+        },
+      ),
+      { seed, numRuns: 500 },
+    );
+  });
+
+  void test(`PROPERTY: malformed updates never throw (seed=${seed})`, () => {
+    fc.assert(
+      fc.property(fc.anything(), (candidate) => {
+        assert.doesNotThrow(() =>
+          shouldQueueBusyUpdate(candidate as TelegramQueueUpdate, BUSY_OPTIONS),
+        );
+      }),
+      { seed, numRuns: 500 },
+    );
+  });
+}
+
+void test("in a group, content without text is admitted only when it answers the bot", () => {
+  const chat = { id: -100, type: "supergroup" };
+  assert.equal(
+    shouldQueueBusyUpdate(richOnlyUpdate(chat), BUSY_OPTIONS),
+    false,
+  );
+  assert.equal(
+    shouldQueueBusyUpdate(
+      richOnlyUpdate(chat, {
+        reply_to_message: { message_id: 1, from: { id: 9, is_bot: true } },
+      }),
+      BUSY_OPTIONS,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldQueueBusyUpdate(
+      richOnlyUpdate(chat, {
+        iva_parts: [
+          {
+            message_id: 3401,
+            date: 1,
+            chat,
+            from: { id: 42, is_bot: false },
+            rich_message: RICH_MESSAGE,
+          },
+          {
+            message_id: 3402,
+            date: 1,
+            chat,
+            from: { id: 42, is_bot: false },
+            text: "@my_bot look at this",
+          },
+        ],
+      }),
+      BUSY_OPTIONS,
+    ),
+    true,
+  );
 });
 
 void test("__proto__ is persisted as a queue data key without prototype mutation or loss", async (t) => {

@@ -27,9 +27,9 @@ import {
   addTelegramQueueReceipt,
   handleAcceptedTelegramWebhook,
   TELEGRAM_CLOSED_SESSION_KIND,
-  TELEGRAM_QUEUE_RECEIPT_FIELD,
   wrapTelegramQueueOnMessage,
 } from "#lib/telegram-acceptance.ts";
+import { TELEGRAM_QUEUE_RECEIPT_FIELD } from "#lib/telegram-parts.ts";
 
 const WEBHOOK_SECRET = "test-secret";
 

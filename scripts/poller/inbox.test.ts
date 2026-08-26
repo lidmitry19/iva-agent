@@ -16,6 +16,7 @@ import {
   inboxKeyFor,
   promoteReadyInbox,
   selectReadyInboxBatch,
+  terminalDropLine,
 } from "./inbox.ts";
 
 const SEED = 18_702;
@@ -568,4 +569,100 @@ void test("Trace: сбой записи в inbox виден в журнале о
     (added[0].data as Record<string, unknown>).decision,
     "write-failed",
   );
+});
+
+// --- Bot API 10.1: rich_message ---------------------------------------------
+//
+// Мост судит конверт, а не список известных видов содержимого, поэтому сообщение,
+// у которого текстовой проекции нет вовсе, доезжает до агента целым (ADR-0002).
+const RICH_UPDATE: TelegramQueueUpdate = {
+  update_id: 924_151_861,
+  message: {
+    message_id: 3401,
+    from: { id: 42, is_bot: false },
+    chat: { id: 42, type: "private" },
+    date: 1_780_000_000,
+    rich_message: {
+      blocks: [
+        {
+          type: "paragraph",
+          text: "Долгий текст, который не влез в 4096 знаков.",
+        },
+        {
+          type: "list",
+          items: [
+            {
+              label: "1.",
+              blocks: [
+                {
+                  type: "paragraph",
+                  text: { type: "bold", text: "Первый пункт" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  },
+};
+
+void test("REGRESSION: a rich_message update from an allowed sender is owned, not dropped", async () => {
+  const owned: Array<[string, number]> = [];
+
+  assert.equal(
+    await admitTelegramUpdate(RICH_UPDATE, {
+      allowedUserIds: new Set(["42"]),
+      botUsername: "iva_bot",
+      enqueueImpl: (key, candidate) => {
+        owned.push([key, candidate.update_id]);
+        return Promise.resolve();
+      },
+    }),
+    "owned",
+  );
+  assert.deepEqual(owned, [["42::42", 924_151_861]]);
+});
+
+void test("the drop line names the message fields and never their values", () => {
+  const dropped: TelegramQueueUpdate = {
+    update_id: 924_151_862,
+    message: {
+      message_id: 3402,
+      from: { id: 42, is_bot: false },
+      chat: { id: 42, type: "private" },
+      date: 1_780_000_000,
+      rich_message: { blocks: [{ type: "paragraph", text: "секрет" }] },
+      Ключ: "мусор",
+      "a b": 1,
+    },
+  };
+
+  const line = terminalDropLine(dropped);
+
+  assert.equal(
+    line,
+    'drop update 924151862 — terminal ingress policy; message keys: ["chat","date","from","message_id","rich_message"]',
+  );
+  assert.equal(line.includes("секрет"), false);
+  assert.equal(line.includes("Ключ"), false);
+  // Апдейт без message — это колбэк: строка остаётся прежней.
+  assert.equal(
+    terminalDropLine({ update_id: 5, callback_query: { id: "cb" } }),
+    "drop update 5 — terminal ingress policy",
+  );
+});
+
+void test("the drop line prints at most twelve field names", () => {
+  const many = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`f${index}`, index]),
+  );
+  const line = terminalDropLine({
+    update_id: 6,
+    message: { ...many, chat: { id: 42, type: "private" } },
+  });
+  const keys = JSON.parse(line.slice(line.indexOf("["))) as string[];
+
+  assert.equal(keys.length, 12);
+  assert.deepEqual(keys, [...keys].sort());
 });
