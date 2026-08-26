@@ -180,7 +180,7 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 
 #### v0.3.31
 
-- 🔁 **A reply to an old bot message no longer hangs the bot**: sessions close all the time (nightly reset, rotation, `/new`, an update restart), and a Telegram reply quoting a message from a closed session was routed as a continuation of it. Delivery failed with `target session was not found via continuation token`, the item stayed in the inbox queue, and the Bridge retried it every cycle — hundreds of failures, the bot answering no one (#203). Now such a reply is delivered once as an ordinary new message (the quote loses its old context, the user gets an answer), and that failure class can no longer keep an item in the queue. A transient failure — eve restarting, a timeout — retries exactly as before, so no message is lost.
+- 🔁 **A reply to an old bot message no longer hangs the bot**: sessions close all the time (nightly reset, rotation, `/new`, an update restart), and a Telegram reply quoting a message from a closed session was routed as a continuation of it. Delivery failed with `target session was not found via continuation token`, the item stayed in the inbox queue, and the poller retried it every cycle — hundreds of failures, the bot answering no one (#203). Now such a reply is delivered once as an ordinary new message (the quote loses its old context, the user gets an answer), and that failure class can no longer keep an item in the queue. A transient failure — eve restarting, a timeout — retries exactly as before, so no message is lost.
 
 #### v0.3.30
 

@@ -58,7 +58,7 @@ Symptoms: short messages are answered, a long one (over 4096 characters) or one 
 Cause: since Bot API 10.1 a client sends such a message in `rich_message` instead of `text`, and the Bridge before 0.3.33 admitted only the content keys it already knew — everything else was dropped before the agent ever saw it:
 
 ```bash
-iva logs poll   # drop update 1234 - terminal ingress policy; message keys: [... "rich_message"]
+iva logs poll   # drop update 1234 — terminal ingress policy; message keys: [... "rich_message"]
 ```
 
 Before 0.3.33 that line names the update id only; the keys are what identifies the field you sent.
