@@ -46,6 +46,10 @@ export const TELEGRAM_MESSAGE_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   "reply_markup",
   "show_caption_above_media",
   "has_media_spoiler",
+  // Служебные события личного чата: пользователь закрепил сообщение или сменил
+  // таймер автоудаления — это не обращение к боту, ответа не ждут.
+  "pinned_message",
+  "message_auto_delete_timer_changed",
   "iva_parts",
   "iva_buffered",
   TELEGRAM_QUEUE_RECEIPT_FIELD,
