@@ -51,6 +51,24 @@ From Telegram, `/new` resets only the current chat or forum topic. `/restart` re
 
 After upgrading a legacy group with no recorded Eve token, send `/new` as a reply to Iva's latest message once. Future resets use the exact token stored by the new channel events.
 
+### Long or formatted message gets no reply
+
+Symptoms: short messages are answered, a long one (over 4096 characters) or one written in the Telegram editor is ignored, and `/restart` changes nothing.
+
+Cause: since Bot API 10.1 a client sends such a message in `rich_message` instead of `text`, and the Bridge before 0.3.33 admitted only the content keys it already knew — everything else was dropped before the agent ever saw it:
+
+```bash
+iva logs poll   # drop update 1234 - terminal ingress policy; message keys: [... "rich_message"]
+```
+
+Before 0.3.33 that line names the update id only; the keys are what identifies the field you sent.
+
+```bash
+iva update      # 0.3.33+ admits any message carrying content, and answers the ones it cannot read
+```
+
+On an older version, send the text as a `.txt` or `.md` file, or split it under 4096 characters.
+
 ### Model changed in .env but nothing happened
 
 Cause: the model is read once, at process start.

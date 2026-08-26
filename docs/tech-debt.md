@@ -258,3 +258,16 @@ replacement covers only the model-visible body, leaving logs and the raw update 
 this item when a released eve lets the pipeline hand back that text and the pipeline uses it:
 that is what turns the sanitizer on Telegram text from a warning into a filter, and it retires
 the security doc's section with it.
+
+## 15. A rich message in a group is admitted only as a reply
+
+The Bridge admits a group message carrying no `text`/`caption` only when it replies to the bot
+([ADR-0011](adr/0011-bridge-judges-the-envelope.md)). So a `rich_message` that addresses Iva
+with an `@mention` inside its blocks is dropped: the Bridge judges the envelope and never opens
+content, and the `scripts/lib` → `agent/` import boundary (§3) is closed, so it cannot borrow
+the reader that would find the mention. Private chats are unaffected — there is nothing to
+address there.
+
+Remove this item when Bot API exposes a plain-text projection of `rich_message` beside the
+blocks, or when eve upstream resolves the addressing before the update reaches the Bridge.
+Until then the workaround in a group is to reply to one of Iva's messages.
