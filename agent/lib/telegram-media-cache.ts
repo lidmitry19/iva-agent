@@ -64,19 +64,31 @@ async function loadCache(
   }
 }
 
+/**
+ * Абсолютный путь вложения по rel-пути из кэша. null — если путь уводит за пределы
+ * `<vault>/attachments` или файла там нет. Единственное место, где rel-путь вложения
+ * превращается в путь на диске: тем же резолвером ходит middleware провайдера.
+ */
+export function resolveAttachmentPath(
+  rel: string,
+  vaultDir = process.env.ASSISTANT_VAULT_DIR ?? "vault",
+): string | null {
+  const attachments = resolve(vaultDir, "attachments");
+  const target = resolve(vaultDir, rel);
+  const inside = relative(attachments, target);
+  if (!inside || inside.startsWith("..") || isAbsolute(inside)) return null;
+  try {
+    return existsSync(target) && statSync(target).isFile() ? target : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolvesToAttachment(
   entry: TelegramMediaCacheEntry,
   vaultDir: string,
 ): boolean {
-  const attachments = resolve(vaultDir, "attachments");
-  const target = resolve(vaultDir, entry.path);
-  const inside = relative(attachments, target);
-  if (!inside || inside.startsWith("..") || isAbsolute(inside)) return false;
-  try {
-    return existsSync(target) && statSync(target).isFile();
-  } catch {
-    return false;
-  }
+  return resolveAttachmentPath(entry.path, vaultDir) !== null;
 }
 
 export async function getTelegramMediaCacheEntry(

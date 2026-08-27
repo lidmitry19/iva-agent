@@ -17,7 +17,7 @@ import {
 // Канал приносит ему эффекты и сам про разбор входящего ничего не знает.
 import { runTelegramInbound } from "../lib/telegram-inbound.js";
 import { traceOutbox } from "../lib/trace.js";
-import { describeImage } from "../vision.js";
+import { chatModelSeesImages, describeImage } from "../vision.js";
 import { transcribe } from "../transcribe.js";
 // Статус-сообщение хода («Работаю…», кнопка Стоп, уборка в терминале) и служебное
 // объяснение сбоя — UI канала, обе реплики идут мимо Outbox. Мимо Outbox — не мимо
@@ -332,6 +332,7 @@ const telegram = telegramChannel({
       sendMessage: noticeSender((text) => tg.sendMessage(text)),
       startTyping: () => tg.startTyping(),
       describeImage,
+      chatModelSeesImages,
       transcribe,
       onAccepted: async () => {
         earlyIngressId = await publishTelegramEarlyStatus({

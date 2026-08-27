@@ -102,6 +102,7 @@ function harness(overrides: Partial<Effects> = {}) {
       calls.vision += 1;
       return Promise.resolve("a whiteboard with numbers");
     },
+    chatModelSeesImages: () => Promise.resolve(false),
     transcribe: () => {
       calls.transcribed += 1;
       return Promise.resolve("spoken words");

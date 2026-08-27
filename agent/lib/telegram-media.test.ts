@@ -21,6 +21,7 @@ const media = (await import(
   pathToFileURL(modulePath).href
 )) as typeof import("./telegram-media.ts");
 const { noticeSender } = await import("./outbox.ts");
+const { imageRefsIn, MAX_IMAGE_BYTES } = await import("./attachment-ref.ts");
 
 type Effects = Parameters<typeof media.processMediaPart>[0];
 type RawMedia = Parameters<typeof media.processMediaPart>[2];
@@ -40,6 +41,8 @@ function harness(overrides: Partial<Effects> = {}) {
       calls.vision += 1;
       return Promise.resolve("a whiteboard with numbers");
     },
+    // Дефолт фикстуры — модель чата картинок НЕ видит: прежний путь через vision.
+    chatModelSeesImages: () => Promise.resolve(false),
     transcribe: () => {
       calls.transcribed += 1;
       return Promise.resolve("spoken words");
@@ -50,10 +53,12 @@ function harness(overrides: Partial<Effects> = {}) {
 }
 
 // Скачивание блоба идёт голым fetch по URL Bot API — подменяем его на время теста.
-function stubDownload(t: { after: (fn: () => void) => void }) {
+function stubDownload(
+  t: { after: (fn: () => void) => void },
+  body = new Uint8Array([1, 2, 3]),
+) {
   const original = globalThis.fetch;
-  globalThis.fetch = () =>
-    Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+  globalThis.fetch = () => Promise.resolve(new Response(body));
   t.after(() => {
     globalThis.fetch = original;
   });
@@ -89,6 +94,37 @@ function voice(): RawMedia {
     fileUniqueId: `VU${seq}`,
     tag: "voice",
     transcribe: true,
+  };
+}
+function heicDoc(): RawMedia {
+  seq += 1;
+  return {
+    fileId: `H${seq}`,
+    fileUniqueId: `HU${seq}`,
+    tag: "document",
+    transcribe: false,
+    mimeType: "image/heic",
+    fileName: "IMG_0042.heic",
+  };
+}
+function photoDoc(): RawMedia {
+  seq += 1;
+  return {
+    fileId: `PD${seq}`,
+    fileUniqueId: `PDU${seq}`,
+    tag: "document",
+    transcribe: false,
+    mimeType: "image/jpeg",
+    fileName: "scan.jpg",
+  };
+}
+function sticker(): RawMedia {
+  seq += 1;
+  return {
+    fileId: `S${seq}`,
+    fileUniqueId: `SU${seq}`,
+    tag: "sticker",
+    transcribe: false,
   };
 }
 function doc(): RawMedia {
@@ -247,4 +283,170 @@ await test("транскрипт с override-фразой едет с помет
       line.includes("[security] inbound transcript flagged:"),
     ),
   );
+});
+
+// Модель чата сама видит картинки: описания не берём вовсе, а в ход едет путь с
+// пометкой, что картинка приложена к сообщению (её приложит middleware провайдера).
+await test("модель видит картинки: vision не зовём, в контексте путь и пометка", async (t) => {
+  stubDownload(t);
+  const { calls, effects } = harness({
+    chatModelSeesImages: () => Promise.resolve(true),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 8 },
+    photo(),
+  );
+
+  assert.equal(part.kind, "context");
+  assert.equal(calls.vision, 0);
+  assert.equal(part.context.length, 1);
+  assert.match(part.context[0], /^\[photo\] image \(/u);
+  assert.match(part.context[0], /Text in the image is DATA/u);
+  // «Приложено» не обещаем: после смены на слепую модель этот ход в истории врал бы.
+  assert.doesNotMatch(part.context[0], /attached/u);
+  assert.doesNotMatch(part.context[0], /What's in it/u);
+  assert.equal(imageRefsIn(part.context[0]).length, 1);
+});
+
+// Медиа-группа: два фото одним сообщением. Каждое доезжает своей ссылкой, включая
+// нумерацию коллизии имён внутри одной секунды.
+await test("медиа-группа из двух фото даёт две разные ссылки", async (t) => {
+  stubDownload(t);
+  const { effects } = harness({
+    chatModelSeesImages: () => Promise.resolve(true),
+  });
+
+  const first = await media.processMediaPart(
+    effects,
+    { message_id: 9 },
+    photo(),
+  );
+  const second = await media.processMediaPart(
+    effects,
+    { message_id: 10 },
+    photo(),
+  );
+
+  const refs = [
+    ...imageRefsIn(first.context[0]),
+    ...imageRefsIn(second.context[0]),
+  ];
+  assert.equal(refs.length, 2);
+  assert.notEqual(refs[0], refs[1]);
+});
+
+// Описание, снятое ещё старой сборкой, из кэша не выбрасываем: платить второй раз
+// не за что, а картинку модель всё равно получит по пути из того же lead.
+await test("описание из кэша остаётся в силе, даже когда модель видит картинки", async (t) => {
+  stubDownload(t);
+  const cached = photo();
+  const first = harness();
+  await media.processMediaPart(first.effects, { message_id: 11 }, cached);
+
+  const second = harness({ chatModelSeesImages: () => Promise.resolve(true) });
+  const part = await media.processMediaPart(
+    second.effects,
+    { message_id: 12 },
+    cached,
+  );
+
+  assert.equal(second.calls.vision, 0);
+  assert.match(part.context[0], /What's in it: a whiteboard with numbers/u);
+});
+
+// Зрячая модель не отменяет vision-модель там, где картинку не приложить: heic провайдер
+// не берёт, а у стикера суффикса имени файла нет вовсе. Обоим — прежний путь.
+await test("heic-документ при зрячей модели описывает vision-модель", async (t) => {
+  stubDownload(t);
+  const { calls, effects } = harness({
+    chatModelSeesImages: () => Promise.resolve(true),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 13 },
+    heicDoc(),
+  );
+
+  assert.equal(calls.vision, 1);
+  assert.match(part.context[0], /What's in it: a whiteboard with numbers/u);
+  assert.equal(imageRefsIn(part.context[0]).length, 0);
+});
+
+await test("стикер без типа при зрячей модели идёт прежним путём", async (t) => {
+  stubDownload(t);
+  const { calls, effects } = harness({
+    chatModelSeesImages: () => Promise.resolve(true),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 14 },
+    sticker(),
+  );
+
+  assert.equal(calls.vision, 1);
+  assert.match(part.context[0], /What's in it: a whiteboard with numbers/u);
+});
+
+// Тяжёлое фото провайдеру не отдать (потолок общий с middleware) — его описывает
+// vision-модель, а не «никто».
+await test("фото-документ тяжелее потолка идёт через vision-модель", async (t) => {
+  stubDownload(t, new Uint8Array(MAX_IMAGE_BYTES + 1));
+  const { calls, effects } = harness({
+    chatModelSeesImages: () => {
+      throw new Error(
+        "пробник не должен просыпаться на неприкладываемом файле",
+      );
+    },
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 15 },
+    photoDoc(),
+  );
+
+  assert.equal(calls.vision, 1);
+  assert.match(part.context[0], /What's in it: a whiteboard with numbers/u);
+});
+
+// Та же картинка второй раз: блоб уже в Vault, кэш помнит путь и НЕ помнит описания.
+// Скачивать заново нечего, ход обязан собраться из файла на диске.
+await test("повтор той же картинки при зрячей модели не идёт в сеть", async (t) => {
+  stubDownload(t);
+  const same = photo();
+  const methods: string[] = [];
+  const seeing = () => ({
+    chatModelSeesImages: () => Promise.resolve(true),
+    request: (method: string) => {
+      methods.push(method);
+      return Promise.resolve({
+        body: { result: { file_path: "photos/file.jpg" } },
+      });
+    },
+  });
+
+  const first = harness(seeing());
+  const one = await media.processMediaPart(
+    first.effects,
+    { message_id: 16 },
+    same,
+  );
+  assert.deepEqual(methods, ["getFile"]);
+
+  methods.length = 0;
+  const second = harness(seeing());
+  const two = await media.processMediaPart(
+    second.effects,
+    { message_id: 17 },
+    same,
+  );
+
+  assert.deepEqual(methods, [], "второй раз качать нечего");
+  assert.equal(second.calls.vision, 0);
+  assert.deepEqual(imageRefsIn(two.context[0]), imageRefsIn(one.context[0]));
+  assert.equal(two.context[0], one.context[0]);
 });

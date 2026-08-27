@@ -1,6 +1,16 @@
+import { readFileSync } from "node:fs";
 import { wrapLanguageModel, type LanguageModelMiddleware } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import {
+  imageMediaType,
+  imageRefsIn,
+  MAX_ATTACHED_IMAGES,
+  MAX_ATTACHED_IMAGE_BYTES,
+  MAX_IMAGE_BYTES,
+} from "./lib/attachment-ref.ts";
+import { resolveAttachmentPath } from "./lib/telegram-media-cache.ts";
+import { chatModelSeesImages } from "./vision.ts";
 import { CODEX_BASE_URL, codexAuthHeaders } from "./lib/codex-auth.ts";
 import { resolveContextWindow } from "./lib/context-window.ts";
 import {
@@ -174,11 +184,165 @@ export function makeCodexModel(model: string = providerConfig.textModel) {
   });
 }
 
+// --- Картинки из Vault → в запрос модели ----------------------------------------------------
+// Модель чата, которая сама видит картинки, получает пиксели, а не пересказ vision-модели.
+// В тексте хода едет путь (`vault/attachments/<дата>/<файл>`), а байты по нему дочитывает
+// этот middleware и дописывает file-part в то же user-сообщение.
+//
+// ГДЕ ИСКАТЬ ССЫЛКУ: строки `context`, которые канал вернул из onMessage, eve кладёт
+// КАЖДУЮ отдельным сообщением с role "user" — перед сообщением владельца
+// (eve/dist/src/harness/tool-loop.js: `for(let e of I.context) z.push({content:e,role:"user"})`).
+// Поэтому смотрим все user-сообщения промпта, а не только последнее.
+//
+// ИНВАРИАНТ: история хода на диске остаётся текстом. Байты живут ровно в одном запросе —
+// в сессии и в Vault лежит путь, поэтому реплей истории не тащит за собой base64.
+// Промпт в том виде, в каком его видит middleware: спека провайдера, не пользовательская
+// форма сообщений. Берём из самого типа middleware, чтобы не тянуть @ai-sdk/provider.
+type ModelPrompt = Parameters<
+  NonNullable<LanguageModelMiddleware["transformParams"]>
+>[0]["params"]["prompt"];
+type ModelMessage = ModelPrompt[number];
+
+function isUserMessage(
+  message: ModelMessage,
+): message is Extract<ModelMessage, { role: "user" }> {
+  return (
+    isRecord(message) &&
+    message.role === "user" &&
+    Array.isArray(message.content)
+  );
+}
+
+function imageRefsInMessage(
+  message: Extract<ModelMessage, { role: "user" }>,
+): string[] {
+  const refs: string[] = [];
+  for (const part of message.content) {
+    if (part?.type !== "text") continue;
+    for (const rel of imageRefsIn(part.text))
+      if (!refs.includes(rel)) refs.push(rel);
+  }
+  return refs;
+}
+
+function readVaultImage(rel: string): Uint8Array {
+  // Путь на диске собирает и проверяет резолвер кэша медиа — единственное место, где
+  // rel-путь вложения превращается в абсолютный, с проверкой границ vault/attachments.
+  const path = resolveAttachmentPath(rel);
+  if (!path) throw new Error(`вложение недоступно: ${rel}`);
+  const file = readFileSync(path);
+  return new Uint8Array(file.buffer, file.byteOffset, file.byteLength);
+}
+
+/**
+ * Дописывает картинки Vault в user-сообщения промпта. Файлы читает readImage, поэтому
+ * ядро проверяется без файловой системы.
+ *
+ * Едут ПОСЛЕДНИЕ MAX_ATTACHED_IMAGES ссылок промпта (по последнему упоминанию каждой) и
+ * только пока хватает бюджета байтов — почему потолок обязателен, написано в
+ * agent/lib/attachment-ref.ts. Что не поместилось, остаётся в ходе путём, и каждая такая
+ * картинка называет себя строкой в журнале.
+ */
+export function attachVaultImages(
+  prompt: ModelPrompt,
+  { readImage }: { readImage: (rel: string) => Uint8Array },
+): ModelPrompt {
+  if (!Array.isArray(prompt)) return prompt;
+  const mentions: { index: number; rel: string }[] = [];
+  prompt.forEach((message, index) => {
+    if (!isUserMessage(message)) return;
+    for (const rel of imageRefsInMessage(message)) {
+      // Дедуп по последнему упоминанию: пересланная заново картинка считается свежей.
+      const seen = mentions.findIndex((mention) => mention.rel === rel);
+      if (seen >= 0) mentions.splice(seen, 1);
+      mentions.push({ index, rel });
+    }
+  });
+
+  const files = new Map<
+    number,
+    Extract<ModelMessage, { role: "user" }>["content"]
+  >();
+  // Что не влезло в счётчик — называем поимённо: молчаливая пропажа кадра из альбома
+  // выглядит как «Ива не увидела картинку» и не объясняется ничем.
+  for (const { rel } of mentions.slice(0, -MAX_ATTACHED_IMAGES))
+    console.error(
+      `[vision] картинок в промпте больше ${MAX_ATTACHED_IMAGES}, ${rel} не прикладываю`,
+    );
+
+  // От свежих к старым: бюджет достаётся последней картинке, а не первой.
+  const queue = mentions.slice(-MAX_ATTACHED_IMAGES).reverse();
+  let budget = MAX_ATTACHED_IMAGE_BYTES;
+  for (const [position, { index, rel }] of queue.entries()) {
+    const mediaType = imageMediaType(rel);
+    if (!mediaType) continue;
+    let data: Uint8Array;
+    try {
+      data = readImage(rel);
+    } catch (error) {
+      // Файла нет или он не читается — ход важнее картинки, идём без неё.
+      console.error(`[vision] картинку ${rel} из Vault не прочитал:`, error);
+      continue;
+    }
+    if (data.byteLength > MAX_IMAGE_BYTES) {
+      console.error(`[vision] картинка ${rel} больше потолка, иду без неё`);
+      continue;
+    }
+    if (data.byteLength > budget) {
+      // Дальше только более старые картинки: режем хвост целиком, чтобы выбор не зависел
+      // от того, чей размер удачно совпал с остатком бюджета.
+      for (const rest of queue.slice(position))
+        console.error(
+          `[vision] бюджет картинок исчерпан, ${rest.rel} не прикладываю`,
+        );
+      break;
+    }
+    budget -= data.byteLength;
+    const attached = files.get(index) ?? [];
+    // Тегированная форма обязательна: плоское `data: bytes` провайдеры спецификации v4
+    // сериализуют в null и получают ошибку вместо картинки. filename провайдеры для
+    // картинок не читают — не шлём.
+    attached.unshift({ type: "file", mediaType, data: { type: "data", data } });
+    files.set(index, attached);
+  }
+  if (files.size === 0) return prompt;
+  return prompt.map((message, index) => {
+    const attached = files.get(index);
+    if (!attached || !isUserMessage(message)) return message;
+    return { ...message, content: [...message.content, ...attached] };
+  });
+}
+
+export const attachImagesMiddleware: LanguageModelMiddleware = {
+  async transformParams({ params }) {
+    // Ссылки ищем ДО пробника: ход без картинок не будит сеть, и сам пробник (он идёт
+    // через makeTextModel, то есть через этот же middleware) не ждёт собственного вердикта.
+    if (!Array.isArray(params.prompt)) return params;
+    const hasRefs = params.prompt.some(
+      (message) =>
+        isUserMessage(message) && imageRefsInMessage(message).length > 0,
+    );
+    if (!hasRefs) return params;
+    if (!(await chatModelSeesImages())) return params;
+    return {
+      ...params,
+      prompt: attachVaultImages(params.prompt, { readImage: readVaultImage }),
+    };
+  },
+};
+
 /**
  * Текстовая модель активного провайдера. Общая для КАЖДОГО узла графа: корень и субагенты
  * обязаны говорить с одним провайдером, свои createOpenAICompatible/env в субагентах не заводим.
  */
 export function makeTextModel() {
+  return wrapLanguageModel({
+    model: makeBareTextModel(),
+    middleware: attachImagesMiddleware,
+  });
+}
+
+function makeBareTextModel() {
   // Codex-подписка говорит на Responses API — отдельная модель-фабрика (@ai-sdk/openai).
   // Остальные провайдеры — OpenAI-совместимый chat/completions через openai-compatible.
   if (providerName === "codex") return makeCodexModel();
