@@ -640,8 +640,36 @@ test("UPDATE и NOOP читают пустой history_entry как отсутс
 });
 
 test("property: whitespace-only history_entry on UPDATE/NOOP matches omitting the field", async () => {
+  const trimWhitespace = [
+    "\t",
+    "\n",
+    "\v",
+    "\f",
+    "\r",
+    " ",
+    "\u00a0",
+    "\u1680",
+    "\u2000",
+    "\u2001",
+    "\u2002",
+    "\u2003",
+    "\u2004",
+    "\u2005",
+    "\u2006",
+    "\u2007",
+    "\u2008",
+    "\u2009",
+    "\u200a",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u205f",
+    "\u3000",
+    "\ufeff",
+  ] as const;
+  for (const character of trimWhitespace) assert.equal(character.trim(), "");
   const blankHistory = fc.string({
-    unit: fc.constantFrom(" ", "\t", "\n", "\r"),
+    unit: fc.constantFrom(...trimWhitespace),
     minLength: 0,
     maxLength: 24,
   });
