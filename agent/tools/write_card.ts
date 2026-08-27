@@ -236,7 +236,7 @@ export default defineTool({
         "ТОЛЬКО для SUPERSEDE: одна строка о прежней истине, переносимая в ## History, " +
           "в формате 'YYYY-MM-DD: факт' (своя дата сохраняется; без неё ставится сегодняшняя). " +
           "На ADD отбрасывается как шум, на UPDATE/NOOP непустое значение — ошибка " +
-          "(пустая строка равна отсутствию поля).",
+          "(пробельная пустота после trim() равна отсутствию поля).",
       ),
     confidence: z
       .enum(["EXTRACTED", "INFERRED", "AMBIGUOUS"])
@@ -300,9 +300,10 @@ export default defineTool({
     const file = id.file;
     const rel = relative(VAULT(), file).split(sep).join("/");
 
-    // Пустой/пробельный history_entry ничего не вытесняет и не подделывает History: для UPDATE
-    // и NOOP он равен отсутствующему — так же, как SUPERSEDE читает его через trim(). Модели,
-    // заполняющие все поля схемы, шлют "" и без этого зацикливаются на одном отказе.
+    // Пробельная пустота history_entry (value.trim() === "") ничего не вытесняет и не
+    // подделывает History: для UPDATE и NOOP она равна отсутствующему полю — так же, как
+    // SUPERSEDE читает его через trim(). Модели, заполняющие все поля схемы, шлют "" и
+    // без этого зацикливаются на одном отказе.
     const historyEntry = history_entry?.trim() ? history_entry : undefined;
 
     if (operation === "NOOP") {
@@ -350,7 +351,7 @@ export default defineTool({
         existing,
       });
       // history_entry несёт вытесненную истину, которой у ADD ещё нет: там он шум и молча
-      // отбрасывается (с записью в журнал), а у UPDATE — попытка подделать архив.
+      // отбрасывается (с записью в журнал), а у UPDATE — попытка подделать History.
       if (historyEntry !== undefined && effectiveOperation === "UPDATE") {
         return {
           ok: false,
