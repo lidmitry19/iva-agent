@@ -38,6 +38,9 @@ if (process.env.IVA_TEST_MOUNT) {
   const mount = join(home, "versions", name, process.env.IVA_TEST_MOUNT);
   mkdirSync(dirname(mount), { recursive: true });
   writeFileSync(mount, "export default 1;\\n");
+  const directory = join(home, "versions", name, "plugins/trace");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "package.json"), "{}\\n");
 }
 store.complete(name);
 store.activate(name);
@@ -108,6 +111,7 @@ function world(t: TestContext): World {
     `${JSON.stringify({ name: "iva", version: "0.3.19" })}\n`,
   );
   write(versionDir, "scripts/update-finish.ts", FINISH);
+  write(home, ".env", "");
   store.linkState(versionDir);
   store.complete(active);
   store.activate(active);
@@ -188,12 +192,12 @@ test("a build that leaves the plugin's code out is reported as a failure", async
   const iva = world(t);
 
   // The new version is built, flipped and settled - and carries no mount for the
-  // plugin. Every step said yes; the installation still runs without the plugin's code.
+  // plugin. Every step said yes; the installation is still missing the plugin's artifacts.
   const outcome = await iva.rebuild();
 
   assert.deepEqual(outcome, {
     status: "failed",
-    reason: `${createVersionStore(iva.home).currentName() ?? ""} runs without the code of trace`,
+    reason: `${createVersionStore(iva.home).currentName() ?? ""} is missing artifacts of trace`,
   });
 });
 

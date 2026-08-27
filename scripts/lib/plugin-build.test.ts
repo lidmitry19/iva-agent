@@ -28,11 +28,15 @@ import {
   mountSource,
   namespaceProblem,
   namespaceTaken,
+  pluginArtifacts,
+  pluginArtifactsPresent,
   pluginConnectionFile,
   pluginConnectionName,
   pluginDirectory,
   pluginMount,
   pluginNamespace,
+  pluginsMissingArtifacts,
+  type CodePlugin,
 } from "./plugin-build.ts";
 
 const worlds: string[] = [];
@@ -455,4 +459,108 @@ test("any server name either maps to a connection eve accepts or is refused", ()
       },
     ),
   );
+});
+
+function codePluginFixture(opts: {
+  name: string;
+  extension: boolean;
+  servers?: readonly string[];
+}): CodePlugin {
+  const connections = (opts.servers ?? []).map((server) => ({
+    server,
+    name: pluginConnectionName(opts.name, server),
+    file: pluginConnectionFile(opts.name, server),
+    source: "",
+  }));
+  return {
+    name: opts.name,
+    root: `/data/custom/plugins/${opts.name}`,
+    namespace: pluginNamespace(opts.name),
+    mount: pluginMount(opts.name),
+    directory: pluginDirectory(opts.name),
+    digest: "x",
+    config: "",
+    extension: opts.extension,
+    connections,
+  };
+}
+
+function plantArtifact(dir: string, path: string): void {
+  write(dir, path, "export default 1;\n");
+}
+
+test("MCP-only plugin with its connection file passes pluginsMissingArtifacts", () => {
+  const dir = world();
+  const mcp = codePluginFixture({
+    name: "demo-mcp",
+    extension: false,
+    servers: ["demo"],
+  });
+  plantArtifact(dir, mcp.connections[0].file);
+  assert.deepEqual(pluginArtifacts(mcp), [mcp.connections[0].file]);
+  assert.equal(pluginArtifactsPresent(dir, mcp), true);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [mcp]), []);
+});
+
+test("MCP-only plugin without its connection file is missing artifacts", () => {
+  const dir = world();
+  const mcp = codePluginFixture({
+    name: "demo-mcp",
+    extension: false,
+    servers: ["demo"],
+  });
+  assert.equal(pluginArtifactsPresent(dir, mcp), false);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [mcp]), ["demo-mcp"]);
+});
+
+test("Plugin with eve Extension without its mount is missing artifacts", () => {
+  const dir = world();
+  // Mount is required of a Plugin with eve Extension, not of an MCP-only Plugin.
+  const extension = codePluginFixture({ name: "trace", extension: true });
+  plantArtifact(dir, join(extension.directory, "package.json"));
+  assert.deepEqual(pluginArtifacts(extension), [
+    extension.mount,
+    extension.directory,
+  ]);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [extension]), ["trace"]);
+});
+
+test("Plugin with eve Extension without its built directory is missing artifacts", () => {
+  const dir = world();
+  const extension = codePluginFixture({ name: "trace", extension: true });
+  plantArtifact(dir, extension.mount);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [extension]), ["trace"]);
+});
+
+test("mixed plugin without one connection file is missing artifacts", () => {
+  const dir = world();
+  const mixed = codePluginFixture({
+    name: "mixed",
+    extension: true,
+    servers: ["one", "two"],
+  });
+  plantArtifact(dir, mixed.mount);
+  plantArtifact(dir, join(mixed.directory, "package.json"));
+  plantArtifact(dir, mixed.connections[0].file);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [mixed]), ["mixed"]);
+});
+
+test("mixed plugin with every artifact passes pluginsMissingArtifacts", () => {
+  const dir = world();
+  const mixed = codePluginFixture({
+    name: "mixed",
+    extension: true,
+    servers: ["one", "two"],
+  });
+  plantArtifact(dir, mixed.mount);
+  plantArtifact(dir, join(mixed.directory, "package.json"));
+  for (const connection of mixed.connections)
+    plantArtifact(dir, connection.file);
+  assert.deepEqual(pluginArtifacts(mixed), [
+    mixed.mount,
+    mixed.directory,
+    mixed.connections[0].file,
+    mixed.connections[1].file,
+  ]);
+  assert.deepEqual(pluginsMissingArtifacts(dir, [mixed]), []);
 });

@@ -585,6 +585,30 @@ export function pluginArtifacts(plugin: CodePlugin): string[] {
   ];
 }
 
+/** Whether every required artifact of this plugin exists in a finished version. */
+export function pluginArtifactsPresent(
+  dir: string,
+  plugin: CodePlugin,
+): boolean {
+  return pluginArtifacts(plugin).every((artifact) =>
+    existsSync(join(dir, artifact)),
+  );
+}
+
+/**
+ * Names of plugins whose required artifacts are absent from a finished version.
+ * Same set `builtWith()` already uses: a mount is required only of a Plugin with
+ * eve Extension, and every generated connection file is required of an MCP server.
+ */
+export function pluginsMissingArtifacts(
+  dir: string,
+  plugins: readonly CodePlugin[],
+): string[] {
+  return plugins
+    .filter((plugin) => !pluginArtifactsPresent(dir, plugin))
+    .map((plugin) => plugin.name);
+}
+
 /** Take a plugin out of a staged version: the copy, the mount, its connections. */
 export function removePluginFromVersion(
   versionDir: string,
