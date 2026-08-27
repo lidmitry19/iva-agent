@@ -235,7 +235,8 @@ export default defineTool({
       .describe(
         "ТОЛЬКО для SUPERSEDE: одна строка о прежней истине, переносимая в ## History, " +
           "в формате 'YYYY-MM-DD: факт' (своя дата сохраняется; без неё ставится сегодняшняя). " +
-          "На ADD отбрасывается как шум, на UPDATE/NOOP — ошибка.",
+          "На ADD отбрасывается как шум, на UPDATE/NOOP непустое значение — ошибка " +
+          "(пробельная пустота после trim() равна отсутствию поля).",
       ),
     confidence: z
       .enum(["EXTRACTED", "INFERRED", "AMBIGUOUS"])
@@ -299,8 +300,14 @@ export default defineTool({
     const file = id.file;
     const rel = relative(VAULT(), file).split(sep).join("/");
 
+    // Пробельная пустота history_entry (value.trim() === "") ничего не вытесняет и не
+    // подделывает History: для UPDATE и NOOP она равна отсутствующему полю — так же, как
+    // SUPERSEDE читает его через trim(). Модели, заполняющие все поля схемы, шлют "" и
+    // без этого зацикливаются на одном отказе.
+    const historyEntry = history_entry?.trim() ? history_entry : undefined;
+
     if (operation === "NOOP") {
-      if (replace_body || history_entry !== undefined) {
+      if (replace_body || historyEntry !== undefined) {
         return {
           ok: false,
           error: "NOOP не принимает replace_body или history_entry.",
@@ -344,8 +351,8 @@ export default defineTool({
         existing,
       });
       // history_entry несёт вытесненную истину, которой у ADD ещё нет: там он шум и молча
-      // отбрасывается (с записью в журнал), а у UPDATE — попытка подделать архив.
-      if (history_entry !== undefined && effectiveOperation === "UPDATE") {
+      // отбрасывается (с записью в журнал), а у UPDATE — попытка подделать History.
+      if (historyEntry !== undefined && effectiveOperation === "UPDATE") {
         return {
           ok: false,
           error: "history_entry допустим только для SUPERSEDE.",
@@ -403,7 +410,9 @@ export default defineTool({
         replaceBody: replace_body === true,
         // Сырая operation: по её отсутствию mergeCard узнаёт легаси-путь replace_body.
         operation,
-        historyEntry: history_entry,
+        // ADD получает сырое поле: пустую строку он отбрасывает сам и фиксирует это в журнале.
+        historyEntry:
+          effectiveOperation === "ADD" ? history_entry : historyEntry,
       });
       if (action !== "noop") atomicWrite(file, content);
       if (ignoredHistoryEntry) logIgnoredHistoryEntry();
