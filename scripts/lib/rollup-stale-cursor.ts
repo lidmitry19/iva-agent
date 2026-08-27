@@ -34,13 +34,17 @@ export function isOwnTurnResult(
     readonly sentNotBefore: string;
   },
 ): boolean {
+  const sentAt = Date.parse(sentNotBefore);
+  if (!Number.isFinite(sentAt)) return false;
   return events.some((event) => {
     if (!isRecord(event) || event.type !== "message.received") return false;
     if (!isRecord(event.data) || !isRecord(event.meta)) return false;
+    const receivedAt =
+      typeof event.meta.at === "string" ? Date.parse(event.meta.at) : NaN;
     return (
       event.data.message === prompt &&
-      typeof event.meta.at === "string" &&
-      event.meta.at >= sentNotBefore
+      Number.isFinite(receivedAt) &&
+      receivedAt >= sentAt
     );
   });
 }
@@ -71,4 +75,15 @@ export async function drainStreamToTail(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Drain the saved cursor before an action that starts the next Turn. */
+export async function drainStreamBefore<T>(
+  session: Pick<ClientSession, "stream">,
+  action: () => Promise<T>,
+  onError?: (error: Error) => void,
+  timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
+): Promise<T> {
+  await drainStreamToTail(session, onError, timeoutMs);
+  return await action();
 }

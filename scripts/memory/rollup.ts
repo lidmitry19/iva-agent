@@ -39,7 +39,7 @@ import {
 } from "../lib/rollup-turn.ts";
 import {
   attachRollupNonce,
-  drainStreamToTail,
+  drainStreamBefore,
   isOwnTurnResult,
   sentNotBeforeIso,
 } from "../lib/rollup-stale-cursor.ts";
@@ -296,16 +296,34 @@ const guardedTurn = (
 ) =>
   withTurnTimeout(
     async () => {
-      let response;
+      const send = async () => {
+        const sentNotBefore = sentNotBeforeIso();
+        return {
+          response: await session.send(prompt),
+          sentNotBefore,
+        };
+      };
+      let sent: Awaited<ReturnType<typeof send>>;
       try {
-        response = await session.send(prompt);
+        sent = session.state.sessionId
+          ? await drainStreamBefore(
+              session,
+              send,
+              (error) => {
+                console.error(
+                  `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
+                );
+              },
+              TURN_TIMEOUT_MS,
+            )
+          : await send();
       } catch (error) {
         onSendRejected();
         throw error;
       }
-      const result = response.result();
+      const result = sent.response.result();
       onAccepted(result);
-      return await result;
+      return { result: await result, sentNotBefore: sent.sentNotBefore };
     },
     { timeoutMs: TURN_TIMEOUT_MS, label },
   );
@@ -342,28 +360,16 @@ const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.session(saved.state) : client.session();
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
-// Nonce делает промпт уникальным за этот прогон; drain сдвигает курсор на хвост
-// перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
+// Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
+// на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
 const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
-async function drainBeforeSend(label: string): Promise<void> {
-  await drainStreamToTail(
-    session,
-    (error) => {
-      console.error(
-        `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
-      );
-    },
-    TURN_TIMEOUT_MS,
-  );
-}
-if (saved) await drainBeforeSend("main-turn");
-const sentNotBefore = sentNotBeforeIso();
-let result;
+let result: MessageResult;
+let sentNotBefore: string;
 let accepted = false;
 let sendRejected = false;
 let acceptedTurnResult: Promise<MessageResult> | undefined;
 try {
-  result = await guardedTurn(
+  ({ result, sentNotBefore } = await guardedTurn(
     session,
     mainPrompt,
     "main-turn",
@@ -374,7 +380,7 @@ try {
     () => {
       sendRejected = true;
     },
-  );
+  ));
 } catch (e) {
   // The parked session may be gone (iva reset quarantined the store) or hung on resume —
   // fall back to a fresh one once only after proving the old turn cannot keep writing.
@@ -407,7 +413,11 @@ try {
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
   try {
-    result = await guardedTurn(session, mainPrompt, "main-turn");
+    ({ result, sentNotBefore } = await guardedTurn(
+      session,
+      mainPrompt,
+      "main-turn",
+    ));
   } catch (retryError) {
     if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
       await cancelTurnQuietly(session);
@@ -515,7 +525,6 @@ if (period === "daily") {
     // Таймаут здесь не заводит новую сессию: это просто «коррекция не удалась» — файл
     // перечитывается как есть, и дальше срабатывает существующая проверка капа.
     try {
-      await drainBeforeSend("core-correction");
       await guardedTurn(
         session,
         `Re-open ${CORE_PATH}: it is ${oldLength} characters, above the hard ${CORE_CAP}-character cap. ` +
@@ -615,7 +624,6 @@ if (REPORTS_TO_TELEGRAM[period]) {
     // Best-effort ход: отчёт уже доставлен, поэтому сбой или таймаут здесь только логируем —
     // ронять из-за подсказки о форматировании всю ночь незачем.
     try {
-      await drainBeforeSend("format-feedback");
       await guardedTurn(
         session,
         `The last report failed Telegram parse_mode=HTML (${r.error}) and went out as flat text. ` +

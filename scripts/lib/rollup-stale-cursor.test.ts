@@ -7,8 +7,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ClientSession } from "eve/client";
+import fc from "fast-check";
 import {
   attachRollupNonce,
+  drainStreamBefore,
   drainStreamToTail,
   isOwnTurnResult,
   sentNotBeforeIso,
@@ -202,6 +204,50 @@ test("a lagged cursor result is not this Turn's result", () => {
   );
 });
 
+test("isOwnTurnResult fails closed on malformed timestamps", () => {
+  const prompt = attachRollupNonce(TONIGHT_PROMPT, "tonight");
+  const sentNotBefore = "2026-08-24T04:00:00.000Z";
+  assert.equal(
+    isOwnTurnResult([received(prompt, "zzzz")], {
+      prompt,
+      sentNotBefore,
+    }),
+    false,
+  );
+  assert.equal(
+    isOwnTurnResult([received(prompt, "2026-08-24T03:30:00-01:00")], {
+      prompt,
+      sentNotBefore,
+    }),
+    true,
+  );
+  assert.equal(
+    isOwnTurnResult([received(prompt, "2026-08-24T04:30:00+05:00")], {
+      prompt,
+      sentNotBefore,
+    }),
+    false,
+  );
+});
+
+test("property: ownership check never crashes on junk events", () => {
+  fc.assert(
+    fc.property(
+      fc.array(fc.anything(), { maxLength: 30 }),
+      (events: unknown[]) => {
+        assert.equal(
+          typeof isOwnTurnResult(events, {
+            prompt: "expected",
+            sentNotBefore: "2026-08-24T04:00:00.000Z",
+          }),
+          "boolean",
+        );
+      },
+    ),
+    { seed: 18_713, numRuns: 200 },
+  );
+});
+
 test("drainStreamToTail advances a lagged cursor to the tail before send", async () => {
   const stream = [
     ...turn(OLD_PROMPT, OLD_REPORT, "2026-08-19T04:01:00.000Z"),
@@ -344,7 +390,7 @@ test("drainStreamToTail passes abort signal so a late next does not advance the 
   assert.equal(streamIndex, 0);
 });
 
-test("PR 204 still accepts a delayed previous Turn event; a per-Turn nonce does not", () => {
+test("PR 204 still accepts a delayed previous Turn event; a Rollup nonce does not", () => {
   const processStart = Date.parse("2026-08-24T04:00:00.000Z");
   const delayedAt = "2026-08-24T04:00:05.000Z";
   const previous = attachRollupNonce(TONIGHT_PROMPT, "previous");
@@ -406,29 +452,18 @@ test("sentNotBefore is the send instant, without a 60s slack window", () => {
   );
 });
 
-test("rollup.ts drains before every send, stamps send time, and refuses a foreign result", () => {
+test("rollup.ts uses the shared pre-send drain and refuses a foreign result", () => {
   assert.match(ROLLUP_SRC, /vercel\/eve#2461/);
-  assert.match(ROLLUP_SRC, /drainStreamToTail\(/);
+  assert.match(ROLLUP_SRC, /drainStreamBefore\(/);
   assert.match(ROLLUP_SRC, /isOwnTurnResult\(/);
   assert.match(ROLLUP_SRC, /attachRollupNonce\(/);
   assert.match(ROLLUP_SRC, /sentNotBeforeIso\(/);
+  assert.match(
+    ROLLUP_SRC,
+    /const send = async \(\) => \{\s+const sentNotBefore = sentNotBeforeIso\(\);\s+return \{\s+response: await session\.send\(prompt\),\s+sentNotBefore,/,
+  );
   assert.doesNotMatch(ROLLUP_SRC, /Date\.now\(\) - 60_000/);
-  assert.match(ROLLUP_SRC, /if \(saved\) await drainBeforeSend\("main-turn"\)/);
-  assert.match(ROLLUP_SRC, /await drainBeforeSend\("core-correction"\)/);
-  assert.match(ROLLUP_SRC, /await drainBeforeSend\("format-feedback"\)/);
-  assert.equal(
-    [...ROLLUP_SRC.matchAll(/drainBeforeSend\("/g)].length,
-    3,
-    "main, core-correction, format-feedback",
-  );
-  assert.ok(
-    ROLLUP_SRC.indexOf('await drainBeforeSend("core-correction")') <
-      ROLLUP_SRC.indexOf('"core-correction",'),
-  );
-  assert.ok(
-    ROLLUP_SRC.indexOf('await drainBeforeSend("format-feedback")') <
-      ROLLUP_SRC.indexOf('"format-feedback",'),
-  );
+  assert.doesNotMatch(ROLLUP_SRC, /drainBeforeSend/);
   const ownAt = ROLLUP_SRC.indexOf("isOwnTurnResult(");
   const saveAt = ROLLUP_SRC.indexOf(
     "saveSession(session.state, sessionCreatedAt);",
@@ -439,7 +474,7 @@ test("rollup.ts drains before every send, stamps send time, and refuses a foreig
   );
 });
 
-test("drain happens before every send and a foreign result is refused", async () => {
+test("the production pre-send helper drains before every send and a foreign result is refused", async () => {
   const order: string[] = [];
   const prompt = attachRollupNonce(TONIGHT_PROMPT, "tonight");
   const foreign = turn(OLD_PROMPT, OLD_REPORT, "2026-08-19T04:01:00.000Z");
@@ -462,15 +497,9 @@ test("drain happens before every send and a foreign result is refused", async ()
       return Promise.resolve({ events: resultFromCursor(foreign, 0).events });
     },
   };
-  const drainBeforeSend = async (): Promise<void> => {
-    await drainStreamToTail(session);
-  };
-  await drainBeforeSend();
-  await session.send();
-  await drainBeforeSend();
-  await session.send();
-  await drainBeforeSend();
-  await session.send();
+  await drainStreamBefore(asClientStream(session), () => session.send());
+  await drainStreamBefore(asClientStream(session), () => session.send());
+  await drainStreamBefore(asClientStream(session), () => session.send());
   const result = await session.result();
   assert.deepEqual(order, [
     "drain",
