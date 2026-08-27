@@ -23,7 +23,7 @@ import {
 import {
   buildPluginExtension,
   codePlugins,
-  pluginArtifacts,
+  pluginArtifactsPresent,
   disableCodePlugin,
   removePluginFromVersion,
   type CodePlugin,
@@ -238,9 +238,7 @@ export function builtWith(
   const carried = files.length > 0 || plugins.length > 0;
   return carried &&
     files.every((path) => sameFile(join(dir, path), join(customDir, path))) &&
-    plugins.every((plugin) =>
-      pluginArtifacts(plugin).every((path) => existsSync(join(dir, path))),
-    )
+    plugins.every((plugin) => pluginArtifactsPresent(dir, plugin))
     ? "applied"
     : "stock";
 }

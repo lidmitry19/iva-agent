@@ -30,6 +30,7 @@ import {
   parseVersionName,
   writeJson,
 } from "../lib/version-store.ts";
+import { pluginsMissingArtifacts } from "../lib/plugin-build.ts";
 import {
   commandRunner,
   runVersionUpdate,
@@ -317,19 +318,17 @@ export function createVersionUpdateCommand(
   }
 
   /**
-   * Which enabled plugins have no code in the version that runs now. The end state is
-   * the only honest answer to "is the plugin installed": every earlier step reports on
-   * a tree that a later one may have rebuilt without it.
+   * Which enabled plugins have no artifacts in the version that is active now. The
+   * end state is the only honest answer to "is the plugin installed": every earlier
+   * step reports on a tree that a later one may have rebuilt without it.
    */
-  async function missingPluginCode(): Promise<string[]> {
+  async function missingPluginArtifacts(): Promise<string[]> {
     const store = createVersionStore(install.home);
     const active = store.currentName();
     const { plugins } = await versionOverlay(store.layout.data);
     if (!active || plugins.length === 0) return [];
     const dir = join(store.layout.versions, active);
-    return plugins
-      .filter((plugin) => !existsSync(join(dir, plugin.mount)))
-      .map((plugin) => plugin.name);
+    return pluginsMissingArtifacts(dir, plugins);
   }
 
   /**
@@ -357,14 +356,14 @@ export function createVersionUpdateCommand(
         reason: "fix MODEL_PROVIDER first: iva config",
       };
     if (outcome.status === "updated" || outcome.status === "current") {
-      // What the installation ended up running, not what the build reported about
+      // What the installation ended up with, not what the build reported about
       // itself: a version whose name carries a plugin may still have been built
-      // without it, and "installed" is a promise about the code that runs.
-      const missing = await missingPluginCode();
+      // without it, and "installed" is a promise about the artifacts that are there.
+      const missing = await missingPluginArtifacts();
       if (missing.length > 0)
         return {
           status: "failed",
-          reason: `${outcome.version} runs without the code of ${missing.join(", ")}`,
+          reason: `${outcome.version} is missing artifacts of ${missing.join(", ")}`,
         };
       return { status: "built", version: outcome.version };
     }

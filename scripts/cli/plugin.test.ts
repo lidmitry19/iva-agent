@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -21,6 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
+import { fileURLToPath } from "node:url";
 import { readLiveSkills } from "#lib/custom-skills.ts";
 import { PLUGIN_SCHEMA_URL } from "#lib/plugin-reader.ts";
 import {
@@ -37,10 +39,15 @@ import {
   marketplaceSlug,
 } from "../lib/marketplace.ts";
 import { createSystemdControl } from "../lib/systemd-control.ts";
+import { pluginConnectionFile } from "../lib/plugin-build.ts";
+import { createVersionStore } from "../lib/version-store.ts";
 import { leftoverPluginDirs } from "./plugin-cli-context.ts";
 import { createPluginCommands } from "./plugin.ts";
 import { createCliRuntime } from "./runtime.ts";
-import type { PluginVersionBuild } from "./version-update-command.ts";
+import {
+  createVersionUpdateCommand,
+  type PluginVersionBuild,
+} from "./version-update-command.ts";
 
 type Runtime = ReturnType<typeof createCliRuntime>;
 type Events = Array<[string, string]>;
@@ -59,6 +66,28 @@ const GIT_ENV: NodeJS.ProcessEnv = {
   GIT_COMMITTER_NAME: "iva-test",
   GIT_COMMITTER_EMAIL: "iva@test.local",
 };
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "../..");
+
+const FINISH = `import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const [home, name] = process.argv.slice(2);
+const { createVersionStore } = await import(process.env.IVA_TEST_STORE);
+const store = createVersionStore(home);
+const previous = store.currentName();
+if (process.env.IVA_TEST_ARTIFACT) {
+  const artifact = join(home, "versions", name, process.env.IVA_TEST_ARTIFACT);
+  mkdirSync(dirname(artifact), { recursive: true });
+  writeFileSync(artifact, "export default 1;\\n");
+}
+store.complete(name);
+store.activate(name);
+store.settle(name);
+writeFileSync(
+  process.env.IVA_UPDATE_OUTCOME,
+  JSON.stringify({ status: "updated", version: name, previous, custom: "applied", migrations: [], removed: [] }),
+);
+`;
 
 const worlds: string[] = [];
 
@@ -1870,11 +1899,11 @@ test("a name eve cannot mount is refused for code and fine for skills", async ()
   assert.deepEqual(build.calls, []);
 });
 
-test("a version that runs without the plugin's code is not a successful install", async () => {
+test("a version missing the plugin's artifacts is not a successful install", async () => {
   const root = home();
   const folder = codePlugin("carrier");
-  // The pipeline says it built something; the version that runs has no mount for the
-  // plugin. "installed" is a promise about the code that runs, so this is a failure.
+  // The pipeline says it built something; the active version has no mount for the
+  // plugin. "installed" is a promise about the artifacts that are there, so this is a failure.
   const build = buildStub({ status: "built", version: "0.3.24-abcdefabcdef" });
   const { cmdPlugin, data } = commands(root, undefined, undefined, {}, build);
 
@@ -1885,12 +1914,12 @@ test("a version that runs without the plugin's code is not a successful install"
   // failure reason from it aborts the install, whatever produced it.
   build.outcome = {
     status: "failed",
-    reason: "0.3.24-abcdefabcdef runs without the code of carrier",
+    reason: "0.3.24-abcdefabcdef is missing artifacts of carrier",
   };
   await cmdPlugin(["disable", "carrier"]);
   await assert.rejects(
     cmdPlugin(["enable", "carrier"]),
-    /carrier stays disabled: .*runs without the code of carrier/u,
+    /carrier stays disabled: .*is missing artifacts of carrier/u,
   );
   assert.equal((await readPluginsState(data)).plugins[0].enabled, false);
 });
@@ -2062,6 +2091,105 @@ function processPlugin(
   );
   write(folder, "sh.iva/services/web/server.mjs", "// server\n");
   return folder;
+}
+
+/** MCP-only Plugin: skills plus a stdio server, no eve Extension. */
+function mcpOnlyPlugin(name: string, server: string): string {
+  const folder = join(world("mcp-only"), name);
+  plantPlugin(folder, name);
+  write(
+    folder,
+    "mcp.json",
+    JSON.stringify({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: {
+        [server]: { type: "stdio", command: "node", args: ["serve.mjs"] },
+      },
+    }),
+  );
+  return folder;
+}
+
+/**
+ * Managed installation with an active Version, so `iva plugin trust` goes through
+ * the real rebuild guard instead of buildStub.
+ */
+function managedPluginWorld(artifact: string): {
+  readonly home: string;
+  readonly version: string;
+  readonly data: string;
+  readonly units: Units;
+  readonly cmdPlugin: (argv: string[]) => Promise<void>;
+  readonly events: Events;
+} {
+  const dir = realpathSync(world("managed"));
+  const home = join(dir, "iva");
+  const upstream = join(dir, "upstream.git");
+  git(["init", "-q", "--bare", "--initial-branch=main", upstream], dir);
+  mkdirSync(home, { recursive: true });
+  write(
+    home,
+    "package.json",
+    `${JSON.stringify({ name: "iva", version: "0.3.19", type: "module" }, null, 2)}\n`,
+  );
+  write(home, "scripts/update-finish.ts", FINISH);
+  git(["init", "-q", "--initial-branch=main"], home);
+  git(["remote", "add", "origin", upstream], home);
+  git(["config", "iva.updateBranch", "main"], home);
+  git(["add", "-A"], home);
+  git(["commit", "-qm", "release"], home);
+  git(["push", "-q", "origin", "main"], home);
+  const sha = git(["rev-parse", "HEAD"], home);
+
+  const store = createVersionStore(home);
+  const active = `0.3.19-${sha.slice(0, 12)}`;
+  const versionDir = store.stage(active);
+  write(
+    versionDir,
+    "package.json",
+    `${JSON.stringify({ name: "iva", version: "0.3.19" })}\n`,
+  );
+  write(versionDir, "scripts/update-finish.ts", FINISH);
+  write(home, ".env", "");
+  store.linkState(versionDir);
+  store.complete(active);
+  store.activate(active);
+  store.settle(active);
+
+  const data = join(home, "data");
+  mkdirSync(data, { recursive: true });
+  const units = unitWorld();
+  const events: Events = [];
+  const base = createCliRuntime(versionDir);
+  const runtime: Runtime = {
+    ...base,
+    C: NO_COLOR,
+    hasSystemd: () => true,
+    systemd: units.control,
+    UNIT_DIR: units.dir,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    step: (message) => events.push(["step", message]),
+    readEnv: () => ({ MODEL_PROVIDER: "codex", CODEX_MODEL: "gpt-test" }),
+    dataDirAbs: () => data,
+    childEnv: {
+      ...GIT_ENV,
+      IVA_TEST_STORE: join(REPO, "scripts/lib/version-store.ts"),
+      IVA_TEST_ARTIFACT: artifact,
+    },
+  };
+  const updater = createVersionUpdateCommand(runtime, {
+    restartServices: () => {},
+  });
+  const { cmdPlugin } = createPluginCommands(runtime, {
+    buildVersion: (options) => updater.rebuild(options),
+    now: () => new Date("2026-08-17T12:00:00.000Z"),
+    log: () => {},
+    translate: (en) => en,
+    cwd: () => home,
+  });
+  return { home, version: active, data, units, cmdPlugin, events };
 }
 
 test("trust hands out ports and tokens, writes the units and starts them", async () => {
@@ -2320,6 +2448,30 @@ test("a trust whose version build fails leaves the plugin untrusted", async () =
 
   assert.equal((await readPluginsState(data)).plugins[0].trusted, false);
   assert.deepEqual(units.units(), [], "nothing runs for an untrusted plugin");
+});
+
+test("trust of an MCP-only Plugin keeps the generated connection, trusted flag and unit", async () => {
+  const name = "relay";
+  const server = "viewer";
+  const connection = pluginConnectionFile(name, server);
+  const iva = managedPluginWorld(connection);
+  const folder = mcpOnlyPlugin(name, server);
+
+  await iva.cmdPlugin(["add", folder]);
+  assert.equal((await readPluginsState(iva.data)).plugins[0].trusted, false);
+  assert.deepEqual(iva.units.units(), []);
+
+  await iva.cmdPlugin(["trust", name]);
+
+  const entry = (await readPluginsState(iva.data)).plugins[0];
+  assert.equal(entry.trusted, true, "trust must not roll back to untrusted");
+  const active = createVersionStore(iva.home).currentName();
+  assert.ok(active);
+  assert.ok(
+    existsSync(join(iva.home, "versions", active, connection)),
+    "generated connection must exist in the active Version",
+  );
+  assert.deepEqual(iva.units.units(), ["iva-mcp-relay-viewer.service"]);
 });
 
 test("a plugin whose MCP is all remote is not trusted by a question nobody asked", async () => {
