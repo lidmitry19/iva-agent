@@ -23,6 +23,7 @@
     "poll": "node --env-file=.env scripts/telegram-poll.mjs",
     "memory": "node --env-file=.env scripts/memory/rollup.ts",
     "brain": "node --env-file=.env scripts/memory/brain.ts",
+    "bitrix:sync": "node --env-file-if-exists=.env scripts/bitrix-sync.ts --daily",
     "doctor": "npm run brain",
     "typecheck": "tsgo",
     "lint": "eslint --flag unstable_native_nodejs_ts_config .",
