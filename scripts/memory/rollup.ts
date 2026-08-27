@@ -7,6 +7,7 @@
 // Requires: a running agent (eve start) and a vault to write into. The processing rules
 // (scripts/memory/instructions/) ship with the repo. Date is in ASSISTANT_TIMEZONE.
 import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, type MessageResult, type SessionState } from "eve/client";
@@ -36,6 +37,12 @@ import {
   resolveTurnTimeoutMs,
   withTurnTimeout,
 } from "../lib/rollup-turn.ts";
+import {
+  attachRollupNonce,
+  drainStreamBefore,
+  isOwnTurnResult,
+  sentNotBeforeIso,
+} from "../lib/rollup-stale-cursor.ts";
 import { sendTelegramHtml } from "../lib/telegram-send.ts";
 
 type Period = "daily" | "weekly" | "monthly" | "yearly";
@@ -289,16 +296,34 @@ const guardedTurn = (
 ) =>
   withTurnTimeout(
     async () => {
-      let response;
+      const send = async () => {
+        const sentNotBefore = sentNotBeforeIso();
+        return {
+          response: await session.send(prompt),
+          sentNotBefore,
+        };
+      };
+      let sent: Awaited<ReturnType<typeof send>>;
       try {
-        response = await session.send(prompt);
+        sent = session.state.sessionId
+          ? await drainStreamBefore(
+              session,
+              send,
+              (error) => {
+                console.error(
+                  `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
+                );
+              },
+              TURN_TIMEOUT_MS,
+            )
+          : await send();
       } catch (error) {
         onSendRejected();
         throw error;
       }
-      const result = response.result();
+      const result = sent.response.result();
       onAccepted(result);
-      return await result;
+      return { result: await result, sentNotBefore: sent.sentNotBefore };
     },
     { timeoutMs: TURN_TIMEOUT_MS, label },
   );
@@ -334,14 +359,19 @@ const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.session(saved.state) : client.session();
-let result;
+// Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
+// Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
+// на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
+const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
+let result: MessageResult;
+let sentNotBefore: string;
 let accepted = false;
 let sendRejected = false;
 let acceptedTurnResult: Promise<MessageResult> | undefined;
 try {
-  result = await guardedTurn(
+  ({ result, sentNotBefore } = await guardedTurn(
     session,
-    buildPrompt(period, today),
+    mainPrompt,
     "main-turn",
     (turnResult) => {
       accepted = true;
@@ -350,7 +380,7 @@ try {
     () => {
       sendRejected = true;
     },
-  );
+  ));
 } catch (e) {
   // The parked session may be gone (iva reset quarantined the store) or hung on resume —
   // fall back to a fresh one once only after proving the old turn cannot keep writing.
@@ -383,16 +413,33 @@ try {
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
   try {
-    result = await guardedTurn(
+    ({ result, sentNotBefore } = await guardedTurn(
       session,
-      buildPrompt(period, today),
+      mainPrompt,
       "main-turn",
-    );
+    ));
   } catch (retryError) {
     if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
       await cancelTurnQuietly(session);
     throw retryError;
   }
+}
+if (
+  !isOwnTurnResult(result.events, {
+    prompt: mainPrompt,
+    sentNotBefore,
+  })
+) {
+  console.error(
+    `rollup ${period}: result does not match the prompt just sent (stale stream cursor) — dropping session`,
+  );
+  logAbandoned(session.state, "stale-result");
+  try {
+    rmSync(SESSION_FILE, { force: true });
+  } catch {
+    /* курсор — кэш, его потеря не должна ронять ночь */
+  }
+  process.exit(1);
 }
 saveSession(session.state, sessionCreatedAt);
 

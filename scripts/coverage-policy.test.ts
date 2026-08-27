@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 232;
+const EXPECTED_PRODUCTION_COUNT = 233;
 const EXPECTED_INVENTORY_SHA256 =
-  "86aabf4601bb6c5d5d5d270da189bbd2ff765c72a37b452f278c9cc23d1a1957";
+  "364dc2a2fc67e8fcb465c059fe01b0b7d76e3d7b880287b514ed6adee28d50a0";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -116,6 +116,9 @@ const EXPECTED_INVENTORY_SHA256 =
 // `scripts/lib/update-check.test.ts` reports it at 100% lines, 92.16% branches and 100%
 // functions, with `scripts/check-update.ts` at 92.64% lines beside it, so the blind spot
 // stays 26.
+// The rollup stale-cursor workaround `scripts/lib/rollup-stale-cursor.ts` came next.
+// Scoped coverage over `scripts/lib/rollup-stale-cursor.test.ts` reports it, so the
+// blind spot stays 26.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

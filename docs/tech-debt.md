@@ -271,3 +271,18 @@ address there.
 Remove this item when Bot API exposes a plain-text projection of `rich_message` beside the
 blocks, or when eve upstream resolves the addressing before the update reaches the Bridge.
 Until then the workaround in a group is to reply to one of Iva's messages.
+
+## 16. Rollup stale-cursor workaround for vercel/eve#2461
+
+`scripts/lib/rollup-stale-cursor.ts` and the drain/ownership checks in
+`scripts/memory/rollup.ts` work around an open upstream bug
+([vercel/eve#2461](https://github.com/vercel/eve/issues/2461)): on a resumed
+session, eve's client `result()` reads from the saved stream cursor and stops at
+the first turn boundary without correlating it with the message just sent. Once
+the cursor lags, the nightly report is a replay of an old turn.
+
+The Iva-side workaround is two small layers around eve, not a second session
+system: drain `stream({ follow: false })` before every send into the parked
+session, and refuse a result whose `message.received` is not this Turn's prompt
+(per-execution nonce, `sentNotBefore` at send time). Remove both when a released
+eve correlates `result()` with the sent turn.
