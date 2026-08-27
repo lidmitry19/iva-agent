@@ -639,6 +639,104 @@ test("UPDATE и NOOP читают пустой history_entry как отсутс
   assert.match(after, /2026-08-26: Текущая истина/);
 });
 
+test("property: whitespace-only history_entry on UPDATE/NOOP matches omitting the field", async () => {
+  const blankHistory = fc.string({
+    unit: fc.constantFrom(" ", "\t", "\n", "\r"),
+    minLength: 0,
+    maxLength: 24,
+  });
+  const outcome = (result: WriteCardResult) => ({
+    ok: result.ok,
+    action: result.action,
+    error: result.error,
+    file: result.file,
+    status: result.status,
+    type: result.type,
+    matchedBy: result.matchedBy,
+  });
+  let counter = 0;
+  try {
+    await fc.assert(
+      fc.asyncProperty(blankHistory, async (historyEntry) => {
+        assert.equal(historyEntry.trim(), "");
+        const title = `Blank history property ${counter++}`;
+        const base = {
+          operation: "ADD" as const,
+          type: "note",
+          title,
+          description: "пробельная пустота не подделывает History",
+          tags: ["note", "blank"],
+          body: "Текущая истина.",
+        };
+        const created = await call(base);
+        assert.equal(created.ok, true, created.error);
+        const afterAdd = read(created.file);
+
+        const omittedUpdate = await call({
+          ...base,
+          operation: "UPDATE",
+          body: "Совместимый факт.",
+        });
+        const omittedUpdateOutcome = outcome(omittedUpdate);
+        const omittedUpdateFile = read(created.file);
+        assert.doesNotMatch(omittedUpdateFile, /^## History$/gm);
+
+        writeFileSync(join(VAULT, created.file), afterAdd);
+        const blankUpdate = await call({
+          ...base,
+          operation: "UPDATE",
+          body: "Совместимый факт.",
+          history_entry: historyEntry,
+        });
+        assert.deepEqual(outcome(blankUpdate), omittedUpdateOutcome);
+        assert.equal(read(created.file), omittedUpdateFile);
+        assert.doesNotMatch(read(created.file), /^## History$/gm);
+
+        const afterUpdate = omittedUpdateFile;
+        const omittedNoop = await call({ ...base, operation: "NOOP" });
+        const omittedNoopOutcome = outcome(omittedNoop);
+        const omittedNoopFile = read(created.file);
+
+        writeFileSync(join(VAULT, created.file), afterUpdate);
+        const blankNoop = await call({
+          ...base,
+          operation: "NOOP",
+          history_entry: historyEntry,
+        });
+        assert.deepEqual(outcome(blankNoop), omittedNoopOutcome);
+        assert.equal(read(created.file), omittedNoopFile);
+        assert.doesNotMatch(read(created.file), /^## History$/gm);
+
+        const beforeRefusal = read(created.file);
+        const forgedUpdate = await call({
+          ...base,
+          operation: "UPDATE",
+          body: "Ещё факт.",
+          history_entry: "2026-01-01: прежняя истина",
+        });
+        assert.equal(forgedUpdate.ok, false);
+        assert.match(forgedUpdate.error, /допустим только для SUPERSEDE/);
+        assert.equal(read(created.file), beforeRefusal);
+
+        const forgedNoop = await call({
+          ...base,
+          operation: "NOOP",
+          history_entry: "2026-01-01: прежняя истина",
+        });
+        assert.equal(forgedNoop.ok, false);
+        assert.match(forgedNoop.error, /NOOP не принимает/);
+        assert.equal(read(created.file), beforeRefusal);
+      }),
+      { numRuns: 40 },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const seed = /\bseed:\s*(-?\d+)/.exec(message)?.[1];
+    if (seed !== undefined) console.error(`PBT seed: ${seed}`);
+    throw error;
+  }
+});
+
 test("ADD отбрасывает пустой и длинный однострочный history_entry, не создавая пустых полей", async () => {
   const previousWarn = console.warn;
   const warnings: string[] = [];
