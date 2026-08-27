@@ -417,3 +417,54 @@ test("rollup.ts drains before every send, stamps send time, and refuses a foreig
     "refuse stale before saving the cursor",
   );
 });
+
+test("drain happens before every send and a foreign result is refused", async () => {
+  const order: string[] = [];
+  const prompt = attachRollupNonce(TONIGHT_PROMPT, "tonight");
+  const foreign = turn(OLD_PROMPT, OLD_REPORT, "2026-08-19T04:01:00.000Z");
+  const session = {
+    stream(options?: { follow?: boolean; signal?: AbortSignal }) {
+      if (options?.follow !== false) throw new Error("expected follow:false");
+      order.push("drain");
+      return {
+        async *[Symbol.asyncIterator]() {
+          /* empty tail: nothing parked ahead of send */
+        },
+      };
+    },
+    send() {
+      order.push("send");
+      return Promise.resolve();
+    },
+    result() {
+      order.push("result");
+      return Promise.resolve({ events: resultFromCursor(foreign, 0).events });
+    },
+  };
+  const drainBeforeSend = async (): Promise<void> => {
+    await drainStreamToTail(session);
+  };
+  await drainBeforeSend();
+  await session.send();
+  await drainBeforeSend();
+  await session.send();
+  await drainBeforeSend();
+  await session.send();
+  const result = await session.result();
+  assert.deepEqual(order, [
+    "drain",
+    "send",
+    "drain",
+    "send",
+    "drain",
+    "send",
+    "result",
+  ]);
+  assert.equal(
+    isOwnTurnResult(result.events, {
+      prompt,
+      sentNotBefore: sentNotBeforeIso(Date.parse("2026-08-24T04:00:00.000Z")),
+    }),
+    false,
+  );
+});
