@@ -1,0 +1,93 @@
+// Обход vercel/eve#2461: на резюмнутой сессии eve-клиент читает поток с сохранённого
+// streamIndex и останавливается на первой границе хода, не сверяя её с только что
+// отправленным сообщением. Отставший курсор превращает result() в чтение старого хода:
+// ночной отчёт уходит пятидневной давности, а падение реального хода не всплывает.
+//
+// Два слоя, оба временные: дочитать stream({follow:false}) до хвоста перед send и
+// отказаться от результата, в событиях которого нет нашего message.received. Промпт
+// несёт одноразовый nonce, чтобы повтор той же даты не принял чужой ход; нижняя
+// граница времени — момент send, без запасной минуты. Снять оба слоя, когда eve
+// свяжет result() с отправленным ходом (vercel/eve#2461).
+
+import { type ClientSession } from "eve/client";
+import { DEFAULT_TURN_TIMEOUT_MS } from "./rollup-turn.ts";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function attachRollupNonce(prompt: string, nonce: string): string {
+  return `${prompt}\n<!-- rollup-nonce ${nonce} -->`;
+}
+
+export function sentNotBeforeIso(nowMs: number = Date.now()): string {
+  return new Date(nowMs).toISOString();
+}
+
+export function isOwnTurnResult(
+  events: readonly unknown[],
+  {
+    prompt,
+    sentNotBefore,
+  }: {
+    readonly prompt: string;
+    readonly sentNotBefore: string;
+  },
+): boolean {
+  return events.some((event) => {
+    if (!isRecord(event) || event.type !== "message.received") return false;
+    if (!isRecord(event.data) || !isRecord(event.meta)) return false;
+    return (
+      event.data.message === prompt &&
+      typeof event.meta.at === "string" &&
+      event.meta.at >= sentNotBefore
+    );
+  });
+}
+
+export async function drainStreamToTail(
+  session: Pick<ClientSession, "stream">,
+  onError?: (error: Error) => void,
+  timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
+): Promise<void> {
+  // Зависший bounded-read иначе остановит ночь до guardedTurn(). AbortSignal —
+  // контракт stream() у eve: for-await его достаточно. Таймаут снимает ожидание,
+  // если next() сигнал игнорирует; return() не вызываем — без своей границы он
+  // сам может зависнуть.
+  const controller = new AbortController();
+  const { signal } = controller;
+  const timer = setTimeout(() => {
+    controller.abort(new Error("pre-send stream drain timed out"));
+  }, timeoutMs);
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    const fail = (): void => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error("pre-send stream drain timed out"),
+      );
+    };
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+  try {
+    await Promise.race([
+      (async () => {
+        for await (const event of session.stream({
+          follow: false,
+          signal,
+        })) {
+          void event;
+        }
+      })(),
+      timedOut,
+    ]);
+  } catch (error) {
+    onError?.(error instanceof Error ? error : new Error(String(error)));
+  } finally {
+    clearTimeout(timer);
+  }
+}

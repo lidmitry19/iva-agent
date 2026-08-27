@@ -7,6 +7,7 @@
 // Requires: a running agent (eve start) and a vault to write into. The processing rules
 // (scripts/memory/instructions/) ship with the repo. Date is in ASSISTANT_TIMEZONE.
 import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, type MessageResult, type SessionState } from "eve/client";
@@ -36,6 +37,12 @@ import {
   resolveTurnTimeoutMs,
   withTurnTimeout,
 } from "../lib/rollup-turn.ts";
+import {
+  attachRollupNonce,
+  drainStreamToTail,
+  isOwnTurnResult,
+  sentNotBeforeIso,
+} from "../lib/rollup-stale-cursor.ts";
 import { sendTelegramHtml } from "../lib/telegram-send.ts";
 
 type Period = "daily" | "weekly" | "monthly" | "yearly";
@@ -334,6 +341,23 @@ const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.session(saved.state) : client.session();
+// Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
+// Nonce делает промпт уникальным за этот прогон; drain сдвигает курсор на хвост
+// перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
+const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
+async function drainBeforeSend(label: string): Promise<void> {
+  await drainStreamToTail(
+    session,
+    (error) => {
+      console.error(
+        `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
+      );
+    },
+    TURN_TIMEOUT_MS,
+  );
+}
+if (saved) await drainBeforeSend("main-turn");
+const sentNotBefore = sentNotBeforeIso();
 let result;
 let accepted = false;
 let sendRejected = false;
@@ -341,7 +365,7 @@ let acceptedTurnResult: Promise<MessageResult> | undefined;
 try {
   result = await guardedTurn(
     session,
-    buildPrompt(period, today),
+    mainPrompt,
     "main-turn",
     (turnResult) => {
       accepted = true;
@@ -383,16 +407,29 @@ try {
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
   try {
-    result = await guardedTurn(
-      session,
-      buildPrompt(period, today),
-      "main-turn",
-    );
+    result = await guardedTurn(session, mainPrompt, "main-turn");
   } catch (retryError) {
     if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
       await cancelTurnQuietly(session);
     throw retryError;
   }
+}
+if (
+  !isOwnTurnResult(result.events, {
+    prompt: mainPrompt,
+    sentNotBefore,
+  })
+) {
+  console.error(
+    `rollup ${period}: result does not match the prompt just sent (stale stream cursor) — dropping session`,
+  );
+  logAbandoned(session.state, "stale-result");
+  try {
+    rmSync(SESSION_FILE, { force: true });
+  } catch {
+    /* курсор — кэш, его потеря не должна ронять ночь */
+  }
+  process.exit(1);
 }
 saveSession(session.state, sessionCreatedAt);
 
@@ -478,6 +515,7 @@ if (period === "daily") {
     // Таймаут здесь не заводит новую сессию: это просто «коррекция не удалась» — файл
     // перечитывается как есть, и дальше срабатывает существующая проверка капа.
     try {
+      await drainBeforeSend("core-correction");
       await guardedTurn(
         session,
         `Re-open ${CORE_PATH}: it is ${oldLength} characters, above the hard ${CORE_CAP}-character cap. ` +
@@ -577,6 +615,7 @@ if (REPORTS_TO_TELEGRAM[period]) {
     // Best-effort ход: отчёт уже доставлен, поэтому сбой или таймаут здесь только логируем —
     // ронять из-за подсказки о форматировании всю ночь незачем.
     try {
+      await drainBeforeSend("format-feedback");
       await guardedTurn(
         session,
         `The last report failed Telegram parse_mode=HTML (${r.error}) and went out as flat text. ` +
