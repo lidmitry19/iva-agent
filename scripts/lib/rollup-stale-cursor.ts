@@ -51,40 +51,21 @@ export async function drainStreamToTail(
   timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
 ): Promise<void> {
   // Зависший bounded-read иначе остановит ночь до guardedTurn(). AbortSignal —
-  // контракт stream() у eve: for-await его достаточно. Таймаут снимает ожидание,
-  // если next() сигнал игнорирует; return() не вызываем — без своей границы он
-  // сам может зависнуть.
+  // контракт stream() у eve: for-await его достаточно. По таймауту abort сигнала
+  // отклоняет pending next(); return() не вызываем — без своей границы он сам
+  // может зависнуть.
   const controller = new AbortController();
   const { signal } = controller;
   const timer = setTimeout(() => {
     controller.abort(new Error("pre-send stream drain timed out"));
   }, timeoutMs);
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    const fail = (): void => {
-      reject(
-        signal.reason instanceof Error
-          ? signal.reason
-          : new Error("pre-send stream drain timed out"),
-      );
-    };
-    if (signal.aborted) {
-      fail();
-      return;
-    }
-    signal.addEventListener("abort", fail, { once: true });
-  });
   try {
-    await Promise.race([
-      (async () => {
-        for await (const event of session.stream({
-          follow: false,
-          signal,
-        })) {
-          void event;
-        }
-      })(),
-      timedOut,
-    ]);
+    for await (const event of session.stream({
+      follow: false,
+      signal,
+    })) {
+      void event;
+    }
   } catch (error) {
     onError?.(error instanceof Error ? error : new Error(String(error)));
   } finally {

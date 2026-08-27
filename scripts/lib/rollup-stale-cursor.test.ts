@@ -250,9 +250,24 @@ test("drainStreamToTail finishes when both next and return hang past the timeout
     }): AsyncIterable<never> {
       if ((options ?? { follow: false }).follow !== false)
         throw new Error("expected follow:false");
+      const signal = options?.signal;
       return {
         [Symbol.asyncIterator]: () => ({
-          next: () => new Promise<IteratorResult<never>>(() => {}),
+          next: () =>
+            new Promise<IteratorResult<never>>((_resolve, reject) => {
+              const fail = (): void => {
+                reject(
+                  signal?.reason instanceof Error
+                    ? signal.reason
+                    : new Error("aborted"),
+                );
+              };
+              if (signal?.aborted) {
+                fail();
+                return;
+              }
+              signal?.addEventListener("abort", fail, { once: true });
+            }),
           return: () => new Promise<IteratorResult<never>>(() => {}),
         }),
       };
@@ -282,17 +297,10 @@ test("drainStreamToTail passes abort signal so a late next does not advance the 
     }): AsyncIterable<unknown> {
       hasSignal = options?.signal !== undefined;
       const signal = options?.signal;
-      signal?.addEventListener(
-        "abort",
-        () => {
-          closed = true;
-        },
-        { once: true },
-      );
       return {
         [Symbol.asyncIterator]: () => ({
           next: () =>
-            new Promise<IteratorResult<unknown>>((resolve) => {
+            new Promise<IteratorResult<unknown>>((resolve, reject) => {
               pendingResolve = (result) => {
                 if (closed || signal?.aborted) {
                   resolve({ done: true, value: undefined });
@@ -301,6 +309,19 @@ test("drainStreamToTail passes abort signal so a late next does not advance the 
                 streamIndex += 1;
                 resolve(result);
               };
+              const fail = (): void => {
+                closed = true;
+                reject(
+                  signal?.reason instanceof Error
+                    ? signal.reason
+                    : new Error("aborted"),
+                );
+              };
+              if (signal?.aborted) {
+                fail();
+                return;
+              }
+              signal?.addEventListener("abort", fail, { once: true });
             }),
           return: () => {
             closed = true;
