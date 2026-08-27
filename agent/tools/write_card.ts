@@ -300,7 +300,7 @@ export default defineTool({
     const file = id.file;
     const rel = relative(VAULT(), file).split(sep).join("/");
 
-    // Пустой/пробельный history_entry ничего не вытесняет и не подделывает архив: для UPDATE
+    // Пустой/пробельный history_entry ничего не вытесняет и не подделывает History: для UPDATE
     // и NOOP он равен отсутствующему — так же, как SUPERSEDE читает его через trim(). Модели,
     // заполняющие все поля схемы, шлют "" и без этого зацикливаются на одном отказе.
     const historyEntry = history_entry?.trim() ? history_entry : undefined;

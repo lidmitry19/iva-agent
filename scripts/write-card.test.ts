@@ -571,7 +571,7 @@ test("UPDATE и NOOP читают пустой history_entry как отсутс
     operation: "ADD",
     type: "note",
     title: "Blank history entry",
-    description: "пустое поле не подделывает архив",
+    description: "пустое поле не подделывает History",
     tags: ["note", "blank"],
     body: "Текущая истина.",
   };
