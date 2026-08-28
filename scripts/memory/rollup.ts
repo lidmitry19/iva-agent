@@ -43,6 +43,12 @@ import {
   isOwnTurnResult,
   sentNotBeforeIso,
 } from "../lib/rollup-stale-cursor.ts";
+import {
+  BackgroundSessionLimitUpgradeRequiredError,
+  BackgroundTokenBudgetExceededError,
+  createBackgroundSessionBudget,
+} from "../lib/session-budget.ts";
+import { isExternalUsageLimit } from "../lib/provider-limit.ts";
 import { sendTelegramHtml } from "../lib/telegram-send.ts";
 
 type Period = "daily" | "weekly" | "monthly" | "yearly";
@@ -287,6 +293,8 @@ const TURN_TIMEOUT_MS = resolveTurnTimeoutMs(
     warn: (message) => console.error(`rollup ${period}: ${message}`),
   },
 );
+let tokenBudget = createBackgroundSessionBudget();
+
 const guardedTurn = (
   session: ReturnType<typeof client.session>,
   prompt: string,
@@ -299,7 +307,10 @@ const guardedTurn = (
       const send = async () => {
         const sentNotBefore = sentNotBeforeIso();
         return {
-          response: await session.send(prompt),
+          result: await tokenBudget.send(session, prompt, {
+            onAccepted,
+            onSendRejected,
+          }),
           sentNotBefore,
         };
       };
@@ -321,9 +332,7 @@ const guardedTurn = (
         onSendRejected();
         throw error;
       }
-      const result = sent.response.result();
-      onAccepted(result);
-      return { result: await result, sentNotBefore: sent.sentNotBefore };
+      return { result: sent.result, sentNotBefore: sent.sentNotBefore };
     },
     { timeoutMs: TURN_TIMEOUT_MS, label },
   );
@@ -362,7 +371,7 @@ let session = saved ? client.session(saved.state) : client.session();
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
 // Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
 // на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
-const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
+let mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
 let result: MessageResult;
 let sentNotBefore: string;
 let accepted = false;
@@ -382,6 +391,35 @@ try {
     },
   ));
 } catch (e) {
+  if (e instanceof BackgroundTokenBudgetExceededError || isExternalUsageLimit(e)) {
+    throw e;
+  }
+  if (e instanceof BackgroundSessionLimitUpgradeRequiredError) {
+    if (!e.stopConfirmed) throw e;
+    logAbandoned(session.state, "session-limit-upgrade");
+    session = client.session();
+    sessionCreatedAt = Date.now();
+    tokenBudget = createBackgroundSessionBudget();
+    mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
+    try {
+      ({ result, sentNotBefore } = await guardedTurn(
+        session,
+        mainPrompt,
+        "main-turn",
+        (turnResult) => {
+          accepted = true;
+          acceptedTurnResult = turnResult;
+        },
+        () => {
+          sendRejected = true;
+        },
+      ));
+    } catch (retryError) {
+      if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
+        await cancelTurnQuietly(session);
+      throw retryError;
+    }
+  } else {
   // The parked session may be gone (iva reset quarantined the store) or hung on resume —
   // fall back to a fresh one once only after proving the old turn cannot keep writing.
   const hung = (e as { code?: string }).code === "ROLLUP_TURN_TIMEOUT";
@@ -422,6 +460,7 @@ try {
     if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
       await cancelTurnQuietly(session);
     throw retryError;
+  }
   }
 }
 if (
