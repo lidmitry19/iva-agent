@@ -75,6 +75,21 @@ void test("repair bootstrap accepts the renamed repository alongside the old nam
   );
 });
 
+void test("repair bootstrap accepts only the maintainer-owned Iva fork", () => {
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/lidmitry19/iva-agent.git"),
+    true,
+  );
+  assert.equal(
+    isOfficialIvaOrigin("git@github.com:lidmitry19/iva-agent.git"),
+    true,
+  );
+  assert.equal(isOfficialIvaOrigin("https://github.com/lidmitry19/iva.git"), false);
+  assert.equal(
+    isOfficialIvaOrigin("https://github.com/another-user/iva-agent.git"),
+    false,
+  );
+});
 void test("repair bootstrap validates the checkout before changing files", () => {
   const root = mkdtempSync(join(tmpdir(), "iva-repair-"));
   git(root, "init", "-b", "main");
@@ -97,7 +112,7 @@ void test("repair bootstrap validates the checkout before changing files", () =>
   git(root, "remote", "set-url", "origin", "git@example.com:smixs/iva.git");
   assert.throws(
     () => validateOfficialCheckout(root),
-    /official smixs\/iva-agent/,
+    /trusted Iva GitHub repository/,
   );
 });
 
