@@ -1,7 +1,7 @@
 // Shared path resolution for agent/schedules/*.ts — root/dataDir/statusPath/lockPath were
 // duplicated identically across all 5 schedule files; one place to change if the status
 // filename, lock filename, or ASSISTANT_DATA_DIR resolution rule ever changes.
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { dataDir } from "./data-dir.ts";
 
 export interface SchedulePaths {
@@ -35,5 +35,20 @@ export function memoryRollupJob(period: MemoryPeriod) {
     nodeBin: process.execPath,
     lockPath: memoryLockPath,
     statusPath,
+    ...(period === "daily"
+      ? {
+          nightHealth: {
+            job: "memoryRollup" as const,
+            artifacts: (targetDate: string) => [
+              resolve(
+                process.env.ASSISTANT_VAULT_DIR ?? join(root, "vault"),
+                "summaries",
+                "daily",
+                `${targetDate}.md`,
+              ),
+            ],
+          },
+        }
+      : {}),
   };
 }

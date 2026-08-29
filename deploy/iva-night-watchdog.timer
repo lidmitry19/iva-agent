@@ -1,0 +1,10 @@
+[Unit]
+Description=Iva fail-loud nightly watchdog (~05:00 local)
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 __TIMEZONE__
+Persistent=true
+Unit=iva-night-watchdog.service
+
+[Install]
+WantedBy=timers.target

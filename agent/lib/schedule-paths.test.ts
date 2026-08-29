@@ -15,6 +15,15 @@ const PROBE_PROGRAM = `
 `;
 
 type MemoryPeriod = "daily" | "weekly" | "monthly" | "yearly";
+type MemoryJob = {
+  name: string;
+  argv: string[];
+  root: string;
+  nodeBin: string;
+  lockPath: string;
+  statusPath: string;
+  nightHealth?: { job: string };
+};
 
 function temporaryDirectory(t: TestContext): string {
   const directory = realpathSync(
@@ -94,13 +103,18 @@ await test("memoryRollupJob returns the exact command contract for every period"
   ];
 
   for (const period of periods) {
-    assert.deepEqual(probe({ cwd: root, dataDir: "schedule-data", period }), {
+    const job = probe({ cwd: root, dataDir: "schedule-data", period }) as MemoryJob;
+    assert.deepEqual(job, {
       name: `memory-${period}`,
       argv: ["scripts/memory/rollup.ts", period],
       root,
       nodeBin: process.execPath,
       lockPath: join(root, ".memory.lock"),
       statusPath: join(root, "schedule-data", "rollup-status.json"),
+      ...(period === "daily" ? { nightHealth: { job: "memoryRollup" } } : {}),
     });
+    if (period === "daily") {
+      assert.equal(job.nightHealth?.job, "memoryRollup");
+    } else assert.equal(job.nightHealth, undefined);
   }
 });

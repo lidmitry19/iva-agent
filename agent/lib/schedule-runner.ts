@@ -16,6 +16,12 @@ import {
   releaseFileLock,
   writeFileAtomicSync,
 } from "./fs-atomic.ts";
+import {
+  markNightJob,
+  nightTargetDate,
+  notifyNightHealth,
+  type NightJobName,
+} from "../../scripts/lib/night-health.ts";
 
 // A repeat within this window is almost certainly a double-fire (a Nitro schedule tick
 // racing a catch-up run, or a manual retrigger) rather than a genuine second cron slot —
@@ -72,6 +78,12 @@ export interface RunScheduledJobOptions {
   readonly killImpl?: (pid: number, signal: NodeJS.Signals) => unknown;
   readonly now?: () => number;
   readonly log?: (...args: unknown[]) => void;
+  /** Optional fail-loud record for jobs which are run by Eve rather than systemd. */
+  readonly nightHealth?: {
+    readonly job: NightJobName;
+    readonly artifacts: (targetDate: string) => readonly string[];
+    readonly timeZone?: string;
+  };
 }
 
 export interface RunScheduledJobResult {
@@ -204,10 +216,30 @@ export async function runScheduledJob(
     now = () => Date.now(),
     log = (...args: unknown[]) =>
       console.log(new Date().toISOString(), ...args),
+    nightHealth,
   }: RunScheduledJobOptions = {} as RunScheduledJobOptions,
 ): Promise<RunScheduledJobResult> {
   let reserved = false;
   let startedAt = now();
+  const nightTarget = nightHealth
+    ? nightTargetDate(nightHealth.timeZone, new Date(now()))
+    : null;
+  const updateNightHealth = async (
+    state: "running" | "success" | "failed",
+    error?: unknown,
+  ): Promise<void> => {
+    if (!nightHealth || !nightTarget) return;
+    const dataDir = resolveDataDir(root ?? process.cwd(), env.ASSISTANT_DATA_DIR);
+    const manifest = markNightJob(dataDir, nightHealth.job, {
+      targetDate: nightTarget,
+      timeZone: nightHealth.timeZone,
+      state,
+      artifacts: nightHealth.artifacts(nightTarget),
+      error,
+      now: new Date(now()),
+    });
+    await notifyNightHealth(dataDir, manifest, nightHealth.job);
+  };
   try {
     if (statusPath) {
       const admitted = await withStatusLock(statusPath, (acquired) => {
@@ -273,6 +305,7 @@ export async function runScheduledJob(
     }
 
     log(`schedule-runner: ${name} start`);
+    await updateNightHealth("running");
 
     const cmd = lockPath ? "flock" : (nodeBin as string);
     const args = lockPath
@@ -430,6 +463,11 @@ export async function runScheduledJob(
       if (completed) reserved = false;
     }
 
+    await updateNightHealth(
+      ok ? "success" : "failed",
+      ok ? undefined : outcome.error ?? `exit=${outcome.code ?? "null"}${outcome.signal ? ` signal=${outcome.signal}` : ""}`,
+    );
+
     return { skipped: false, ok, code: outcome.code, signal: outcome.signal };
   } catch (error) {
     try {
@@ -439,6 +477,7 @@ export async function runScheduledJob(
     } catch {
       // logging itself must never be able to throw out of this function
     }
+    await updateNightHealth("failed", error).catch(() => undefined);
     return { skipped: false, ok: false, error };
   } finally {
     // Belt-and-suspenders: if something threw between reserving and the normal

@@ -1,4 +1,5 @@
 import { createAccountCommands } from "./account.ts";
+import { createBitrixCommand } from "./bitrix.ts";
 import { createConfigCommand } from "./config.ts";
 import { createDoctorCommand } from "./doctor.ts";
 import { createNotifyCommand } from "./notify.ts";
@@ -62,6 +63,7 @@ export function createCliMain(root: string) {
   const cmdNotify = createNotifyCommand(runtime);
   const cmdRemind = createRemindCommand(runtime);
   const cmdPost = createPostCommand(runtime);
+  const cmdBitrix = createBitrixCommand();
   const legacyUpdate = createUpdateCommand({
     runtime,
     systemdLifecycle,
@@ -107,6 +109,7 @@ ${C.b}Commands:${C.x}
   ${C.c}iva notify${C.x} <text>    send one Telegram message verbatim
   ${C.c}iva remind${C.x} <text>    let the agent judge one Reminder, then send it to Telegram
   ${C.c}iva post${C.x} --md-file <p>  rich Telegram post to the digest chat or an allowlisted --chat
+  ${C.c}iva bitrix sync --daily  run the read-only Bitrix sync through the package CLI
   ${C.c}iva userbot${C.x} [creds|setup|status|diagnose --json|off]  personal-account userbot proxy
   ${C.c}iva logs${C.x} [poll]     agent logs (or the Telegram bridge) -f
   ${C.c}iva uninstall${C.x}       remove units and the command (--purge — delete code+vault)
@@ -132,6 +135,7 @@ ${C.b}Commands:${C.x}
     notify: cmdNotify,
     remind: cmdRemind,
     post: cmdPost,
+    bitrix: cmdBitrix,
     start: services.cmdStart,
     stop: services.cmdStop,
     logs: services.cmdLogs,

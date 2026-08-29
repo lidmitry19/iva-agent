@@ -1,0 +1,13 @@
+[Unit]
+Description=Iva fail-loud night watchdog
+After=network-online.target
+
+[Service]
+UMask=0077
+Type=oneshot
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__PROJECT_DIR__/.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__NODE_BIN__ --env-file=.env scripts/night-watchdog.ts
+NoNewPrivileges=true
+PrivateTmp=true

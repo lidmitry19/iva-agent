@@ -33,6 +33,7 @@ test("runtime exposes the CLI primitives and shared unit constants", async (t) =
     "C",
     "DEFAULT_PORT",
     "ENV_PATH",
+    "NIGHT_WATCHDOG_TIMER",
     "NODE",
     "NODE_BIN_DIR",
     "NPM",
@@ -81,8 +82,10 @@ test("runtime exposes the CLI primitives and shared unit constants", async (t) =
   assert.equal(runtime.BRAIN_SERVICE, "iva-brain.service");
   assert.equal(runtime.BRAIN_TIMER, "iva-brain.timer");
   assert.equal(runtime.UPDATE_TIMER, "iva-update-check.timer");
+  assert.equal(runtime.NIGHT_WATCHDOG_TIMER, "iva-night-watchdog.timer");
   assert.deepEqual(runtime.TIMERS, [
     "iva-brain.timer",
+    "iva-night-watchdog.timer",
     "iva-update-check.timer",
   ]);
   assert.equal(runtime.SVC_USERBOT, "iva-telegram-userbot.service");

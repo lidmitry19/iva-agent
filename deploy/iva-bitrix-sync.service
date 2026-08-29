@@ -8,6 +8,8 @@ Type=oneshot
 WorkingDirectory=__PROJECT_DIR__
 EnvironmentFile=__PROJECT_DIR__/.env
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=__NODE_BIN__ --env-file=.env scripts/bitrix-sync.ts --daily
+# Invoke the package CLI. A version flip can remove a source .ts path while the
+# systemd unit survives; bin/iva.mjs is the versioned, supported entrypoint.
+ExecStart=__NODE_BIN__ __PROJECT_DIR__/bin/iva.mjs bitrix sync --daily
 NoNewPrivileges=true
 PrivateTmp=true
