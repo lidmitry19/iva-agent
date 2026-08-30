@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { VERSION_DIRECTORY_PATTERN } from "./data-dir.ts";
 
 export const NIGHT_HEALTH_VERSION = 1;
 export const NIGHT_JOBS = ["memoryRollup", "bitrixSync", "digest"] as const;
@@ -71,7 +73,10 @@ export function nightManifestPath(dataDir: string, targetDate: string): string {
   return join(healthDirectory(dataDir), `${targetDate}.json`);
 }
 
-function emptyManifest(targetDate: string, codeVersion: string): NightHealthManifest {
+function emptyManifest(
+  targetDate: string,
+  codeVersion: string,
+): NightHealthManifest {
   return {
     version: NIGHT_HEALTH_VERSION,
     targetDate,
@@ -82,6 +87,26 @@ function emptyManifest(targetDate: string, codeVersion: string): NightHealthMani
       NIGHT_JOBS.map((name) => [name, { state: "idle", artifacts: [] }]),
     ) as unknown as Record<NightJobName, NightJob>,
   };
+}
+
+/** Immutable installs carry the exact release+commit+overlay in their directory name. */
+export function detectCodeVersion(root = process.cwd()): string {
+  try {
+    const release = basename(realpathSync(root));
+    if (VERSION_DIRECTORY_PATTERN.test(release)) return release;
+  } catch {
+    // A checkout or damaged cwd can still report its package version below.
+  }
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(join(root, "package.json"), "utf8"),
+    );
+    const version = (value as { version?: unknown } | null)?.version;
+    if (typeof version === "string" && version.trim()) return version.trim();
+  } catch {
+    // The explicit npm value is the final non-unknown fallback.
+  }
+  return process.env.npm_package_version?.trim() || "unknown";
 }
 
 function isManifest(value: unknown): value is NightHealthManifest {
@@ -144,7 +169,10 @@ function cleanedError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return raw
     .replace(/https?:\/\/[^\s]+/giu, "<url>")
-    .replace(/(?:token|secret|password|authorization)\s*[=:]\s*\S+/giu, "$1=<redacted>")
+    .replace(
+      /(?:token|secret|password|authorization)\s*[=:]\s*\S+/giu,
+      "$1=<redacted>",
+    )
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 360);
@@ -155,7 +183,8 @@ export function verifyNightArtifacts(paths: readonly string[]): string | null {
   for (const path of paths) {
     try {
       const stat = statSync(path);
-      if (!stat.isFile() || stat.size === 0) return `artifact missing or empty: ${path}`;
+      if (!stat.isFile() || stat.size === 0)
+        return `artifact missing or empty: ${path}`;
       if (path.endsWith(".json")) JSON.parse(readFileSync(path, "utf8"));
     } catch {
       return `artifact missing or corrupt: ${path}`;
@@ -179,9 +208,10 @@ export function markNightJob(
   },
 ): NightHealthManifest {
   const targetDate = input.targetDate ?? nightTargetDate(input.timeZone);
+  const codeVersion = input.codeVersion ?? detectCodeVersion();
   const manifest =
     readNightHealth(dataDir, targetDate) ??
-    emptyManifest(targetDate, input.codeVersion ?? process.env.npm_package_version ?? "unknown");
+    emptyManifest(targetDate, codeVersion);
   const now = iso(input.now);
   const prior = manifest.jobs[job];
   const artifacts = [...(input.artifacts ?? prior.artifacts)];
@@ -196,25 +226,58 @@ export function markNightJob(
   }
   manifest.jobs[job] = {
     state,
-    startedAt: state === "running" ? now : prior.startedAt ?? now,
+    startedAt: state === "running" ? now : (prior.startedAt ?? now),
     ...(state === "running" ? {} : { finishedAt: now }),
     artifacts,
     ...(error ? { error } : {}),
     ...(input.mode ? { mode: input.mode } : {}),
   };
   manifest.updatedAt = now;
-  if (input.codeVersion) manifest.codeVersion = input.codeVersion;
+  if (input.codeVersion || manifest.codeVersion === "unknown")
+    manifest.codeVersion = codeVersion;
   saveNightHealth(dataDir, manifest);
   return manifest;
 }
 
-type NoticeState = Record<string, { essence: string; sentAt: string }>;
+/** A watchdog must not erase the original job failure merely to report that it saw it. */
+export function markNightWatchdogFailure(
+  dataDir: string,
+  job: NightJobName,
+  input: {
+    targetDate: string;
+    timeZone?: string;
+    artifacts?: readonly string[];
+    reason: string;
+    now?: Date;
+  },
+): NightHealthManifest {
+  const existing = readNightHealth(dataDir, input.targetDate);
+  if (existing?.jobs[job].state === "failed") return existing;
+  return markNightJob(dataDir, job, {
+    targetDate: input.targetDate,
+    timeZone: input.timeZone,
+    state: "failed",
+    artifacts: input.artifacts ?? existing?.jobs[job].artifacts ?? [],
+    error: `watchdog: ${input.reason}`,
+    now: input.now,
+  });
+}
+
+type NoticeEntry = {
+  essence: string;
+  sentAt: string;
+  targetDate?: string;
+  runId?: string;
+};
+type NoticeState = Record<string, NoticeEntry>;
 function noticesPath(dataDir: string): string {
   return join(healthDirectory(dataDir), "notices.json");
 }
 function readNotices(dataDir: string): NoticeState {
   try {
-    const value: unknown = JSON.parse(readFileSync(noticesPath(dataDir), "utf8"));
+    const value: unknown = JSON.parse(
+      readFileSync(noticesPath(dataDir), "utf8"),
+    );
     return value && typeof value === "object" && !Array.isArray(value)
       ? (value as NoticeState)
       : {};
@@ -223,16 +286,32 @@ function readNotices(dataDir: string): NoticeState {
   }
 }
 
+function noticeEntriesForJob(
+  state: NoticeState,
+  job: NightJobName,
+): Array<[string, NoticeEntry]> {
+  return Object.entries(state).filter(
+    ([key]) => key === job || key.endsWith(`:${job}`),
+  );
+}
+
+function clearJobNotices(state: NoticeState, job: NightJobName): void {
+  for (const [key] of noticeEntriesForJob(state, job)) delete state[key];
+}
+
 async function telegram(text: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_DIGEST_CHAT_ID;
   if (!token || !chat) return false;
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chat, text }),
-    });
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chat, text }),
+      },
+    );
     return response.ok;
   } catch {
     return false;
@@ -246,21 +325,37 @@ export async function notifyNightHealth(
   job: NightJobName,
   send: (text: string) => Promise<boolean> = telegram,
 ): Promise<void> {
-  const key = `${manifest.targetDate}:${job}`;
   const state = readNotices(dataDir);
+  const prior = noticeEntriesForJob(state, job).sort((left, right) =>
+    right[1].sentAt.localeCompare(left[1].sentAt),
+  )[0]?.[1];
   const current = manifest.jobs[job];
   if (current.state === "failed") {
     const essence = current.error ?? "unknown failure";
-    if (state[key]?.essence === essence) return;
-    if (await send(`⚠️ IVA night health: ${job} failed for ${manifest.targetDate} (${manifest.runId}). ${essence}`)) {
-      state[key] = { essence, sentAt: iso() };
+    if (prior?.essence === essence) return;
+    if (
+      await send(
+        `⚠️ IVA night health: ${job} failed for ${manifest.targetDate} (${manifest.runId}). ${essence}`,
+      )
+    ) {
+      clearJobNotices(state, job);
+      state[job] = {
+        essence,
+        sentAt: iso(),
+        targetDate: manifest.targetDate,
+        runId: manifest.runId,
+      };
       atomicJson(noticesPath(dataDir), state);
     }
     return;
   }
-  if (current.state === "success" && state[key]) {
-    if (await send(`✅ IVA night health: ${job} recovered for ${manifest.targetDate} (${manifest.runId}).`)) {
-      delete state[key];
+  if (current.state === "success" && prior) {
+    if (
+      await send(
+        `✅ IVA night health: ${job} recovered for ${manifest.targetDate} (${manifest.runId}).`,
+      )
+    ) {
+      clearJobNotices(state, job);
       atomicJson(noticesPath(dataDir), state);
     }
   }

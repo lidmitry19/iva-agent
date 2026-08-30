@@ -17,6 +17,18 @@ type BitrixMetadata = {
   lastError?: string | null;
 };
 
+type BitrixFailure = { taskId: string; code: string };
+
+/** Keep alerts actionable without exposing task titles or any Bitrix payload. */
+export function bitrixFailureMessage(failed: readonly BitrixFailure[]): string {
+  const shown = failed
+    .slice(0, 5)
+    .map(({ taskId, code }) => `${taskId}:${code}`)
+    .join(", ");
+  const remaining = failed.length > 5 ? `, +${failed.length - 5} more` : "";
+  return `daily sync has ${failed.length} failed task(s): ${shown}${remaining}`;
+}
+
 function metadataPath(dataDir: string): string {
   return join(dataDir, "bitrix-sync", "health.json");
 }
@@ -33,7 +45,10 @@ function readMetadata(path: string): BitrixMetadata {
 }
 
 function writeMetadata(path: string, patch: BitrixMetadata): void {
-  writeFileAtomicSync(path, `${JSON.stringify({ ...readMetadata(path), ...patch }, null, 2)}\n`);
+  writeFileAtomicSync(
+    path,
+    `${JSON.stringify({ ...readMetadata(path), ...patch }, null, 2)}\n`,
+  );
 }
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
@@ -49,34 +64,73 @@ export async function runBitrixSync(args: readonly string[]): Promise<void> {
   const cacheHealth = metadataPath(dataDir);
   const nightly = args.includes("--daily");
   if (nightly)
-    markNightJob(dataDir, "bitrixSync", { targetDate, timeZone, state: "running", artifacts: [cacheHealth] });
+    markNightJob(dataDir, "bitrixSync", {
+      targetDate,
+      timeZone,
+      state: "running",
+      artifacts: [cacheHealth],
+    });
   try {
-    writeMetadata(cacheHealth, { lastAttemptAt: new Date().toISOString(), lastError: null });
+    writeMetadata(cacheHealth, {
+      lastAttemptAt: new Date().toISOString(),
+      lastError: null,
+    });
     const { BitrixTaskService } = await import("../agent/bitrix/service.ts");
     const service = new BitrixTaskService();
     if (args.includes("--health")) {
-      console.log(JSON.stringify({ operation: "health", ...(await service.health()) }));
+      console.log(
+        JSON.stringify({ operation: "health", ...(await service.health()) }),
+      );
       return;
     }
     const taskId = valueAfter(args, "--task");
     if (taskId) {
       const result = await service.syncTask(taskId);
-      writeMetadata(cacheHealth, { lastSuccessAt: new Date().toISOString(), lastError: null });
-      console.log(JSON.stringify({ operation: "sync_task", taskId: result.taskId, result: result.outcome, syncedAt: result.syncedAt }));
+      writeMetadata(cacheHealth, {
+        lastSuccessAt: new Date().toISOString(),
+        lastError: null,
+      });
+      console.log(
+        JSON.stringify({
+          operation: "sync_task",
+          taskId: result.taskId,
+          result: result.outcome,
+          syncedAt: result.syncedAt,
+        }),
+      );
       return;
     }
-    if (!nightly) throw new Error("Usage: bitrix sync --health | --task <id> | --daily");
+    if (!nightly)
+      throw new Error("Usage: bitrix sync --health | --task <id> | --daily");
     const result = await service.syncDaily(3);
     console.log(JSON.stringify({ operation: "daily_sync", ...result }));
-    if (result.failed.length) throw new Error(`daily sync has ${result.failed.length} failed task(s)`);
-    writeMetadata(cacheHealth, { lastSuccessAt: new Date().toISOString(), lastError: null });
-    const manifest = markNightJob(dataDir, "bitrixSync", { targetDate, timeZone, state: "success", artifacts: [cacheHealth] });
+    if (result.failed.length)
+      throw new Error(bitrixFailureMessage(result.failed));
+    writeMetadata(cacheHealth, {
+      lastSuccessAt: new Date().toISOString(),
+      lastError: null,
+    });
+    const manifest = markNightJob(dataDir, "bitrixSync", {
+      targetDate,
+      timeZone,
+      state: "success",
+      artifacts: [cacheHealth],
+    });
     await notifyNightHealth(dataDir, manifest, "bitrixSync");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    writeMetadata(cacheHealth, { lastAttemptAt: new Date().toISOString(), lastError: detail });
+    writeMetadata(cacheHealth, {
+      lastAttemptAt: new Date().toISOString(),
+      lastError: detail,
+    });
     if (nightly) {
-      const manifest = markNightJob(dataDir, "bitrixSync", { targetDate, timeZone, state: "failed", artifacts: [cacheHealth], error });
+      const manifest = markNightJob(dataDir, "bitrixSync", {
+        targetDate,
+        timeZone,
+        state: "failed",
+        artifacts: [cacheHealth],
+        error,
+      });
       await notifyNightHealth(dataDir, manifest, "bitrixSync");
     }
     throw error;
@@ -85,7 +139,13 @@ export async function runBitrixSync(args: readonly string[]): Promise<void> {
 
 if (isEntrypoint(import.meta.url)) {
   runBitrixSync(process.argv.slice(2)).catch((error: unknown) => {
-    console.error(JSON.stringify({ operation: "bitrix_sync", result: "failed", code: "unexpected_error" }));
+    console.error(
+      JSON.stringify({
+        operation: "bitrix_sync",
+        result: "failed",
+        code: "unexpected_error",
+      }),
+    );
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   });
