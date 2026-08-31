@@ -166,6 +166,7 @@ test("guard creation cleans ambiguous writes and deceptive delete outcomes", asy
     {
       name: "write reports failure after creating the ref",
       cleanupFault: "",
+      verificationFault: "",
       writeFault: true,
     },
     {
@@ -173,11 +174,19 @@ test("guard creation cleans ambiguous writes and deceptive delete outcomes", asy
       cleanupFault:
         "  printf '%s\\n' 'injected guard cleanup failure' >&2\n" +
         "  exit 92\n",
+      verificationFault: "",
       writeFault: false,
     },
     {
       name: "first cleanup delete reports false success",
       cleanupFault: "  exit 0\n",
+      verificationFault: "",
+      writeFault: false,
+    },
+    {
+      name: "cleanup verification fails silently",
+      cleanupFault: "  exit 0\n",
+      verificationFault: "  exit 92\n",
       writeFault: false,
     },
   ] as const;
@@ -213,6 +222,12 @@ test("guard creation cleans ambiguous writes and deceptive delete outcomes", asy
             ? `if [ "$1" = update-ref ] && [ "$2" = -d ] && [ ! -f ${JSON.stringify(cleanupFault)} ]; then\n` +
               `  : > ${JSON.stringify(cleanupFault)}\n` +
               entry.cleanupFault +
+              "fi\n"
+            : "") +
+          (entry.verificationFault
+            ? `if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = --quiet ] && [ ! -f ${JSON.stringify(cleanupFault)}.verify ]; then\n` +
+              `  : > ${JSON.stringify(cleanupFault)}.verify\n` +
+              entry.verificationFault +
               "fi\n"
             : ""),
       );

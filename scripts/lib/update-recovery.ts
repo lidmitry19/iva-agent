@@ -862,7 +862,7 @@ export class UpdateRecoveryOwner {
         "--quiet",
         this.#ref,
       ]);
-      if (remaining.code !== 0 && !remaining.stderr) return;
+      if (remaining.code === 1 && !remaining.stderr) return;
       if (remaining.code === 0 && remaining.stdout !== oid)
         throw new Error("recovery ref ownership changed before cleanup");
       if (remaining.code !== 0)
