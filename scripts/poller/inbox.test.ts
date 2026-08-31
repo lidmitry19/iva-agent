@@ -70,6 +70,10 @@ function inboxDocument(
   );
 }
 
+function promotionBackoff() {
+  return new Map<string, { failures: number; nextAttemptAt: number }>();
+}
+
 function callback(updateId: number, fromId = 42): TelegramQueueUpdate {
   return {
     update_id: updateId,
@@ -227,6 +231,7 @@ void test("promotion publishes the delivery item before removing raw ownership",
   let document = inboxDocument(update(101, "first"), update(102, "second"));
   const events: string[] = [];
   const remaining = await promoteReadyInbox({
+    backoff: promotionBackoff(),
     now: () => 1_000,
     collectorOptions: { quietMs: 800 },
     loadImpl: () => Promise.resolve(document),
@@ -250,6 +255,7 @@ void test("failed promotion keeps every raw part for retry", async () => {
   let acknowledgements = 0;
   assert.equal(
     await promoteReadyInbox({
+      backoff: promotionBackoff(),
       now: () => 1_000,
       collectorOptions: { quietMs: 800 },
       loadImpl: () => Promise.resolve(document),
@@ -259,9 +265,58 @@ void test("failed promotion keeps every raw part for retry", async () => {
         return Promise.resolve();
       },
     }),
-    2,
+    0,
   );
   assert.equal(acknowledgements, 0);
+});
+
+void test("rejected inbox promotion backs off the key until its next attempt", async () => {
+  const document = inboxDocument(update(101, "retry me"));
+  const backoff = promotionBackoff();
+  let currentNow = 1_000;
+  let routes = 0;
+  const promote = () =>
+    promoteReadyInbox({
+      backoff,
+      now: () => currentNow,
+      collectorOptions: { quietMs: 0 },
+      loadImpl: () => Promise.resolve(document),
+      routeImpl: () => {
+        routes++;
+        return Promise.resolve("rejected");
+      },
+    });
+
+  assert.equal(await promote(), 0);
+  assert.equal(routes, 1);
+  currentNow = 15_999;
+  assert.equal(await promote(), 0);
+  assert.equal(routes, 1);
+  currentNow = 16_000;
+  assert.equal(await promote(), 0);
+  assert.equal(routes, 2);
+});
+
+void test("successful inbox promotion clears prior backoff state", async () => {
+  let document = inboxDocument(update(101, "deliver me"));
+  const backoff = promotionBackoff();
+  backoff.set("1::42", { failures: 2, nextAttemptAt: 1_000 });
+
+  assert.equal(
+    await promoteReadyInbox({
+      backoff,
+      now: () => 1_000,
+      collectorOptions: { quietMs: 0 },
+      loadImpl: () => Promise.resolve(document),
+      routeImpl: () => Promise.resolve("delivered"),
+      acknowledgeImpl: (key, updateId) => {
+        document = removeQueueHead(document, key, updateId);
+        return Promise.resolve();
+      },
+    }),
+    0,
+  );
+  assert.equal(backoff.has("1::42"), false);
 });
 
 void test("callback rejection, downstream drop, and enqueue failure all retain inbox ownership", async () => {
@@ -270,6 +325,7 @@ void test("callback rejection, downstream drop, and enqueue failure all retain i
     let acknowledgements = 0;
     assert.equal(
       await promoteReadyInbox({
+        backoff: promotionBackoff(),
         now: () => 0,
         loadImpl: () => Promise.resolve(document),
         routeImpl: () => Promise.resolve(result),
@@ -278,7 +334,7 @@ void test("callback rejection, downstream drop, and enqueue failure all retain i
           return Promise.resolve();
         },
       }),
-      1,
+      0,
     );
     assert.equal(acknowledgements, 0, result);
   }
@@ -288,6 +344,7 @@ void test("a terminally dropped update leaves the inbox instead of looping forev
   let document = inboxDocument(update(101, "reply to a closed session"));
   const routed: number[] = [];
   const remaining = await promoteReadyInbox({
+    backoff: promotionBackoff(),
     now: () => 1_000,
     collectorOptions: { quietMs: 800 },
     loadImpl: () => Promise.resolve(document),
@@ -333,10 +390,12 @@ void test("property: terminal results never loop while transient results never l
         );
         const deliveries: number[] = [];
         const attempts = new Map<number, number>();
+        const backoff = promotionBackoff();
 
         for (let pass = 0; pass < passes; pass++) {
           await promoteReadyInbox({
-            now: () => 1_000,
+            backoff,
+            now: () => pass * 300_001,
             collectorOptions: { quietMs: 0 },
             loadImpl: () => Promise.resolve(document),
             routeImpl: (candidate) => {
