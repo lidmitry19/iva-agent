@@ -12,6 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import type {
+  ChannelSource,
+  RouteHandlerArgs,
+  Session,
+} from "eve/channels";
+import type { TelegramChannelState } from "eve/channels/telegram";
 
 const vault = mkdtempSync(join(tmpdir(), "iva-reply-context-"));
 // Свой каталог данных: пайплайн пишет run-status и журнал хода, и ни то, ни другое не
@@ -35,11 +41,11 @@ type Message = Record<string, unknown> & {
   text: string;
 };
 type SendOptions = {
-  context: string[];
-  inputResponses: unknown[];
+  context: readonly string[];
+  inputResponses: readonly unknown[];
   message: unknown;
 };
-type SendCall = [SendOptions, ...unknown[]];
+type SendCall = [SendOptions];
 type ReplyAuthor = {
   id?: string;
   isBot?: boolean;
@@ -57,15 +63,6 @@ type ReplyPayload = {
   [key: string]: unknown;
 };
 type SendMessageBody = { text: string };
-type WebhookRoute = {
-  handler: (
-    request: Request,
-    args: {
-      send: (...args: SendCall) => Promise<Record<string, never>>;
-      waitUntil: (promise: Promise<unknown>) => number;
-    },
-  ) => Promise<Response>;
-};
 
 const apiCalls: ApiCall[] = [];
 let deepgramTranscript = "";
@@ -107,9 +104,15 @@ const channel = (
     telegramTestModule
   )) as typeof import("../agent/channels/telegram.ts")
 ).default;
-const webhook = channel.routes.find(
-  (route: { path: string }) => route.path === "/eve/v1/telegram",
-) as unknown as WebhookRoute | undefined;
+const webhook = (() => {
+  const candidate = channel.routes.find(
+    (route) => route.path === "/eve/v1/telegram",
+  );
+  if (!candidate || candidate.transport === "websocket") {
+    throw new Error("Telegram channel did not expose its webhook route");
+  }
+  return candidate;
+})();
 
 after(() => {
   rmSync(vault, { recursive: true, force: true });
@@ -126,10 +129,69 @@ function message(overrides: Record<string, unknown> = {}): Message {
   };
 }
 
+const unusedSessionOperation = () => {
+  throw new Error("not used by the Telegram message path");
+};
+
+function fakeSession(id: string): Session {
+  return {
+    id,
+    send: unusedSessionOperation,
+    respond: unusedSessionOperation,
+    cancel: unusedSessionOperation,
+    compact: unusedSessionOperation,
+    clear: unusedSessionOperation,
+    reset: unusedSessionOperation,
+    getEventStream: unusedSessionOperation,
+    getStreamTailIndex: unusedSessionOperation,
+  };
+}
+
 async function dispatch(rawMessage: Record<string, unknown>) {
   const sends: SendCall[] = [];
   const pending: Promise<unknown>[] = [];
-  const response = await webhook!.handler(
+  const session = fakeSession("reply-context-session");
+  const source: ChannelSource<TelegramChannelState> = {
+    send: async (outboundMessage, options) => {
+      sends.push([
+        {
+          context: options.context ?? [],
+          inputResponses: [],
+          message: outboundMessage,
+        },
+      ]);
+      return session;
+    },
+    respond: async (inputResponses, options) => {
+      sends.push([
+        {
+          context: options.context ?? [],
+          inputResponses,
+          message: undefined,
+        },
+      ]);
+      return session;
+    },
+    cancel: unusedSessionOperation,
+    compact: unusedSessionOperation,
+    clear: unusedSessionOperation,
+    reset: unusedSessionOperation,
+  };
+  const routeArgs: RouteHandlerArgs<TelegramChannelState> = {
+    attachSession: () => session,
+    from: (address) => {
+      void address;
+      return source;
+    },
+    resolveSession: async () => session,
+    to: unusedSessionOperation,
+    params: {},
+    waitUntil: (promise) => {
+      pending.push(promise);
+    },
+    requestIp: "127.0.0.1",
+  };
+  const response = await webhook.handler(
     new Request("http://local/eve/v1/telegram", {
       method: "POST",
       headers: {
@@ -138,13 +200,7 @@ async function dispatch(rawMessage: Record<string, unknown>) {
       },
       body: JSON.stringify({ update_id: 1, message: rawMessage }),
     }),
-    {
-      send: async (...args: SendCall) => {
-        sends.push(args);
-        return {};
-      },
-      waitUntil: (promise: Promise<unknown>) => pending.push(promise),
-    },
+    routeArgs,
   );
   assert.equal(response.status, 200);
   await Promise.all(pending);
