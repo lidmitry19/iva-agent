@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registration promises. */
-// eve 0.30.8: result() читает поток с сохранённого streamIndex и останавливается на
+// eve 0.47.3: result() читает поток с курсора экземпляра и останавливается на
 // первой границе хода, не сверяя её с только что отправленным сообщением (vercel/eve#2461).
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import {
   drainStreamBefore,
   drainStreamToTail,
   isOwnTurnResult,
+  parsePersistedRollupSession,
   sentNotBeforeIso,
 } from "./rollup-stale-cursor.ts";
 
@@ -66,7 +67,7 @@ function isTurnBoundary(event: StreamEvent): boolean {
   );
 }
 
-// Модель result() eve 0.30.8: collectTurnEvents с сохранённого курсора до первой границы.
+// Модель result() eve 0.47.3: collect Turn events с курсора до первой границы.
 function resultFromCursor(
   stream: readonly StreamEvent[],
   streamIndex: number,
@@ -171,6 +172,45 @@ const TONIGHT_PROMPT =
   "You are processing long-term memory. It is now 2026-08-24. Process the completed day 2026-08-23.";
 const OLD_REPORT = "Обработан день 2026-08-18";
 const TONIGHT_REPORT = "Обработан день 2026-08-23";
+
+test("the persisted Rollup session is exactly sessionId plus createdAt", () => {
+  assert.deepEqual(
+    parsePersistedRollupSession({
+      sessionId: "wrun_01M1BRB1YVQXJEQR806RPZYTC4",
+      createdAt: 1_788_100_000_000,
+    }),
+    {
+      sessionId: "wrun_01M1BRB1YVQXJEQR806RPZYTC4",
+      createdAt: 1_788_100_000_000,
+    },
+  );
+  for (const value of [
+    {
+      state: {
+        continuationToken: "legacy",
+        sessionId: "wrun_legacy",
+        streamIndex: 27,
+      },
+      createdAt: 1_788_100_000_000,
+    },
+    { sessionId: "", createdAt: 1 },
+    { sessionId: " wrun_space ", createdAt: 1 },
+    { sessionId: "wrun_bad_time", createdAt: "now" },
+    { sessionId: "wrun_extra", createdAt: 1, streamIndex: 2 },
+  ]) {
+    assert.equal(parsePersistedRollupSession(value), null);
+  }
+});
+
+test("property: persisted Rollup session parsing never crashes on junk", () => {
+  fc.assert(
+    fc.property(fc.anything(), (value) => {
+      const parsed = parsePersistedRollupSession(value);
+      assert.ok(parsed === null || Object.keys(parsed).length === 2);
+    }),
+    { seed: 24_611, numRuns: 200 },
+  );
+});
 
 test("origin/main delivers a lagged-cursor result from a previous night", () => {
   const stream = [
@@ -460,13 +500,18 @@ test("rollup.ts uses the shared pre-send drain and refuses a foreign result", ()
   assert.match(ROLLUP_SRC, /sentNotBeforeIso\(/);
   assert.match(
     ROLLUP_SRC,
-    /const send = async \(\) => \{\s+const sentNotBefore = sentNotBeforeIso\(\);\s+return \{\s+response: await session\.send\(prompt\),\s+sentNotBefore,/,
+    /response: await session\.send\(prompt\),\s+sentNotBefore,\s+session,/,
   );
+  assert.match(ROLLUP_SRC, /client\.sessions\.create\(\{ message: prompt \}\)/);
+  assert.match(ROLLUP_SRC, /client\.sessions\.attach\(saved\.sessionId\)/);
+  assert.match(ROLLUP_SRC, /JSON\.stringify\(\{ sessionId, createdAt \}\)/);
+  assert.doesNotMatch(ROLLUP_SRC, /legacyClientSession|client\.session\(/);
+  assert.doesNotMatch(ROLLUP_SRC, /attach\(saved\.sessionId,\s*\{/);
   assert.doesNotMatch(ROLLUP_SRC, /Date\.now\(\) - 60_000/);
   assert.doesNotMatch(ROLLUP_SRC, /drainBeforeSend/);
   const ownAt = ROLLUP_SRC.indexOf("isOwnTurnResult(");
   const saveAt = ROLLUP_SRC.indexOf(
-    "saveSession(session.state, sessionCreatedAt);",
+    "saveSession(activeSession.state.sessionId, sessionCreatedAt);",
   );
   assert.ok(
     ownAt > 0 && ownAt < saveAt,
