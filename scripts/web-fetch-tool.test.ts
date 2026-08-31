@@ -114,6 +114,19 @@ test("обычная страница доезжает целиком и без 
   assert.deepEqual(logs, []);
 });
 
+test("текст ошибки фреймворка на успешной странице остаётся контентом", async () => {
+  const { value, logs } = await fetchPage(
+    new Response("Request failed with status code: 503", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    }),
+  );
+
+  assert.equal(value.error, undefined);
+  assert.equal(value.content, "Request failed with status code: 503");
+  assert.deepEqual(logs, []);
+});
+
 test("инъекция на странице едет к модели, но с предупреждением и в логе", async () => {
   const { value, logs } = await fetchPage(
     html(

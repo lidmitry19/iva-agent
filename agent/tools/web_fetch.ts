@@ -16,17 +16,18 @@ import { traceEnterToolScope } from "../lib/trace.ts";
 // Обёртка добавляет ровно одно: содержимое страницы проходит inbound-Gate
 // (ADR-0006), как и любой другой недоверенный вход.
 //
-// Ошибки фреймворка (редирект, 4xx/5xx, слишком большой ответ, приватный адрес,
-// таймаут) прилетают исключением — отдаём их как { error }: модель читает
-// причину и, например, повторяет вызов с URL редиректа. Текст ошибки тоже идёт
-// через гейт: сообщение про редирект дословно цитирует заголовок `Location`, то
-// есть его пишет тот же, кто отдал страницу.
+// HTTP-ошибки фреймворк возвращает как результат с `status`, а ошибки запроса
+// (слишком большой ответ, приватный адрес, таймаут) — исключением. Оба вида
+// отдаём как { error }: модель читает причину и может исправить вызов. Текст
+// ошибки тоже идёт через гейт: сообщение про редирект дословно цитирует
+// заголовок `Location`, то есть его пишет тот же, кто отдал страницу.
 
 // Результат штатного тула. Схема входа/выхода — его же, чтобы обёртка не
 // разъехалась с фреймворком при обновлении eve.
 interface FrameworkWebFetchResult {
   content: string;
   contentType: string;
+  status: number;
   truncated: boolean;
   url: string;
 }
@@ -54,6 +55,11 @@ export default defineTool({
         `web_fetch ${requested}`,
         (e as Error).message,
       );
+      return { ...gatedError, error: `web_fetch: ${gatedError.error}` };
+    }
+
+    if (raw.status < 200 || raw.status >= 300) {
+      const gatedError = gateWebError(`web_fetch ${requested}`, raw.content);
       return { ...gatedError, error: `web_fetch: ${gatedError.error}` };
     }
 
