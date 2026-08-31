@@ -10,7 +10,9 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,10 +24,19 @@ import { readCustomSkills } from "../agent/lib/custom-skills.ts";
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Stands in for `eve build`: names the tree the bundle was built from. */
-const CORE = `import { mkdirSync, writeFileSync } from "node:fs";
+const CORE = `import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 mkdirSync(join(process.cwd(), ".output"), { recursive: true });
 mkdirSync(join(process.cwd(), ".eve"), { recursive: true });
+writeFileSync(
+  join(process.cwd(), ".output/workflow-data-present-before-build.txt"),
+  String(existsSync(join(process.cwd(), ".eve/.workflow-data/live.json"))),
+);
+mkdirSync(join(process.cwd(), ".eve/.workflow-data"), { recursive: true });
+writeFileSync(
+  join(process.cwd(), ".eve/.workflow-data/staging.json"),
+  "disposable build state\\n",
+);
 writeFileSync(
   join(process.cwd(), ".output/app.mjs"),
   "import " + JSON.stringify(join(process.cwd(), "agent/agent.ts")) + ";\\n",
@@ -161,6 +172,36 @@ test("the staging build promotes eve's agent summary", () => {
     JSON.parse(readFileSync(join(version, ".eve/agent-summary.json"), "utf8")),
     { skills: [{ name: "mine", description: "stock" }] },
   );
+});
+
+test("durable workflow state is neither staged nor promoted and survives repeated builds", () => {
+  const home = join(world(), "iva");
+  const version = join(home, "versions/0.3.15-0123456789ab");
+  const store = join(version, ".eve/.workflow-data");
+  const live = join(store, "live.json");
+  mkdirSync(store, { recursive: true });
+  plantTree(version);
+  writeFileSync(live, '{"turn":"open"}\n');
+  const timestamp = new Date("2026-08-31T00:00:00.000Z");
+  utimesSync(live, timestamp, timestamp);
+  const before = statSync(live).mtimeMs;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const built = build(version);
+    assert.equal(built.status, 0, built.output);
+    assert.equal(
+      readFileSync(
+        join(version, ".output/workflow-data-present-before-build.txt"),
+        "utf8",
+      ),
+      "false",
+      "the live Workflow store must not enter the disposable staging tree",
+    );
+    assert.equal(readFileSync(live, "utf8"), '{"turn":"open"}\n');
+    assert.equal(statSync(live).mtimeMs, before);
+    assert.equal(existsSync(join(store, "staging.json")), false);
+    assert.equal(existsSync(join(version, ".output/.eve/.workflow-data")), false);
+  }
 });
 
 test("backup cleanup cannot roll back the promoted build", () => {
