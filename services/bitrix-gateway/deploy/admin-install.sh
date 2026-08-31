@@ -5,7 +5,10 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 077
 
-LIVE_REPO=/home/iva/iva
+IVA_LAYOUT=/home/iva/iva
+CURRENT_LINK=/home/iva/iva/current
+VERSIONS_DIR=/home/iva/iva/versions
+REPO_STORE=/home/iva/iva/repo
 ROOT_DIR=/usr/local/lib/iva-bitrix-admin
 ROOT_COPY=/usr/local/lib/iva-bitrix-admin/install
 IVA_USER=iva
@@ -28,6 +31,7 @@ TTY_ECHO_DISABLED=0
 TTY_PATH=
 INSTALL_SUCCESS=0
 STAGE_ROOT=
+LIVE_SOURCE=
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -86,8 +90,9 @@ run_as_iva() {
     DBUS_SESSION_BUS_ADDRESS="$IVA_BUS" "$@"
 }
 
-run_git_as_iva() {
-  run_as_iva /usr/bin/env GIT_OPTIONAL_LOCKS=0 /usr/bin/git -C "$LIVE_REPO" "$@"
+run_git_repo_as_iva() {
+  run_as_iva /usr/bin/env GIT_OPTIONAL_LOCKS=0 \
+    /usr/bin/git --git-dir="$REPO_STORE" "$@"
 }
 
 run_as_sudo_caller() {
@@ -258,12 +263,39 @@ trap 'exit 143' TERM
 [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]] ||
   fail 'stale admin recovery state exists; inspect it before retrying'
 
-[[ $(run_git_as_iva rev-parse --show-toplevel) == "$LIVE_REPO" ]] ||
-  fail 'invalid live repository root'
-[[ $(run_git_as_iva rev-parse HEAD) == "$EXPECTED_COMMIT" ]] ||
-  fail 'live checkout commit does not match the reviewed commit'
-[[ -z $(run_git_as_iva status --porcelain=v1 --untracked-files=all) ]] ||
-  fail 'live checkout is not fully clean'
+bind_reviewed_source() {
+  local version_name expected_prefix resolved_commit
+
+  [[ -d "$IVA_LAYOUT" && ! -L "$IVA_LAYOUT" ]] ||
+    fail 'invalid IVA versioned layout root'
+  [[ -d "$VERSIONS_DIR" && ! -L "$VERSIONS_DIR" ]] ||
+    fail 'invalid IVA versions directory'
+  [[ -d "$REPO_STORE" && ! -L "$REPO_STORE" ]] ||
+    fail 'invalid IVA bare repository path'
+  [[ -L "$CURRENT_LINK" ]] || fail 'IVA current must be a symlink'
+
+  LIVE_SOURCE=$(/usr/bin/readlink -f -- "$CURRENT_LINK")
+  [[ -n "$LIVE_SOURCE" && -d "$LIVE_SOURCE" && ! -L "$LIVE_SOURCE" ]] ||
+    fail 'IVA current target is not a physical version directory'
+  [[ $(/usr/bin/dirname -- "$LIVE_SOURCE") == "$VERSIONS_DIR" ]] ||
+    fail 'IVA current target is outside the version store'
+
+  version_name=$(/usr/bin/basename -- "$LIVE_SOURCE")
+  [[ "$version_name" =~ ^[0-9A-Za-z.+-]+-([0-9a-f]{12})(\+[0-9a-f]{8})?(~[0-9]+)?$ ]] ||
+    fail 'IVA current target has an invalid version name'
+  expected_prefix=${EXPECTED_COMMIT:0:12}
+  [[ ${BASH_REMATCH[1]} == "$expected_prefix" ]] ||
+    fail 'IVA current version does not match the reviewed commit'
+
+  [[ $(run_git_repo_as_iva rev-parse --is-bare-repository) == true ]] ||
+    fail 'IVA repository is not bare'
+  resolved_commit=$(run_git_repo_as_iva rev-parse --verify --end-of-options \
+    "$EXPECTED_COMMIT^{commit}") || fail 'reviewed commit is absent from the IVA repository'
+  [[ "$resolved_commit" == "$EXPECTED_COMMIT" ]] ||
+    fail 'reviewed commit resolution mismatch'
+}
+
+bind_reviewed_source
 
 assert_no_gateway_dropins
 
@@ -273,7 +305,7 @@ write_manifest() {
 3c66e776c669fd65352f6627a7a6da676f903dcef676b6ad3f93aaf722fdc7d6  services/bitrix-gateway/normalize.mjs
 d9c2d9476217eeb4282c9ddd16cad719efb5c271200c7f7055aea0fb562154d5  services/bitrix-gateway/policy.mjs
 77a86f8d6ce7393183fa3c09b7b38fd96537a8910bab3c6b909b8dc952f37504  services/bitrix-gateway/client.mjs
-9b7e87a2fa5170a4e04d6fcd19cb31850aba60a80a90960ed28539aa0a59b380  services/bitrix-gateway/gateway.mjs
+ef2dba918bc55e8474c4e8dfc80b94827e8c2e877047a646526f91fa324110e2  services/bitrix-gateway/gateway.mjs
 a5b473cd2fafe8647a11306242e8c0b32e543960584fef3b56a277a63c266b7b  services/bitrix-gateway/server.mjs
 d24d62005387613cf4520bf0a281e4eec29fa385118359fcb4c748e631c6cba4  services/bitrix-gateway/index.mjs
 fc9607a97a12442c90d1eaebacaebbc4015dbd3d3b8dbc67daeadce2d344737d  services/bitrix-gateway/preflight-read-state.mjs
@@ -296,6 +328,7 @@ write_manifest > "$MANIFEST_FILE"
 /usr/bin/chmod 0600 "$MANIFEST_FILE"
 
 while read -r checksum relative extra; do
+  commit_checksum=
   [[ "$checksum" =~ ^[0-9a-f]{64}$ && -n "$relative" && -z ${extra:-} ]] ||
     fail 'invalid embedded admin manifest entry'
   case "$relative" in
@@ -303,14 +336,27 @@ while read -r checksum relative extra; do
     *) fail 'embedded admin manifest path is outside the fixed allowlist' ;;
   esac
 
-  source=$LIVE_REPO/$relative
+  if ! commit_checksum=$(run_git_repo_as_iva show "$EXPECTED_COMMIT:$relative" |
+    /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f1); then
+    fail "manifest path is absent from the reviewed commit: $relative"
+  fi
+  [[ "$commit_checksum" == "$checksum" ]] ||
+    fail "embedded admin manifest does not match the reviewed commit: $relative"
+
+  source=$LIVE_SOURCE/$relative
   staged=$STAGE_ROOT/$relative
-  [[ -f "$source" ]] || fail "manifest source is not a regular file: $relative"
+  [[ -f "$source" && ! -L "$source" ]] ||
+    fail "manifest source is not a regular file: $relative"
+  [[ $(/usr/bin/readlink -f -- "$source") == "$source" ]] ||
+    fail "manifest source traverses a symlink: $relative"
   /usr/bin/install -d -o root -g root -m 0700 "$(/usr/bin/dirname -- "$staged")"
   /usr/bin/install -o root -g root -m 0600 -- "$source" "$staged"
   [[ -f "$staged" && ! -L "$staged" && $(/usr/bin/stat -c '%U:%G %a' "$staged") == 'root:root 600' ]] ||
     fail "could not snapshot manifest source safely: $relative"
 done < "$MANIFEST_FILE"
+
+[[ $(/usr/bin/readlink -f -- "$CURRENT_LINK") == "$LIVE_SOURCE" ]] ||
+  fail 'IVA current changed while the root snapshot was being prepared'
 
 (
   cd "$STAGE_ROOT"

@@ -51,7 +51,79 @@ attempts to return every captured unit to stopped, preserves the recovery-state
 file, and reports any unit still live. Do not delete that file or recapture a
 new set; inspect and recover from the original evidence.
 
-## First installation
+## Versioned-layout installation
+
+Activate the reviewed application commit through IVA's normal versioned updater
+before touching the gateway. The active source is the physical target of
+`/home/iva/iva/current`; Git history lives separately in the bare repository
+`/home/iva/iva/repo`. The root helper verifies all of the following before it
+captures or stops any service:
+
+- `current` is a symlink to one direct child of `/home/iva/iva/versions`;
+- the version name carries the first 12 hex characters of the reviewed full
+  commit;
+- `repo` is bare and resolves the supplied 40-character value as a commit;
+- every allowlisted gateway file has the embedded SHA-256 both in that commit
+  and in the root-owned snapshot copied from the active version;
+- `current` still points to the same physical version after the snapshot.
+
+The fixed helper itself remains an out-of-band trust anchor. To update it, a
+trusted administrator must copy it through a root-only staging directory,
+verify the SHA-256 published for the reviewed commit, syntax-check the staged
+copy, and atomically promote only `/usr/local/lib/iva-bitrix-admin/install`.
+Do not execute the checkout copy as root. A suitable one-shot provisioning
+shape is below; replace both placeholders from the reviewed commit before use:
+
+```sh
+EXPECTED_ADMIN_SHA256='<reviewed 64-character SHA-256>'
+ADMIN_SOURCE=/home/iva/iva/current/services/bitrix-gateway/deploy/admin-install.sh
+
+sudo /usr/bin/bash -ceu '
+expected=$1
+source=$2
+root_dir=/usr/local/lib/iva-bitrix-admin
+root_copy=$root_dir/install
+[[ $expected =~ ^[0-9a-f]{64}$ ]]
+[[ -f $source && ! -L $source ]]
+stage=$(/usr/bin/mktemp -d /run/iva-bitrix-admin-provision.XXXXXX)
+trap '\''/usr/bin/rm -rf --one-file-system -- "$stage"'\'' EXIT HUP INT TERM
+/usr/bin/chown root:root "$stage"
+/usr/bin/chmod 0700 "$stage"
+/usr/bin/install -o root -g root -m 0700 -- "$source" "$stage/install"
+[[ $(/usr/bin/sha256sum "$stage/install" | /usr/bin/cut -d " " -f1) == $expected ]]
+/usr/bin/bash -n "$stage/install"
+if [[ -e $root_dir || -L $root_dir ]]; then
+  [[ -d $root_dir && ! -L $root_dir ]]
+  [[ $(/usr/bin/stat -c "%U:%G %a" "$root_dir") == "root:root 700" ]]
+else
+  /usr/bin/install -d -o root -g root -m 0700 "$root_dir"
+fi
+tmp=$(/usr/bin/mktemp "$root_dir/.install.XXXXXX")
+trap '\''/usr/bin/rm -f -- "$tmp"; /usr/bin/rm -rf --one-file-system -- "$stage"'\'' EXIT HUP INT TERM
+/usr/bin/install -o root -g root -m 0700 -- "$stage/install" "$tmp"
+/usr/bin/mv -T -- "$tmp" "$root_copy"
+trap - EXIT HUP INT TERM
+/usr/bin/rm -rf --one-file-system -- "$stage"
+' bash "$EXPECTED_ADMIN_SHA256" "$ADMIN_SOURCE"
+```
+
+After provisioning, invoke only the fixed root-owned copy in a dedicated TTY:
+
+```sh
+sudo /usr/local/lib/iva-bitrix-admin/install \
+  '<reviewed 40-character application commit>'
+```
+
+The transaction snapshots gateway inputs into a root-only staging tree, stops
+and restores the exact active IVA unit set, atomically promotes the immutable
+gateway release, verifies the exact loaded systemd unit and socket health, and
+rolls back on any failure. Never edit `/home/iva/iva/current`,
+`/usr/local/lib/iva-bitrix-gateway`, or the systemd unit by hand.
+
+## Legacy checkout installation (not valid for versioned layout)
+
+The procedure below is retained only for installations where `/home/iva/iva`
+is itself a Git checkout. It must not be used on the current versioned layout.
 
 Build and test the target in a separate worktree first. Then use that reviewed
 worktree as the immutable source for the guard while switching the primary
