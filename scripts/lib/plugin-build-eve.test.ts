@@ -2,9 +2,8 @@
 // СБОРКА ПЛАГИНА НАСТОЯЩИМ eve. Единственный тест здесь, который не подменяет ни eve, ни
 // его сборку агента: остальные тесты рельсов гоняют фейковый раннер, и именно поэтому они
 // пропустили то, что ловит этот — сгенерированный mount собирался у discovery и падал у
-// бандлера (`[UNRESOLVED_IMPORT] Could not resolve '../../plugins/demo/sh.iva'`), потому
-// что `eve extension build` не пишет `main`, а rolldown применяет `exports` только к bare-
-// спецификаторам.
+// бандлера. На 0.47.3 путь `sh.iva` без `/.` перехватывает asset-loader и падает с EISDIR;
+// `eve extension build` также не пишет `main`, нужный относительному спецификатору.
 //
 // Что проверяется на живом eve:
 //   • `eve extension build` собирает `sh.iva/` внутри версии;
@@ -29,7 +28,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { codePlugins, buildPluginExtension } from "./plugin-build.ts";
 import { commandRunner, type Runner } from "./version-update.ts";
 
@@ -182,22 +181,42 @@ function plantPlugin(data: string, name: string): void {
 }
 
 /**
- * npm не участвует: у плагина нет своих зависимостей, а сеть в тесте — чужой отказ.
- * Всё остальное — настоящее, включая eve версии, которым он и собирается.
+ * Записывает команды, но выполняет их настоящими. У тестового пакета есть только peer,
+ * поэтому `npm install --omit=peer` не ходит в сеть и обязан оставить eve снаружи.
  */
-function runnerWithoutNpm(): { run: Runner; steps: string[] } {
+function recordingRunner(): { run: Runner; steps: string[] } {
   const real = commandRunner(false);
   const steps: string[] = [];
   return {
     steps,
     run: (command, args, cwd) => {
       steps.push(`${command} ${args.join(" ")}`);
-      return command === "npm"
-        ? Promise.resolve({ code: 0, output: "" })
-        : real(command, args, cwd);
+      return real(command, args, cwd);
     },
   };
 }
+
+test(
+  "plugin names use the exact eve 0.47.3 extension and connection grammar",
+  { skip: existsSync(EVE) ? false : "eve is not installed in node_modules" },
+  async () => {
+    const grammar = (await import(
+      pathToFileURL(join(ROOT, "node_modules/eve/dist/src/discover/grammar.js"))
+        .href
+    )) as {
+      EXTENSION_SLUG_PATTERN: RegExp;
+      CONNECTION_SLUG_PATTERN: RegExp;
+    };
+    assert.equal(
+      grammar.EXTENSION_SLUG_PATTERN.source,
+      "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$",
+    );
+    assert.equal(
+      grammar.CONNECTION_SLUG_PATTERN.source,
+      "^[a-z][a-z0-9-]{0,63}$",
+    );
+  },
+);
 
 test(
   "the generated mount builds with the real eve and the plugin tool reaches the agent",
@@ -210,7 +229,7 @@ test(
     const { plugins, diagnostics } = await codePlugins(data);
     assert.deepEqual(diagnostics, []);
     assert.equal(plugins.length, 1);
-    const { run, steps } = runnerWithoutNpm();
+    const { run, steps } = recordingRunner();
 
     const built = await buildPluginExtension({
       versionDir: dir,
@@ -223,6 +242,15 @@ test(
     assert.ok(
       steps.includes(`${join(dir, "node_modules/.bin/eve")} extension build`),
       steps.join("\n"),
+    );
+    assert.ok(
+      steps.includes("npm install --omit=dev --omit=peer --no-audit --no-fund"),
+      steps.join("\n"),
+    );
+    assert.equal(
+      existsSync(join(dir, "plugins/demo/sh.iva/node_modules/eve")),
+      false,
+      "the plugin must use the version's eve, never a nested copy",
     );
 
     // Настоящая сборка агента: именно она падала на сгенерированном mount'е.
