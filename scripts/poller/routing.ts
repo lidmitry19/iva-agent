@@ -171,6 +171,9 @@ async function deliverDirectUpdate(
     onAcceptanceFailure,
     timeoutMs: DIRECT_ACCEPTANCE_TIMEOUT_MS,
     retryAcceptanceTimeout: false,
+    // The durable inbox retries this path; inline retries only cover a brief startup race.
+    // Before issue #212, 30 attempts could block the single-threaded loop for minutes.
+    boundedAttempts: 3,
   });
   // Reply на сообщение бота, чья сессия закрыта: eve не смогла ни продолжить её, ни
   // начать новый ход. Апдейт умирает здесь — владелец снимет его с хранения, иначе
