@@ -11,11 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import type {
-  ChannelSource,
-  RouteHandlerArgs,
-  Session,
-} from "eve/channels";
+import type { ChannelSource, RouteHandlerArgs, Session } from "eve/channels";
 import type { TelegramChannelState } from "eve/channels/telegram";
 import { addTelegramQueueReceipt } from "../agent/lib/telegram-acceptance.ts";
 
@@ -58,7 +54,10 @@ globalThis.fetch = async (input, init) => {
     if (JSON.stringify(requestBody).includes("What colour is this image?")) {
       return Response.json({
         choices: [
-          { finish_reason: "stop", message: { content: "blue", role: "assistant" } },
+          {
+            finish_reason: "stop",
+            message: { content: "blue", role: "assistant" },
+          },
         ],
         usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
       });

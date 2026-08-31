@@ -12,11 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import type {
-  ChannelSource,
-  RouteHandlerArgs,
-  Session,
-} from "eve/channels";
+import type { ChannelSource, RouteHandlerArgs, Session } from "eve/channels";
 import type { TelegramChannelState } from "eve/channels/telegram";
 
 const vault = mkdtempSync(join(tmpdir(), "iva-reply-context-"));

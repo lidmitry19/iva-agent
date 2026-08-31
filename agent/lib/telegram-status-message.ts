@@ -8,12 +8,7 @@
 //
 // Про eve модуль не знает: канал передаёт хендл Bot API структурно.
 import { tr } from "./i18n.ts";
-import {
-  chatKeyOf,
-  getChatStatus,
-  RETIRED_SESSION_ROUTING_FIELD,
-  setChatStatusIf,
-} from "./run-status.ts";
+import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
 import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
 // В callback_data кладём только константу: лимит 64 байта не вмещает sessionId,
@@ -141,7 +136,6 @@ export async function finishTelegramStatus(
       { sessionId },
       {
         status: "idle",
-        [RETIRED_SESSION_ROUTING_FIELD]: null,
         sessionId: null,
         turnId: null,
         statusMessageId: null,

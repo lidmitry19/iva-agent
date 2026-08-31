@@ -252,8 +252,7 @@ async function notifyDeliverProblem(kind: string, status: unknown) {
 // Время последней доставки по chat key — для паузы SETTLE_MS между апдейтами одного чата.
 // МОДУЛЬ-уровень (не локальная в main): её обязан обновлять и синтетический deliver меню
 // (дистилляция интервью), иначе реальное сообщение сразу после него ушло бы без паузы —
-// в окно, пока eve ещё не записала run-status и не зарегистрировала continuation-hook →
-// второй ран на том же токене → HookConflictError.
+// в окно, пока eve ещё не записала run-status с первичным sessionId.
 const lastDeliverAt = new Map<string, number>();
 
 // Доставка с пейсингом: выдержать SETTLE_MS с последней доставки в этот чат, доставить,

@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { RETIRED_SESSION_ROUTING_FIELD } from "./run-status.ts";
 import { traceContextParts, traceTurnBound } from "./trace.ts";
 import { localStamp } from "./vault-daily.ts";
 
@@ -234,7 +233,6 @@ export async function publishTelegramTurnStarted({
         { generation: current?.generation },
         {
           status: "running",
-          [RETIRED_SESSION_ROUTING_FIELD]: null,
           sessionId,
           turnId,
           statusMessageId: null,
@@ -279,7 +277,6 @@ export async function publishTelegramTurnStarted({
         sessionId: undefined,
       },
       {
-        [RETIRED_SESSION_ROUTING_FIELD]: null,
         sessionId,
         turnId,
         turnAt: now(),

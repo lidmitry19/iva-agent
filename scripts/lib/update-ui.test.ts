@@ -1188,7 +1188,7 @@ test("every pre-snapshot command fault leaves the live tree untouched", async (t
       const { calls, tx } = d10Transaction(
         fixture,
         `if ${condition} && [ ! -e "$calls.injected" ]; then\n` +
-          "  : > \"$calls.injected\"\n" +
+          '  : > "$calls.injected"\n' +
           "  printf '%s\\n' 'injected pre-snapshot failure' >&2\n" +
           "  exit 72\n" +
           "fi\n",

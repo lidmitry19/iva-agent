@@ -200,7 +200,10 @@ test("durable workflow state is neither staged nor promoted and survives repeate
     assert.equal(readFileSync(live, "utf8"), '{"turn":"open"}\n');
     assert.equal(statSync(live).mtimeMs, before);
     assert.equal(existsSync(join(store, "staging.json")), false);
-    assert.equal(existsSync(join(version, ".output/.eve/.workflow-data")), false);
+    assert.equal(
+      existsSync(join(version, ".output/.eve/.workflow-data")),
+      false,
+    );
   }
 });
 

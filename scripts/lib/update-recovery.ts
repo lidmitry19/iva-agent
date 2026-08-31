@@ -843,12 +843,7 @@ export class UpdateRecoveryOwner {
   async #deleteOwnedRef(oid: string): Promise<void> {
     const failures: Error[] = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const deleted = await this.#git.run([
-        "update-ref",
-        "-d",
-        this.#ref,
-        oid,
-      ]);
+      const deleted = await this.#git.run(["update-ref", "-d", this.#ref, oid]);
       if (deleted.code !== 0)
         failures.push(
           new Error(
@@ -867,7 +862,9 @@ export class UpdateRecoveryOwner {
         throw new Error("recovery ref ownership changed before cleanup");
       if (remaining.code !== 0)
         failures.push(
-          new Error(remaining.stderr || "recovery ref cleanup verification failed"),
+          new Error(
+            remaining.stderr || "recovery ref cleanup verification failed",
+          ),
         );
       else if (deleted.code === 0)
         failures.push(

@@ -11,7 +11,10 @@ import {
 import { handleTelegramResetRequest } from "#lib/telegram-reset-route.ts";
 
 type FetchCall = { url: string; init: RequestInit };
-type ResetOperations = Pick<RouteHandlerArgs, "attachSession" | "resolveSession">;
+type ResetOperations = Pick<
+  RouteHandlerArgs,
+  "attachSession" | "resolveSession"
+>;
 
 function session(id: string, reasons: unknown[]): Session {
   return {
@@ -31,9 +34,12 @@ test("stored session wins for groups and forum topics", () => {
       message_id: 91,
     },
   };
-  assert.deepEqual(resetTargetForControl(update, { sessionId: "session-42" }, "777"), {
-    sessionId: "session-42",
-  });
+  assert.deepEqual(
+    resetTargetForControl(update, { sessionId: "session-42" }, "777"),
+    {
+      sessionId: "session-42",
+    },
+  );
 });
 
 test("private-chat upgrade fallback builds a channel address", () => {
@@ -109,7 +115,9 @@ test("explicit Iva reply wins, but another bot cannot select stored state", () =
 test("chat-key address resolver roundtrips private and topic keys", () => {
   fc.assert(
     fc.property(
-      fc.integer({ min: -9_007_199_254_740_991, max: 9_007_199_254_740_991 }).filter((id) => id !== 0),
+      fc
+        .integer({ min: -9_007_199_254_740_991, max: 9_007_199_254_740_991 })
+        .filter((id) => id !== 0),
       fc.option(fc.integer({ min: 1, max: 2_147_483_647 }), { nil: undefined }),
       (chatId, threadId) => {
         const key = `${chatId}:${threadId ?? ""}`;
@@ -248,7 +256,10 @@ test("reset route returns no_active_session for an unowned address", async () =>
     operations,
     "secret",
   );
-  assert.deepEqual(await response.json(), { ok: true, status: "no_active_session" });
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    status: "no_active_session",
+  });
 });
 
 test("reset route rejects auth, malformed targets and conflicting targets", async () => {
@@ -280,7 +291,11 @@ test("reset route rejects auth, malformed targets and conflicting targets", asyn
   ];
 
   for (const [index, req] of cases.entries()) {
-    const response = await handleTelegramResetRequest(req, operations, "secret");
+    const response = await handleTelegramResetRequest(
+      req,
+      operations,
+      "secret",
+    );
     assert.equal(response.status, index === 0 ? 401 : 400);
   }
   assert.equal(called, false);

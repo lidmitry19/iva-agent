@@ -71,6 +71,7 @@ function statusStore(initial: Status = {}, now: () => number = Date.now) {
       generation: previousGeneration + 1,
       updatedAt: now(),
     };
+    delete value[RETIRED_SESSION_ROUTING_FIELD];
     for (const key of Object.keys(value))
       if (value[key] === null) delete value[key];
     return value;

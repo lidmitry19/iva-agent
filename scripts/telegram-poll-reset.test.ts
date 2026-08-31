@@ -1,6 +1,12 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node's test runner owns registrations and reset test doubles intentionally preserve asynchronous production boundaries. */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -32,7 +38,9 @@ type QueueDocument = {
 };
 type ResetIntent = {
   chatKey: string;
-  target: { sessionId: string } | { address: { chatId: string; messageThreadId?: number } };
+  target:
+    | { sessionId: string }
+    | { address: { chatId: string; messageThreadId?: number } };
 };
 type CompleteResetOptions = {
   clearQueue?: boolean;
@@ -193,13 +201,17 @@ test("failed private queue cleanup does not expose an idle tombstone", async () 
 
 test("private reset intent is durable before remote reset and clears after local cleanup", async () => {
   const events: string[] = [];
-  await performScopedReset("chat-intent:", { sessionId: "session-105" }, {
-    clearQueue: true,
-    persistIntentImpl: async () => events.push("intent"),
-    requestResetImpl: async () => events.push("remote"),
-    completeStateImpl: async () => events.push("cleanup"),
-    clearIntentImpl: async () => events.push("clear-intent"),
-  });
+  await performScopedReset(
+    "chat-intent:",
+    { sessionId: "session-105" },
+    {
+      clearQueue: true,
+      persistIntentImpl: async () => events.push("intent"),
+      requestResetImpl: async () => events.push("remote"),
+      completeStateImpl: async () => events.push("cleanup"),
+      clearIntentImpl: async () => events.push("clear-intent"),
+    },
+  );
 
   assert.deepEqual(events, ["intent", "remote", "cleanup", "clear-intent"]);
 });
@@ -289,6 +301,29 @@ test("failed reset reconciliation keeps its durable intent for the next startup"
   await clearPrivateResetIntent(key);
 });
 
+test("a corrupt reset intent does not block a valid chat", async (t) => {
+  const key = "108:";
+  await persistPrivateResetIntent(key);
+  const intentDirectory = join(dataDir, "telegram-reset-intents");
+  const corruptFile = join(intentDirectory, "corrupt.json");
+  writeFileSync(corruptFile, "{broken", "utf8");
+  t.after(() => rmSync(corruptFile, { force: true }));
+  t.mock.method(console, "error", () => {});
+
+  const requested: ResetIntent[] = [];
+  await reconcileScopedResetIntents({
+    requestResetImpl: async (intent) => {
+      requested.push(intent);
+    },
+  });
+
+  assert.deepEqual(requested, [
+    { chatKey: key, target: { address: { chatId: "108" } } },
+  ]);
+  assert.equal(readdirSync(intentDirectory).includes("corrupt.json"), true);
+  assert.deepEqual(await loadPrivateResetIntents(), []);
+});
+
 test("queue rename failure keeps the previous whole queue byte-for-byte", async () => {
   const queueFile = join(dataDir, "telegram-queue.json");
   const original = JSON.stringify({
@@ -352,7 +387,7 @@ test("ordinary queue load quarantines corrupt bytes and continues", async () => 
 });
 
 test("reset tombstone retires the legacy routing field", async () => {
-  const legacyField = "continuation" + "Token";
+  const legacyField = "continuationToken";
   status.setChatStatus("7091451031:", {
     status: "running",
     sessionId: "session-old",
@@ -386,13 +421,17 @@ test("a durable reset intent reconstructs its Telegram address", async () => {
 
 test("/new sends the exact stored session target", async () => {
   const requested: ResetIntent[] = [];
-  await performScopedReset("7091451031:", { sessionId: "session-1" }, {
-    clearQueue: true,
-    persistIntentImpl: async () => {},
-    requestResetImpl: async (request) => requested.push(request),
-    completeStateImpl: async () => {},
-    clearIntentImpl: async () => {},
-  });
+  await performScopedReset(
+    "7091451031:",
+    { sessionId: "session-1" },
+    {
+      clearQueue: true,
+      persistIntentImpl: async () => {},
+      requestResetImpl: async (request) => requested.push(request),
+      completeStateImpl: async () => {},
+      clearIntentImpl: async () => {},
+    },
+  );
 
   assert.deepEqual(requested, [
     {
@@ -404,14 +443,18 @@ test("/new sends the exact stored session target", async () => {
 
 test("reset outcome is logged for session and address targets", async () => {
   const lines: string[] = [];
-  await performScopedReset("7091451031:", { sessionId: "session-1" }, {
-    clearQueue: true,
-    persistIntentImpl: async () => {},
-    requestResetImpl: async () => ({ ok: true, status: "no_active_session" }),
-    completeStateImpl: async () => {},
-    clearIntentImpl: async () => {},
-    logImpl: (line) => lines.push(line),
-  });
+  await performScopedReset(
+    "7091451031:",
+    { sessionId: "session-1" },
+    {
+      clearQueue: true,
+      persistIntentImpl: async () => {},
+      requestResetImpl: async () => ({ ok: true, status: "no_active_session" }),
+      completeStateImpl: async () => {},
+      clearIntentImpl: async () => {},
+      logImpl: (line) => lines.push(line),
+    },
+  );
 
   assert.deepEqual(lines, [
     "reset for chat 7091451031: -> no_active_session (session-1)",
@@ -422,15 +465,15 @@ test("reset outcome is logged for session and address targets", async () => {
     "7091451031:",
     { address: { chatId: "7091451031" } },
     {
-    persistIntentImpl: async () => {},
-    requestResetImpl: async () => ({
-      ok: true,
-      status: "reset",
-      previousSessionId: "wrun_1",
-    }),
-    completeStateImpl: async () => {},
-    clearIntentImpl: async () => {},
-    logImpl: (line) => successes.push(line),
+      persistIntentImpl: async () => {},
+      requestResetImpl: async () => ({
+        ok: true,
+        status: "reset",
+        previousSessionId: "wrun_1",
+      }),
+      completeStateImpl: async () => {},
+      clearIntentImpl: async () => {},
+      logImpl: (line) => successes.push(line),
     },
   );
   assert.deepEqual(successes, [
@@ -446,7 +489,5 @@ test("intent reconciliation logs its reset outcome too", async () => {
     logImpl: (line) => lines.push(line),
   });
 
-  assert.deepEqual(lines, [
-    "reset for chat 429888768: -> reset (address)",
-  ]);
+  assert.deepEqual(lines, ["reset for chat 429888768: -> reset (address)"]);
 });

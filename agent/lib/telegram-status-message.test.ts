@@ -145,11 +145,7 @@ await test("отмена переписывает статус и оставля
   const { calls, tg } = handle();
 
   assert.equal(
-    await status.finishTelegramStatus(
-      { telegram: tg },
-      "s-2",
-      "cancelled",
-    ),
+    await status.finishTelegramStatus({ telegram: tg }, "s-2", "cancelled"),
     true,
   );
   assert.equal(calls[0].method, "editMessageText");
@@ -170,11 +166,7 @@ await test("сбой Bot API на уборке не рушит терминал 
   };
 
   assert.equal(
-    await status.finishTelegramStatus(
-      { telegram: failing },
-      "s-3",
-      "failed",
-    ),
+    await status.finishTelegramStatus({ telegram: failing }, "s-3", "failed"),
     true,
   );
   assert.equal(runStatus.getChatStatus(key)?.status, "idle");

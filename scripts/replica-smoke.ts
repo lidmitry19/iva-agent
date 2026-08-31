@@ -595,7 +595,7 @@ async function main(): Promise<void> {
     const upgraded = await canaryTurn(upgradeAddress, recall);
     if (upgraded.sessionId === upgradeSeed.sessionId)
       throw new Error(
-      `address still resumes its pre-upgrade session after the version change: ${upgraded.sessionId}`,
+        `address still resumes its pre-upgrade session after the version change: ${upgraded.sessionId}`,
       );
     if (upgraded.reply.includes(UPGRADE_MARKER))
       throw new Error(

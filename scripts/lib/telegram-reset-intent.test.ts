@@ -21,11 +21,10 @@ void test("reset intent persists, loads, clears, and tolerates missing paths", a
   const directory = await intentDirectory(t);
   assert.deepEqual(await loadTelegramResetIntents(directory), []);
 
-  const intent = await persistTelegramResetIntent(
-    directory,
-    "42:",
-    { now: () => 1234, nonce: () => "fixed" },
-  );
+  const intent = await persistTelegramResetIntent(directory, "42:", {
+    now: () => 1234,
+    nonce: () => "fixed",
+  });
   assert.deepEqual(intent, {
     version: TELEGRAM_RESET_INTENT_VERSION,
     chatKey: "42:",
@@ -33,7 +32,7 @@ void test("reset intent persists, loads, clears, and tolerates missing paths", a
   });
   assert.deepEqual(await loadTelegramResetIntents(directory), [intent]);
 
-  const retiredField = ["continuation", "Token"].join("");
+  const retiredField = "continuationToken";
   assert.deepEqual(
     JSON.parse(
       await readFile(
@@ -54,21 +53,23 @@ void test("reset intent persists, loads, clears, and tolerates missing paths", a
   assert.deepEqual(await loadTelegramResetIntents(directory), []);
 });
 
-void test("reset intent loader rejects invalid records", async (t) => {
+void test("reset intent loader skips invalid records", async (t) => {
   const directory = await intentDirectory(t);
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "bad.json"), "{}", "utf8");
+  const errors: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => {
+    errors.push(parts.map(String).join(" "));
+  });
 
-  await assert.rejects(
-    loadTelegramResetIntents(directory),
-    /invalid Telegram reset intent/,
-  );
+  assert.deepEqual(await loadTelegramResetIntents(directory), []);
+  assert.match(errors[0], /cannot load Telegram reset intent .*bad\.json/u);
 });
 
 void test("reset intent loader accepts and strips the retired routing field", async (t) => {
   const directory = await intentDirectory(t);
   const chatKey = "7:";
-  const legacyField = "continuation" + "Token";
+  const legacyField = "continuationToken";
   await mkdir(directory, { recursive: true });
   await writeFile(
     join(directory, `${Buffer.from(chatKey).toString("base64url")}.json`),
@@ -86,7 +87,7 @@ void test("reset intent loader accepts and strips the retired routing field", as
   ]);
 });
 
-void test("reset intent loader rejects a filename that does not match the chat", async (t) => {
+void test("reset intent loader skips a filename that does not match the chat", async (t) => {
   const directory = await intentDirectory(t);
   await mkdir(directory, { recursive: true });
   await writeFile(
@@ -99,8 +100,10 @@ void test("reset intent loader rejects a filename that does not match the chat",
     "utf8",
   );
 
-  await assert.rejects(
-    loadTelegramResetIntents(directory),
-    /filename does not match its chat key/,
-  );
+  const errors: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => {
+    errors.push(parts.map(String).join(" "));
+  });
+  assert.deepEqual(await loadTelegramResetIntents(directory), []);
+  assert.match(errors[0], /filename does not match its chat key/u);
 });

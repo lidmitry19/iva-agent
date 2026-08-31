@@ -16,10 +16,7 @@ import type {
   TelegramContext,
   TelegramMessage,
 } from "eve/channels/telegram";
-import type {
-  RouteHandlerArgs,
-  Session,
-} from "eve/channels";
+import type { RouteHandlerArgs, Session } from "eve/channels";
 import {
   createQueueItem,
   enqueueItem,
@@ -102,6 +99,10 @@ type SendImpl = (
   input: unknown,
   options: unknown,
 ) => Promise<unknown>;
+type TelegramRouteHandler = (
+  request: Request,
+  args: RouteHandlerArgs<TelegramChannelState>,
+) => Promise<Response>;
 type DeliveryOptions = {
   webhookVerifier?: (
     request: Request,
@@ -112,6 +113,7 @@ type DeliveryOptions = {
   webhookSecretHeader?: string;
   completedUpdatesFile?: string;
   observeResponse?: (response: Response) => void;
+  handler?: TelegramRouteHandler;
 };
 type DrainReadyQueueHeads = (
   options: Record<string, unknown>,
@@ -137,30 +139,30 @@ const fakeSession = (
     status: "accepted",
   }),
 ): Session => ({
-    id,
-    respond,
-    send: () => {
-      throw new Error("not used");
-    },
-    cancel: () => {
-      throw new Error("not used");
-    },
-    clear: () => {
-      throw new Error("not used");
-    },
-    compact: () => {
-      throw new Error("not used");
-    },
-    getEventStream: () => {
-      throw new Error("not used");
-    },
-    getStreamTailIndex: () => {
-      throw new Error("not used");
-    },
-    reset: () => {
-      throw new Error("not used");
-    },
-  });
+  id,
+  respond,
+  send: () => {
+    throw new Error("not used");
+  },
+  cancel: () => {
+    throw new Error("not used");
+  },
+  clear: () => {
+    throw new Error("not used");
+  },
+  compact: () => {
+    throw new Error("not used");
+  },
+  getEventStream: () => {
+    throw new Error("not used");
+  },
+  getStreamTailIndex: () => {
+    throw new Error("not used");
+  },
+  reset: () => {
+    throw new Error("not used");
+  },
+});
 process.env.TELEGRAM_BOT_TOKEN = fakeBotToken(999, "acceptance-default");
 process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN = WEBHOOK_SECRET;
 process.env.TELEGRAM_ALLOWED_USER_IDS = "42";
@@ -232,6 +234,7 @@ function productionTelegramDelivery(
     marked = true,
     webhookSecretHeader = WEBHOOK_SECRET,
     observeResponse,
+    handler,
     completedUpdatesFile = join(
       mkdtempSync(join(tmpdir(), "iva-completed-updates-test-")),
       "completed-updates.json",
@@ -288,11 +291,9 @@ function productionTelegramDelivery(
       }),
       resolveSession: async () =>
         fakeSession(sessionId, async (inputResponses, options) => {
-          const message = "message" in update ? update.message.text ?? "" : "";
-          const result = await call(
-            { inputResponses, message },
-            options,
-          );
+          const message =
+            "message" in update ? (update.message.text ?? "") : "";
+          const result = await call({ inputResponses, message }, options);
           return typeof result === "object" &&
             result !== null &&
             "status" in result &&
@@ -308,7 +309,7 @@ function productionTelegramDelivery(
       requestIp: "127.0.0.1",
     } as unknown as RouteHandlerArgs<TelegramChannelState>;
     const response = await handleAcceptedTelegramWebhook(
-      route.handler,
+      handler ?? route.handler,
       new Request("http://iva.test/eve/v1/telegram/accepted", {
         method: "POST",
         headers: {
@@ -642,8 +643,12 @@ test("an update is recorded only after successful acceptance", async () => {
   );
   assert.equal(await rejected(privateUpdate(601, "retry me")), false);
 
+  let acceptedOptions: unknown;
   const accepted = productionTelegramDelivery(
-    async () => ({ id: "accepted-session" }),
+    async (_update, _input, options) => {
+      acceptedOptions = options;
+      return { id: "accepted-session" };
+    },
     {
       completedUpdatesFile,
       onMessage: () => {
@@ -653,6 +658,10 @@ test("an update is recorded only after successful acceptance", async () => {
     },
   );
   assert.equal(await accepted(privateUpdate(601, "retry me")), true);
+  assert.equal(
+    (acceptedOptions as { turnPolicy?: unknown }).turnPolicy,
+    "queue",
+  );
   assert.equal(handlerCalls, 2);
   assert.deepEqual(JSON.parse(readFileSync(completedUpdatesFile, "utf8")), {
     botId: "999",
@@ -797,7 +806,10 @@ test("Trace: обёртка пишет состав контекста и свя
 // eve строит inputResponses из reply на сообщение бота. Сессия под цитатой может
 // закрыться штатно. Session.respond сообщает это структурным session_not_active.
 
-const replyToBotUpdate = (updateId: number, text: string): TestUpdate => ({
+const replyToBotUpdate = (
+  updateId: number,
+  text?: string,
+): TestMessageUpdate => ({
   ...privateUpdate(updateId, text),
   message: {
     ...privateUpdate(updateId, text).message,
@@ -848,6 +860,40 @@ test("a reply to a closed session is delivered as a new turn exactly once", asyn
       "[telegram] reply to a closed session; delivering as a new message (update 1101)",
     ],
   );
+});
+
+test("a media-only reply can reroute with its prepared context", async () => {
+  const mediaContext = "[photo] vault/path.jpg\n\nописание";
+  const attempts: Array<{ input: unknown; options: unknown }> = [];
+  const delivery = productionTelegramDelivery(
+    async (_update, input, options) => {
+      attempts.push({ input, options });
+      if (inputResponsesOf(input).length > 0)
+        return { status: "session_not_active" };
+      return { id: "new-media-turn" };
+    },
+    {
+      handler: async (_request, args) => {
+        args.waitUntil(
+          args.from("telegram:1::").respond([{ requestId: "media-reply" }], {
+            auth: null,
+            context: [mediaContext],
+          }),
+        );
+        return new Response("ok");
+      },
+    },
+  );
+  const update = replyToBotUpdate(1102);
+  update.message.photo = [{ file_id: "f1", width: 90, height: 90 }];
+
+  assert.equal(await delivery(update), true);
+  assert.equal(attempts.length, 2, "ровно одна перемаршрутизация");
+  assert.equal(inputResponsesOf(attempts[0].input).length, 1);
+  assert.equal(inputResponsesOf(attempts[1].input).length, 0);
+  assert.deepEqual((attempts[1].options as { context?: unknown }).context, [
+    mediaContext,
+  ]);
 });
 
 test("a new turn refused by an unavailable eve is retained, then delivered on the next healthy cycle", async () => {

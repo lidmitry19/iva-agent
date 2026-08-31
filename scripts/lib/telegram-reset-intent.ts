@@ -12,7 +12,8 @@ import { dirname, join } from "node:path";
 import { telegramAddressFromChatKey } from "./telegram-reset.ts";
 
 export const TELEGRAM_RESET_INTENT_VERSION = 1;
-const RETIRED_ROUTING_FIELD = ["continuation", "Token"].join("");
+// Поле нужно только для отката на 0.3.x. Удалить после стабилизации 0.4.x.
+const RETIRED_ROUTING_FIELD = "continuationToken";
 
 export interface TelegramResetIntent {
   version: typeof TELEGRAM_RESET_INTENT_VERSION;
@@ -144,16 +145,21 @@ export async function loadTelegramResetIntents(
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const path = join(directory, entry.name);
-    const intent = normalizeIntent(
-      JSON.parse(await readFile(path, "utf8")),
-      path,
-    );
-    if (intentPath(directory, intent.chatKey) !== path) {
-      throw new Error(
-        `Telegram reset intent filename does not match its chat key: ${path}`,
+    const raw = await readFile(path, "utf8");
+    try {
+      const intent = normalizeIntent(JSON.parse(raw), path);
+      if (intentPath(directory, intent.chatKey) !== path) {
+        throw new Error(
+          `Telegram reset intent filename does not match its chat key: ${path}`,
+        );
+      }
+      intents.push(intent);
+    } catch (error) {
+      console.error(
+        `cannot load Telegram reset intent ${path}:`,
+        error instanceof Error ? error.message : String(error),
       );
     }
-    intents.push(intent);
   }
   return intents.sort(
     (left, right) =>

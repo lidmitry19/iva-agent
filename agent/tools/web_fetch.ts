@@ -58,6 +58,14 @@ export default defineTool({
       return { ...gatedError, error: `web_fetch: ${gatedError.error}` };
     }
 
+    if (typeof raw.status !== "number") {
+      const gatedError = gateWebError(
+        `web_fetch ${requested}`,
+        "framework result has no numeric status (eve patch missing?)",
+      );
+      return { ...gatedError, error: `web_fetch: ${gatedError.error}` };
+    }
+
     if (raw.status < 200 || raw.status >= 300) {
       const gatedError = gateWebError(`web_fetch ${requested}`, raw.content);
       return { ...gatedError, error: `web_fetch: ${gatedError.error}` };

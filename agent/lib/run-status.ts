@@ -30,9 +30,8 @@ type StatusRecord = {
 };
 type StatusPatch = Record<string, unknown>;
 
-// Pre-0.47 status files can contain this retired routing field. Every writer
-// removes it during the first normal status transition.
-export const RETIRED_SESSION_ROUTING_FIELD = "continuation" + "Token";
+// Поле нужно только для отката на 0.3.x. Удалить после стабилизации 0.4.x.
+export const RETIRED_SESSION_ROUTING_FIELD = "continuationToken";
 
 const errorCode = (error: unknown): string | undefined =>
   error !== null && typeof error === "object" && "code" in error

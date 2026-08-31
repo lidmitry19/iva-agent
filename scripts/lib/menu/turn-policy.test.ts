@@ -124,7 +124,10 @@ test("junk callbacks do not mutate settings or redraw", async () => {
 
 test("corrupt settings render queue but refuse a silent repair", async () => {
   writeFileSync(settingsPath, "{ broken");
-  assert.equal(labels(screen.render({ page: 0 }, makeContext("en")))[0][0], "✓ Queue");
+  assert.equal(
+    labels(screen.render({ page: 0 }, makeContext("en")))[0][0],
+    "✓ Queue",
+  );
   await assert.rejects(
     screen.on("set", ["steer"], { page: 0 }, makeContext("en")),
     (error: unknown) =>

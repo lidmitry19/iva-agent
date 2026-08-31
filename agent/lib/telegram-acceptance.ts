@@ -8,11 +8,7 @@ import type {
   TelegramMessage,
 } from "eve/channels/telegram";
 import { parseTelegramUpdate } from "eve/channels/telegram";
-import type {
-  ChannelSource,
-  RouteHandlerArgs,
-  TurnPolicy,
-} from "eve/channels";
+import type { ChannelSource, RouteHandlerArgs, TurnPolicy } from "eve/channels";
 import {
   acquireLock,
   loadJsonStrict,
@@ -73,7 +69,7 @@ function telegramReroute(body: unknown): TelegramReroute | null {
   const message = update.message;
   if (message.replyToMessage?.from?.isBot !== true) return null;
   const text = message.text || message.caption;
-  if (text.trim().length === 0) return null;
+  if (text.trim().length === 0 && message.attachments.length === 0) return null;
   const privateChat = message.chat.type === "private";
   return {
     message: text,
@@ -179,9 +175,7 @@ export function wrapTelegramQueueOnMessage(
   };
 }
 
-async function metadataFromRequest(
-  request: Request,
-): Promise<RequestMetadata> {
+async function metadataFromRequest(request: Request): Promise<RequestMetadata> {
   try {
     const body: unknown = await request.clone().json();
     const receipt =
@@ -358,13 +352,10 @@ export async function handleAcceptedTelegramWebhook<TState>(
         console.error(
           `[telegram] reply to a closed session; delivering as a new message (update ${updateLabel})`,
         );
-        return send(
-          reroute.message,
-          {
-            ...options,
-            state: reroute.state as TState,
-          } as Parameters<ChannelSource<TState>["send"]>[1],
-        );
+        return send(reroute.message, {
+          ...options,
+          state: reroute.state as TState,
+        } as Parameters<ChannelSource<TState>["send"]>[1]);
       };
       return {
         cancel: source.cancel.bind(source),

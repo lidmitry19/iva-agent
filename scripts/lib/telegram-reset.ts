@@ -61,9 +61,7 @@ function addressForMessage(
   const chatId = numericId(message.chat?.id, true);
   const messageThreadId = threadId(message.message_thread_id);
   const parsedConversationId =
-    conversationId === undefined
-      ? undefined
-      : numericId(conversationId, false);
+    conversationId === undefined ? undefined : numericId(conversationId, false);
   if (
     chatId === null ||
     messageThreadId === null ||

@@ -22,7 +22,6 @@ import {
 import {
   getChatStatus,
   listChatStatuses,
-  RETIRED_SESSION_ROUTING_FIELD,
   RUN_STALE_MS,
   setChatStatus,
   setChatStatusIf,
@@ -140,7 +139,6 @@ export async function completeScopedResetState(
 
   setStatusImpl(chatKey, {
     status: "idle",
-    [RETIRED_SESSION_ROUTING_FIELD]: null,
     sessionId: null,
     turnId: null,
     statusMessageId: null,
@@ -155,9 +153,7 @@ export async function completeScopedResetState(
   });
 }
 
-export async function persistPrivateResetIntent(
-  chatKey: string,
-) {
+export async function persistPrivateResetIntent(chatKey: string) {
   return persistTelegramResetIntent(RESET_INTENT_DIR, chatKey);
 }
 
@@ -277,7 +273,8 @@ export async function reconcileScopedResetIntents({
   for (const intent of intents) {
     const address = telegramAddressFromChatKey(intent.chatKey);
     if (address === null) {
-      throw new Error(`invalid Telegram reset intent chat key: ${intent.chatKey}`);
+      logImpl(`invalid Telegram reset intent chat key: ${intent.chatKey}`);
+      continue;
     }
     const target = { address } as const;
     const result = await requestResetImpl({ chatKey: intent.chatKey, target });

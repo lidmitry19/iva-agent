@@ -11,11 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import type {
-  ChannelSource,
-  RouteHandlerArgs,
-  Session,
-} from "eve/channels";
+import type { ChannelSource, RouteHandlerArgs, Session } from "eve/channels";
 import type { TelegramChannelState } from "eve/channels/telegram";
 
 const dataDir = mkdtempSync(join(tmpdir(), "iva-telegram-failures-"));
@@ -144,10 +140,7 @@ function traceEvents(): Record<string, unknown>[] {
 
 after(() => rmSync(dataDir, { recursive: true, force: true }));
 
-function eventContext({
-  chatId,
-  sessionId,
-}: EventOptions) {
+function eventContext({ chatId, sessionId }: EventOptions) {
   const ctx = new ContextContainer();
   ctx.set(SessionKey, {
     auth: { current: null, initiator: null },
