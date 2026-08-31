@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, readdirSync, statfsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { listChatStatuses, RUN_STALE_MS } from "#lib/run-status.ts";
+// CLI обязан грузиться без authored tree (scripts/cli/entrypoints.test.ts),
+// поэтому run-status подгружается динамически в самой проверке, а здесь — только тип.
+import type { listChatStatuses } from "../../agent/lib/run-status.ts";
 import {
   loadQueueFile,
   queueKeys,
@@ -104,7 +106,7 @@ export function createDoctorCommand(
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
   const nodeVersion = dependencies.nodeVersion ?? process.versions.node;
-  const listStatuses = dependencies.listChatStatusesImpl ?? listChatStatuses;
+  const listStatusesOverride = dependencies.listChatStatusesImpl;
 
   return async function cmdDoctor(): Promise<void> {
     let okN = 0;
@@ -526,18 +528,25 @@ export function createDoctorCommand(
       }
     }
     let statuses: ReturnType<typeof listChatStatuses> = [];
+    let staleRunMs: number | null = null;
     try {
-      statuses = listStatuses();
+      const runStatus = await import("../../agent/lib/run-status.ts");
+      statuses = (listStatusesOverride ?? runStatus.listChatStatuses)();
+      staleRunMs = runStatus.RUN_STALE_MS;
     } catch {
-      // A missing or unreadable run-status directory contributes no stale chats.
+      // Authored tree или run-status каталог недоступны (CLI обязан грузиться
+      // и без них) — протухшие чаты в этой среде проверить нечем.
     }
     const checkedAt = now();
-    const stuckChats = statuses.filter(
-      ({ status }) =>
-        status.status === "running" &&
-        (typeof status.updatedAt !== "number" ||
-          checkedAt - status.updatedAt > RUN_STALE_MS),
-    ).length;
+    const stuckChats =
+      staleRunMs === null
+        ? 0
+        : statuses.filter(
+            ({ status }) =>
+              status.status === "running" &&
+              (typeof status.updatedAt !== "number" ||
+                checkedAt - status.updatedAt > staleRunMs),
+          ).length;
     let itemCount = 0;
     let oldestEnqueuedAt: number | null = null;
     for (const document of bridgeDocuments) {
