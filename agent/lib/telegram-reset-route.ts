@@ -1,5 +1,14 @@
 import { verifyTelegramRequest } from "eve/channels/telegram";
-import type { ResetFn } from "eve/channels";
+import type { ResetSessionResult } from "eve/channels";
+
+// TODO(ticket-03): eve 0.47 removed the continuation-token `ResetFn` from
+// RouteHandlerArgs; reset now lives on `from(address).reset({reason})`. This
+// local type freezes the pre-migration call shape until ticket 03 rebuilds reset
+// on session-id handles (attachSession), matching agent/lib/eve-cancel.ts.
+export type ResetFn = (request: {
+  continuationToken: string;
+  reason?: string;
+}) => Promise<ResetSessionResult>;
 
 /**
  * Authenticated Telegram-owned session reset endpoint.

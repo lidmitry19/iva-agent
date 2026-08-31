@@ -1,6 +1,5 @@
 import { verifyTelegramRequest } from "eve/channels/telegram";
-import type { CancelFn } from "eve/channels";
-import { cancelEveTurn } from "./eve-cancel.ts";
+import { cancelEveTurn, type CancelFn } from "./eve-cancel.ts";
 
 export const TELEGRAM_CANCEL_ROUTE = "/eve/v1/telegram/cancel";
 

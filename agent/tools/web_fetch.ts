@@ -1,5 +1,5 @@
 import { defineTool } from "eve/tools";
-import { webFetch } from "eve/tools/defaults";
+import { webFetch } from "eve/tools/web_fetch";
 import {
   gateWebError,
   gateWebText,

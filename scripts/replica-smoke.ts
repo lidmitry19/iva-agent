@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { startMockOpenAiServer } from "./lib/mock-openai-server.ts";
 import { RUNTIME_SOURCE_TREES } from "./lib/custom-layer.ts";
-import type { ClientSession, MessageResult } from "eve/client";
+import type { ClientSession, ClientSessionState, MessageResult } from "eve/client";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const MARKER = "CEDAR-4729";
@@ -191,6 +191,23 @@ async function waitForHealth(port: number, child: EveProcess): Promise<void> {
   }
   throw new Error(
     `eve did not become healthy within ${HEALTH_TIMEOUT_MS / 1000}s`,
+  );
+}
+
+// TODO(ticket-05): eve 0.47 replaced the resumable, state-blob `client.session(state?)`
+// API with `client.sessions.create()/.attach(sessionId, {streamIndex})`; a fresh
+// no-message-yet handle and an opaque-state resume no longer exist as one call. This
+// smoke test is ops-only (`npm run replica`, not part of `npm test`); ticket 05
+// rebuilds session creation/resume here alongside the rollup client (see
+// spike-facts.md S5a/S5b for the new-API behavior this test is meant to exercise).
+function legacyClientSession(
+  client: unknown,
+  resume?: ClientSessionState,
+): ClientSession {
+  void client;
+  throw new Error(
+    "replica-smoke client.session() not implemented after eve 0.47 bump (ticket 05)" +
+      (resume?.sessionId ? ` (resume ${resume.sessionId})` : ""),
   );
 }
 
@@ -403,7 +420,7 @@ async function main(): Promise<void> {
     });
 
     setPhase("first-reply");
-    const session = client.session();
+    const session = legacyClientSession(client);
     const first = await turn(session, "Reply with a status word.");
     if (first !== "REPLICA_OK")
       throw new Error(`unexpected first reply: ${JSON.stringify(first)}`);
@@ -462,7 +479,10 @@ async function main(): Promise<void> {
     await waitForHealth(port, eve);
 
     setPhase("post-restart");
-    const fresh = await turn(client.session(), "Reply with a status word.");
+    const fresh = await turn(
+      legacyClientSession(client),
+      "Reply with a status word.",
+    );
     if (fresh !== "REPLICA_OK")
       throw new Error(
         `unexpected post-restart reply: ${JSON.stringify(fresh)}`,
@@ -476,7 +496,7 @@ async function main(): Promise<void> {
     setPhase("resume");
     const strictResume = process.env.REPLICA_STRICT_RESUME === "1";
     try {
-      const resumed = client.session(savedState);
+      const resumed = legacyClientSession(client, savedState);
       const echo = await turn(
         resumed,
         "What code did I ask you to remember? Reply with the code only.",

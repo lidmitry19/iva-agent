@@ -23,17 +23,17 @@ const client = new Client({
   ...(BEARER ? { auth: { bearer: () => Promise.resolve(BEARER) } } : {}),
 });
 
-const session = client.session();
 // The same delivery rule the nightly rollup states, in the same words: this turn's result
 // is delivered by the code below, so a rich message here would be the second message.
 // The red line in agent/instructions.md exempts exactly these two scheduled turns.
-const response = await session.send(
-  "Load the morning-digest skill and build the morning digest for my tasks. " +
+const { response, session } = await client.sessions.create({
+  message:
+    "Load the morning-digest skill and build the morning digest for my tasks. " +
     `Return the digest ${writtenInLanguage(tr)}. ` +
     "Return the digest as the final text of this turn. Do not send it anywhere yourself: " +
     "no rich messages, no digest chat, no Telegram tools. " +
     "Only the finished digest text, no preamble.",
-);
+});
 const result = await response.result();
 
 // An interactive turn ends with status "waiting" (the session is ready for the next message),

@@ -14,7 +14,7 @@ type CancelInput = { continuationToken: string; turnId?: string };
 
 const accepted = async (input: CancelInput, calls: CancelInput[]) => {
   calls.push(input);
-  return { status: "accepted" as const };
+  return { sessionId: "test-session", status: "accepted" as const };
 };
 
 test("cancel client sends the token, the turn guard and the webhook secret", async () => {
@@ -105,7 +105,11 @@ test("cancel route authenticates and forwards the exact token and turn guard", a
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, status: "accepted" });
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    sessionId: "test-session",
+    status: "accepted",
+  });
   assert.deepEqual(calls, [
     { continuationToken: "-1001:7:55", turnId: "turn-9" },
   ]);
@@ -115,7 +119,7 @@ test("cancel route rejects bad auth and bad input before cancelling", async () =
   let called = false;
   const cancel = async () => {
     called = true;
-    return { status: "accepted" as const };
+    return { sessionId: "test-session", status: "accepted" as const };
   };
 
   const unauthorized = await handleTelegramCancelRequest(

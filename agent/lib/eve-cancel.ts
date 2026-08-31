@@ -1,4 +1,13 @@
-import type { CancelFn, CancelTurnResult } from "eve/channels";
+import type { CancelTurnResult } from "eve/channels";
+
+// TODO(ticket-03): eve 0.47 removed the continuation-token `CancelFn` from
+// RouteHandlerArgs; cancel now lives on `from(address).cancel({turnId})`. This
+// local type freezes the pre-migration call shape until ticket 03 rebuilds cancel
+// on session-id handles (attachSession), per the comment below.
+export type CancelFn = (request: {
+  continuationToken: string;
+  turnId?: string;
+}) => Promise<CancelTurnResult>;
 
 /**
  * Единственное место КАНАЛЬНОЙ отмены: отмены хода, пришедшей снаружи по

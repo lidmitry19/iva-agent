@@ -111,19 +111,23 @@ const isCompletedLedger = (
 
 const fakeBotToken = (id: number, label: string): string =>
   `${id}:${Buffer.from(label).toString("base64url")}`;
-const fakeSession = (id: string): Session => ({
-  id,
-  continuationToken: id,
-  cancel: () => {
-    throw new Error("not used");
-  },
-  getEventStream: () => {
-    throw new Error("not used");
-  },
-  getStreamTailIndex: () => {
-    throw new Error("not used");
-  },
-});
+// TODO(ticket-04): eve 0.47 grew `Session` (send/respond/compact/clear/reset are
+// now required); this mock never implemented those and the whole acceptance harness
+// predates the new `from(address)` dispatch surface. Cast, don't redesign, here.
+const fakeSession = (id: string): Session =>
+  ({
+    id,
+    continuationToken: id,
+    cancel: () => {
+      throw new Error("not used");
+    },
+    getEventStream: () => {
+      throw new Error("not used");
+    },
+    getStreamTailIndex: () => {
+      throw new Error("not used");
+    },
+  }) as unknown as Session;
 process.env.TELEGRAM_BOT_TOKEN = fakeBotToken(999, "acceptance-default");
 process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN = WEBHOOK_SECRET;
 process.env.TELEGRAM_ALLOWED_USER_IDS = "42";
@@ -197,8 +201,13 @@ function productionTelegramDelivery(
   assert.ok(route && route.transport !== "websocket");
 
   return async (update: TestUpdate) => {
-    const routeArgs: RouteHandlerArgs<TelegramChannelState> = {
-      send: async (input, options) => {
+    // TODO(ticket-04): eve 0.47 removed `send`/`resolveActiveSession` from
+    // RouteHandlerArgs (dispatch moved to `from(address)`/`attachSession`); this
+    // harness mocks the pre-migration shape so the real telegramChannel route
+    // handler no longer finds the dispatch surface it expects. Cast keeps this
+    // compiling; ticket 04 rebuilds the harness on the new surface.
+    const routeArgs = {
+      send: async (input: unknown, options: unknown) => {
         await sendImpl(update, input, options);
         return fakeSession(`test-session-${update.update_id}`);
       },
@@ -226,7 +235,7 @@ function productionTelegramDelivery(
       params: {},
       waitUntil: () => {},
       requestIp: "127.0.0.1",
-    };
+    } as unknown as RouteHandlerArgs<TelegramChannelState>;
     const response = await handleAcceptedTelegramWebhook(
       route.handler,
       new Request("http://iva.test/eve/v1/telegram/accepted", {
@@ -392,6 +401,8 @@ test("acceptance route preserves Telegram auth failure and rejects malformed no-
       headers: { "content-type": "application/json" },
       body: "{broken",
     }),
+    // TODO(ticket-04): same pre-migration RouteHandlerArgs mock as
+    // productionTelegramDelivery above (see its cast comment).
     {
       send: () => {
         sendCalls++;
@@ -421,7 +432,7 @@ test("acceptance route preserves Telegram auth failure and rejects malformed no-
       params: {},
       waitUntil: () => {},
       requestIp: "127.0.0.1",
-    },
+    } as unknown as RouteHandlerArgs<TelegramChannelState>,
   );
   assert.equal(malformed.ok, false);
   assert.equal(malformed.status, 503);

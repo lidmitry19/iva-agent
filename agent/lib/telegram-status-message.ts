@@ -9,7 +9,10 @@
 // Про eve модуль не знает: канал передаёт хендл Bot API структурно.
 import { tr } from "./i18n.ts";
 import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
-import { toChannelLocalToken } from "./telegram-continuation-token.ts";
+import {
+  requireContinuationToken,
+  toChannelLocalToken,
+} from "./telegram-continuation-token.ts";
 import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
 // В callback_data кладём только константу: лимит 64 байта не вмещает sessionId,
@@ -121,7 +124,7 @@ export async function enableWorkingStatusStop(
 // или переписать на «Остановлено» (отмена). Сбои уборки не критичны — глотаем.
 export async function finishTelegramStatus(
   channel: {
-    continuationToken: string;
+    continuation?: { readonly token: string };
     telegram: TelegramStatusHandle;
   },
   sessionId: string,
@@ -138,7 +141,9 @@ export async function finishTelegramStatus(
       { sessionId },
       {
         status: "idle",
-        continuationToken: toChannelLocalToken(channel.continuationToken),
+        continuationToken: toChannelLocalToken(
+          requireContinuationToken(channel),
+        ),
         sessionId: null,
         turnId: null,
         statusMessageId: null,

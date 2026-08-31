@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Client, type MessageResult, type SessionState } from "eve/client";
+import { Client, type ClientSession, type MessageResult } from "eve/client";
 import { CORE_CAP } from "#lib/core-cap.ts";
 import { coreDamage, setLastDayPointer } from "#lib/core-clamp.ts";
 import { writeFileAtomicSync } from "#lib/fs-atomic.ts";
@@ -195,6 +195,30 @@ const client = new Client({
   ...(BEARER ? { auth: { bearer: () => Promise.resolve(BEARER) } } : {}),
 });
 
+// TODO(ticket-05): eve 0.47 removed the resumable, state-blob `client.session(state?)`
+// API (`SessionState` is gone from eve/client) in favor of an ID-addressed
+// `client.sessions.create()/.attach(sessionId, {streamIndex})` surface with no opaque
+// resume blob. `SessionState` below freezes the on-disk shape this file persists to
+// SESSION_FILE (unrelated to eve's type, ours to keep); `legacyClientSession` is a
+// placeholder for the removed `client.session()` until ticket 05 rebuilds the rollup
+// client on session IDs (see .scratch/eve-migration/spike-facts.md, S5b, for the
+// ClientSession stale-cursor bug to account for in that redesign).
+type SessionState = {
+  readonly streamIndex: number;
+  readonly sessionId?: string;
+  readonly continuationToken?: string;
+};
+function legacyClientSession(
+  client: Client,
+  resume?: SessionState,
+): ClientSession {
+  void client;
+  throw new Error(
+    "rollup client.session() not implemented after eve 0.47 bump (ticket 05)" +
+      (resume?.sessionId ? ` (resume ${resume.sessionId})` : ""),
+  );
+}
+
 // Session REUSE, not a fresh session per night. eve backs every client session with a
 // workflowEntry run in .eve/.workflow-data that nothing ever closes (the client API has
 // no delete), so a fresh session per rollup leaked one forever-"running" run per night
@@ -288,7 +312,7 @@ const TURN_TIMEOUT_MS = resolveTurnTimeoutMs(
   },
 );
 const guardedTurn = (
-  session: ReturnType<typeof client.session>,
+  session: ClientSession,
   prompt: string,
   label: string,
   onAccepted: (result: Promise<MessageResult>) => void = () => {},
@@ -358,7 +382,7 @@ const yesterday = shiftDate(today, -1);
 const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
-let session = saved ? client.session(saved.state) : client.session();
+let session = saved ? legacyClientSession(client, saved.state) : legacyClientSession(client);
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
 // Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
 // на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
@@ -409,7 +433,7 @@ try {
     `rollup ${period}: parked session ${hung ? "hung" : "unusable"} (${(e as Error).message}) — starting fresh`,
   );
   logAbandoned(saved.state, hung ? "resume-timeout" : "unusable-cursor");
-  session = client.session();
+  session = legacyClientSession(client);
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
   try {

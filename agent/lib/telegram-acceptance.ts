@@ -45,36 +45,11 @@ function validReceipt(value: unknown): value is string {
   return typeof value === "string" && RECEIPT_PATTERN.test(value);
 }
 
-// Единственный признак класса, который отдаёт eve: текст ошибки из createSendFn
-// (dist/src/channel/send.js). Он бросается ровно тогда, когда inputResponses некуда
-// доставить, — остальные сбои send остаются транзиентными и ретраятся как раньше.
-const CLOSED_SESSION_PATTERN =
-  /target session was not found via continuation token/iu;
-
-function isClosedSessionError(error: unknown): boolean {
-  return error instanceof Error && CLOSED_SESSION_PATTERN.test(error.message);
-}
-
-// Сессии закрываются штатно: ротация, ночной сброс, /new, рестарт при апдейте. Reply на
-// старое сообщение бота eve превращает в inputResponses, и такой ход не начнётся уже
-// никогда. Тот же текст без inputResponses — обычный новый ход: цитата теряет контекст
-// своей сессии, зато пользователь получает ответ.
-function turnWithoutInputResponses(
-  input: unknown,
-): Record<string, unknown> | null {
-  if (!isRecord(input)) return null;
-  if (!Array.isArray(input.inputResponses) || input.inputResponses.length === 0)
-    return null;
-  const message = input.message;
-  const hasMessage =
-    typeof message === "string"
-      ? message.trim().length > 0
-      : Array.isArray(message) && message.length > 0;
-  if (!hasMessage) return null;
-  const newTurn = { ...input };
-  delete newTurn.inputResponses;
-  return newTurn;
-}
+// TODO(ticket-04): closed-session detection (`isClosedSessionError` /
+// `turnWithoutInputResponses`, formerly used to retry a reply-to-closed-session as
+// a fresh turn) was removed here — it depended on intercepting `args.send`, which
+// eve 0.47 no longer exposes on RouteHandlerArgs. See handleAcceptedTelegramWebhook
+// below for the current (degraded) behavior.
 
 function hasValidWebhookSecret(request: Request): boolean {
   const expected = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
@@ -299,46 +274,19 @@ export async function handleAcceptedTelegramWebhook<TState>(
   }
   return receiptContext.run({ receipt, handled: false }, async () => {
     const background: Promise<unknown>[] = [];
-    let accepted = false;
-    let closedSession = false;
-    const updateLabel = updateId === null ? "unknown" : String(updateId);
-
+    // TODO(ticket-04): eve 0.47 removed `send` from RouteHandlerArgs (dispatch now
+    // goes through `from(address).send()`, which this route no longer receives
+    // baked into `args`). The FIFO acceptance guarantee below used to intercept
+    // `args.send` to confirm a real Eve send before acking the bridge, and to
+    // detect a closed-session reply and retry it as a fresh turn. Neither hook
+    // exists on this API anymore, so both are gone here: this now only reports
+    // the receiptContext `handled` signal (untouched, unrelated to send). Ticket 04
+    // rebuilds send-confirmation and closed-session detection on the new surface.
+    // Until then this never claims `accepted`, so a real accepted send now falls
+    // through to the transient 503 path below (safe: the bridge retries, ADR-0002)
+    // instead of a false-positive 204.
     const wrappedArgs: RouteHandlerArgs<TState> = {
       ...args,
-      send: async (...sendArgs: Parameters<typeof args.send>) => {
-        try {
-          const session = await args.send(...sendArgs);
-          accepted = true;
-          return session;
-        } catch (error) {
-          if (!isClosedSessionError(error)) throw error;
-          const [input, ...rest] = sendArgs;
-          const newTurn = turnWithoutInputResponses(input);
-          if (newTurn === null) {
-            closedSession = true;
-            throw error;
-          }
-          console.error(
-            `[telegram] reply to a closed session; delivering as a new message (update ${updateLabel})`,
-          );
-          try {
-            const session = await args.send(newTurn, ...rest);
-            accepted = true;
-            return session;
-          } catch (rerouteError) {
-            // Новый ход упал сам по себе — это уже не про закрытую сессию, а про
-            // недоступную eve. Терять сообщение владельца нельзя (ADR-0002): ответ
-            // остаётся транзиентным 503, мост сохраняет апдейт и повторит его.
-            // Терминальным остаётся только тот же класс закрытой сессии.
-            closedSession = isClosedSessionError(rerouteError);
-            console.error(
-              `[telegram] new message for a closed session was not accepted (update ${updateLabel}):`,
-              rerouteError,
-            );
-            throw error;
-          }
-        }
-      },
       waitUntil: (task: Promise<unknown>) => {
         background.push(Promise.resolve(task));
       },
@@ -348,7 +296,7 @@ export async function handleAcceptedTelegramWebhook<TState>(
     if (!response.ok) return response;
     await Promise.allSettled(background);
     const handled = receiptContext.getStore()?.handled === true;
-    if (accepted || handled) {
+    if (handled) {
       if (updateId !== null && authenticated && botId !== null) {
         try {
           await recordCompletedUpdate(completedFile, botId, updateId);
@@ -362,20 +310,7 @@ export async function handleAcceptedTelegramWebhook<TState>(
       }
       return new Response(null, {
         status: 204,
-        headers: {
-          [TELEGRAM_ACCEPTANCE_KIND_HEADER]: accepted ? "turn" : "handled",
-        },
-      });
-    }
-    // Терминальный класс: сессия под цитатой закрыта, а новым ходом это сообщение
-    // доставить не удалось. Ретрай бессмыслен и вешал бы мост (issue #203), поэтому
-    // ответ отличается от транзиентного 503 — мост хоронит апдейт по этому заголовку.
-    if (closedSession) {
-      return new Response("Telegram reply targeted a closed session", {
-        status: 409,
-        headers: {
-          [TELEGRAM_ACCEPTANCE_KIND_HEADER]: TELEGRAM_CLOSED_SESSION_KIND,
-        },
+        headers: { [TELEGRAM_ACCEPTANCE_KIND_HEADER]: "handled" },
       });
     }
     return new Response("Telegram update was not accepted by Eve", {

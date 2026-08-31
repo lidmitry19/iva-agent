@@ -45,7 +45,7 @@ async function readToken(
 
 export default defineChannel({
   routes: [
-    POST("/replica/canary/send", async (request, { send }) => {
+    POST("/replica/canary/send", async (request, { from }) => {
       if (!authorized(request))
         return new Response("unauthorized", { status: 401 });
       const parsed = await readToken(request);
@@ -53,32 +53,26 @@ export default defineChannel({
       if (parsed.message === undefined)
         return new Response("message is required", { status: 400 });
       // Ни intent, ни sessionId: ровно тот вызов, который делает telegram-канал.
-      const session = await send(parsed.message, {
+      // eve 0.47: continuationToken больше не поле опций send, а адрес from().
+      const session = await from(parsed.token).send(parsed.message, {
         auth: null,
-        continuationToken: parsed.token,
       });
       return Response.json({ sessionId: session.id });
     }),
-    POST(
-      "/replica/canary/reset",
-      async (request, { reset, resolveActiveSession }) => {
-        if (!authorized(request))
-          return new Response("unauthorized", { status: 401 });
-        const parsed = await readToken(request);
-        if (parsed instanceof Response) return parsed;
-        const result = await reset({
-          continuationToken: parsed.token,
-          reason: "replica smoke canary",
-        });
-        const active = await resolveActiveSession({
-          continuationToken: parsed.token,
-        });
-        return Response.json({
-          ...result,
-          activeSessionAfterReset: active?.sessionId ?? null,
-        });
-      },
-    ),
+    // TODO(ticket-03): eve 0.47 removed the continuation-token `reset`/
+    // `resolveActiveSession` helpers from RouteHandlerArgs (reset now lives on
+    // `from(address).reset()`, and there is no direct resolveActiveSession
+    // replacement documented yet). Stub fails loudly instead of silently
+    // no-oping; ticket 03 rebuilds this alongside agent/lib/eve-cancel.ts.
+    POST("/replica/canary/reset", async (request) => {
+      if (!authorized(request))
+        return new Response("unauthorized", { status: 401 });
+      const parsed = await readToken(request);
+      if (parsed instanceof Response) return parsed;
+      throw new Error(
+        "replica canary reset not implemented after eve 0.47 bump (ticket 03)",
+      );
+    }),
   ],
   events: {
     // Доставки наружу у канала нет: финальные реплики пишутся в лог, который читает смоук.

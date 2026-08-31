@@ -19,6 +19,27 @@ const NAMESPACE = "telegram:";
 const CHANNEL_LOCAL_SHAPE = /^-?\d+(:|$)/;
 
 /**
+ * eve 0.47 moved the event-handler continuation token from `channel.continuationToken`
+ * (a plain string) to `channel.continuation?.token`. The value and channel-local/namespaced
+ * shape described above are unchanged — only where it lives moved, and it became
+ * optional in eve's type (`ChannelContinuationOps` is shared by contexts that don't
+ * always carry one). For a bound event handler like Telegram's it is always present
+ * per eve's docs (`docs/channels/custom.mdx`: "channel.continuation.token is always
+ * the channel-local address"); fail fast instead of silently swallowing a missing one.
+ */
+export function requireContinuationToken(channel: {
+  readonly continuation?: { readonly token: string };
+}): string {
+  const token = channel.continuation?.token;
+  if (token === undefined) {
+    throw new Error(
+      "[telegram] event channel is missing its continuation token",
+    );
+  }
+  return token;
+}
+
+/**
  * Приводит continuationToken к channel-local виду: срезает префикс канала, если он есть.
  * Идемпотентна — на уже локальном токене ("123::", "-1001:7:42") это no-op.
  */
