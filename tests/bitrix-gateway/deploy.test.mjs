@@ -892,9 +892,110 @@ exit 42
   }
 });
 
+test("admin installer binds current to the reviewed commit in the versioned layout", async (t) => {
+  const admin = await readFile(new URL("admin-install.sh", deployRoot), "utf8");
+  const functionMatch = admin.match(/bind_reviewed_source\(\) \{[\s\S]*?\n\}/u);
+  assert.ok(functionMatch, "versioned source binder is missing");
+
+  const root = await mkdtemp(join(tmpdir(), "iva-bitrix-versioned-source-"));
+  const versions = join(root, "versions");
+  const repo = join(root, "repo");
+  const current = join(root, "current");
+  const expected = "a".repeat(40);
+  const matching = join(versions, `0.3.34-${expected.slice(0, 12)}+12345678`);
+  const wrong = join(versions, `0.3.34-${"b".repeat(12)}+12345678`);
+  const outside = join(root, "outside", `0.3.34-${expected.slice(0, 12)}`);
+  const harnessPath = join(root, "bind-reviewed-source.sh");
+  const harness = `#!/usr/bin/bash
+set -Eeuo pipefail
+IVA_LAYOUT=$1
+CURRENT_LINK=$2
+VERSIONS_DIR=$3
+REPO_STORE=$4
+EXPECTED_COMMIT=$5
+LIVE_SOURCE=
+fail() {
+  printf '%s\\n' "$1" >&2
+  exit 37
+}
+run_git_repo_as_iva() {
+  case "$*" in
+    "rev-parse --is-bare-repository") printf '%s\\n' true ;;
+    "rev-parse --verify --end-of-options $EXPECTED_COMMIT^{commit}") printf '%s\\n' "$EXPECTED_COMMIT" ;;
+    *) return 1 ;;
+  esac
+}
+${functionMatch[0]}
+bind_reviewed_source
+printf '%s\\n' "$LIVE_SOURCE"
+`;
+
+  try {
+    await Promise.all([
+      mkdir(matching, { recursive: true }),
+      mkdir(wrong, { recursive: true }),
+      mkdir(outside, { recursive: true }),
+      mkdir(repo, { recursive: true }),
+    ]);
+    await writeFile(harnessPath, harness, { mode: 0o700 });
+
+    await t.test("matching current version succeeds", async () => {
+      await symlink(matching, current);
+      const result = spawnSync(
+        "/usr/bin/bash",
+        [harnessPath, root, current, versions, repo, expected],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), matching);
+      await rm(current, { force: true });
+    });
+
+    for (const scenario of [
+      {
+        label: "wrong commit prefix fails closed",
+        target: wrong,
+        error: /does not match the reviewed commit/u,
+      },
+      {
+        label: "target outside versions fails closed",
+        target: outside,
+        error: /outside the version store/u,
+      },
+    ]) {
+      await t.test(scenario.label, async () => {
+        await symlink(scenario.target, current);
+        const result = spawnSync(
+          "/usr/bin/bash",
+          [harnessPath, root, current, versions, repo, expected],
+          { encoding: "utf8" },
+        );
+        assert.equal(result.status, 37, result.stderr);
+        assert.match(result.stderr, scenario.error);
+        await rm(current, { force: true });
+      });
+    }
+
+    await t.test("a non-symlink current directory fails closed", async () => {
+      await mkdir(current);
+      const result = spawnSync(
+        "/usr/bin/bash",
+        [harnessPath, root, current, versions, repo, expected],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 37, result.stderr);
+      assert.match(result.stderr, /current must be a symlink/u);
+      await rm(current, { recursive: true, force: true });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("admin installer uses a pinned root copy, guards IVA units, and invalidates the caller ticket", async () => {
   const admin = await readFile(new URL("admin-install.sh", deployRoot), "utf8");
   const dropinPreflight = admin.indexOf("\nassert_no_gateway_dropins\n");
+  const sourceBind = admin.indexOf("\nbind_reviewed_source\n");
   const stage = admin.indexOf(
     "STAGE_ROOT=$(/usr/bin/mktemp -d /run/iva-bitrix-admin-stage.XXXXXX)",
   );
@@ -904,6 +1005,10 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
   );
   const snapshotCopy = admin.indexOf(
     '/usr/bin/install -o root -g root -m 0600 -- "$source" "$staged"',
+    manifestWrite,
+  );
+  const commitProof = admin.indexOf(
+    'run_git_repo_as_iva show "$EXPECTED_COMMIT:$relative"',
     manifestWrite,
   );
   const manifest = admin.indexOf("/usr/bin/sha256sum -c --strict");
@@ -960,14 +1065,40 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
   assert.match(admin, /root-only admin staging snapshot/u);
   assert.match(admin, /A non-root SUDO_USER is required/u);
   assert.match(admin, /\/usr\/sbin\/runuser -u "\$IVA_USER"/u);
-  assert.match(admin, /run_git_as_iva\(\)/u);
-  assert.match(admin, /GIT_OPTIONAL_LOCKS=0 \/usr\/bin\/git -C "\$LIVE_REPO"/u);
+  assert.match(admin, /run_git_repo_as_iva\(\)/u);
+  assert.match(
+    admin,
+    /GIT_OPTIONAL_LOCKS=0[\s\\]+\/usr\/bin\/git --git-dir="\$REPO_STORE"/u,
+  );
+  assert.match(admin, /CURRENT_LINK=\/home\/iva\/iva\/current/u);
+  assert.match(admin, /VERSIONS_DIR=\/home\/iva\/iva\/versions/u);
+  assert.match(admin, /REPO_STORE=\/home\/iva\/iva\/repo/u);
+  assert.match(admin, /IVA current must be a symlink/u);
+  assert.match(admin, /IVA current target is outside the version store/u);
+  assert.match(admin, /reviewed commit is absent from the IVA repository/u);
+  assert.match(
+    admin,
+    /rev-parse --verify --end-of-options[\s\\]+"\$EXPECTED_COMMIT\^\{commit\}"/u,
+  );
+  assert.match(
+    admin,
+    /embedded admin manifest does not match the reviewed commit/u,
+  );
+  assert.match(
+    admin,
+    /IVA current changed while the root snapshot was being prepared/u,
+  );
+  assert.doesNotMatch(admin, /git -C "\$LIVE_REPO"/u);
   assert.doesNotMatch(admin, /\/usr\/bin\/git -c safe\.directory/u);
   assert.ok(
-    dropinPreflight >= 0 &&
+    sourceBind >= 0 &&
+      dropinPreflight >= 0 &&
       stage >= 0 &&
+      sourceBind < dropinPreflight &&
       dropinPreflight < stage &&
       stage < manifestWrite &&
+      manifestWrite < commitProof &&
+      commitProof < snapshotCopy &&
       manifestWrite < snapshotCopy &&
       snapshotCopy < manifest &&
       manifest < capture &&
