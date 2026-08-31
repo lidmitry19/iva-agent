@@ -34,6 +34,7 @@ import {
   cancelTurnAndConfirmQuietly,
   canRetryFresh,
   cancelTurnQuietly,
+  isSessionNotActiveError,
   resolveTurnTimeoutMs,
   withTurnTimeout,
 } from "../lib/rollup-turn.ts";
@@ -283,7 +284,6 @@ const guardedTurn = (
     session: ClientSession,
     result: Promise<MessageResult>,
   ) => void = () => {},
-  onSendRejected: () => void = () => {},
 ) =>
   withTurnTimeout(
     async () => {
@@ -299,24 +299,18 @@ const guardedTurn = (
         const created = await client.sessions.create({ message: prompt });
         return { ...created, sentNotBefore };
       };
-      let sent: Awaited<ReturnType<typeof send>>;
-      try {
-        sent = session
-          ? await drainStreamBefore(
-              session,
-              send,
-              (error) => {
-                console.error(
-                  `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
-                );
-              },
-              TURN_TIMEOUT_MS,
-            )
-          : await send();
-      } catch (error) {
-        onSendRejected();
-        throw error;
-      }
+      const sent = session
+        ? await drainStreamBefore(
+            session,
+            send,
+            (error) => {
+              console.error(
+                `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
+              );
+            },
+            TURN_TIMEOUT_MS,
+          )
+        : await send();
       const result = sent.response.result();
       onAccepted(sent.session, result);
       return {
@@ -367,8 +361,6 @@ let session = saved ? client.sessions.attach(saved.sessionId) : undefined;
 const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
 let result: MessageResult;
 let sentNotBefore: string;
-let accepted = false;
-let sendRejected = false;
 let acceptedTurnResult: Promise<MessageResult> | undefined;
 try {
   const main = await guardedTurn(
@@ -377,11 +369,7 @@ try {
     "main-turn",
     (acceptedSession, turnResult) => {
       session = acceptedSession;
-      accepted = true;
       acceptedTurnResult = turnResult;
-    },
-    () => {
-      sendRejected = true;
     },
   );
   ({ result, sentNotBefore, session } = main);
@@ -395,14 +383,15 @@ try {
     if (hung && session) await cancelTurnQuietly(session);
     throw e;
   }
-  // Принятый ход и зависший send могли продолжить писать после локального таймаута. Перед retry
-  // оба требуют терминального подтверждения: no_active_turn либо turn.cancelled в дочитанном
-  // потоке. Успешный ответ cancel со статусом accepted сам по себе второго писателя не разрешает.
+  // Даже отклонённый локально send мог дойти до сервера до сетевого обрыва. Перед retry
+  // он требует no_active_turn либо turn.cancelled. Исключение — штатный 409 session_not_active.
+  // Успешный cancel со статусом accepted сам по себе второго писателя не разрешает.
+  const sessionNotActive = isSessionNotActiveError(e);
   const cancelConfirmed =
-    (accepted || hung) && session
+    !sessionNotActive && session
       ? await cancelTurnAndConfirmQuietly(session, acceptedTurnResult)
       : false;
-  if (!canRetryFresh({ accepted, sendRejected, cancelConfirmed })) {
+  if (!canRetryFresh({ sessionNotActive, cancelConfirmed })) {
     console.error(
       `rollup ${period}: could not confirm cancellation of the unresolved turn — refusing fresh retry`,
     );

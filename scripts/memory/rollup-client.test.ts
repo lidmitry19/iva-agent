@@ -32,7 +32,7 @@ interface RollupRun {
   readonly stdout: string;
 }
 
-type FakeMode = "own" | "foreign" | "cancel-unconfirmed";
+type FakeMode = "own" | "foreign" | "send-disconnect" | "session-not-active";
 
 function event(type: string, data?: Record<string, unknown>): object {
   return {
@@ -77,7 +77,6 @@ class FakeEve {
   mode: FakeMode = "own";
   #nextSession = 1;
   #events = new Map<string, object[]>();
-  #malformNextFollow = false;
 
   constructor() {
     this.server = createServer((request, response) => {
@@ -145,19 +144,6 @@ class FakeEve {
         "content-type": "application/x-ndjson; charset=utf-8",
         "x-eve-stream-tail-index": String(events.length - 1),
       });
-      if (
-        this.#malformNextFollow &&
-        !url.searchParams.has("includeTailIndex")
-      ) {
-        this.#malformNextFollow = false;
-        response.write(
-          `${JSON.stringify(
-            event("turn.started", { sequence: 1, turnId: "turn_fake" }),
-          )}\n`,
-        );
-        response.end("{broken-json\n");
-        return;
-      }
       for (const item of events.slice(startIndex)) {
         response.write(`${JSON.stringify(item)}\n`);
       }
@@ -169,13 +155,23 @@ class FakeEve {
     if (method === "POST" && send) {
       const sessionId = decodeURIComponent(send[1] ?? "");
       const message = this.#message(body);
-      if (this.mode === "cancel-unconfirmed") {
-        this.#malformNextFollow = true;
-      } else {
-        this.#events.set(sessionId, [
-          ...(this.#events.get(sessionId) ?? []),
-          ...turn(this.mode === "foreign" ? "foreign rollup prompt" : message),
-        ]);
+      if (this.mode === "session-not-active") {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            code: "session_not_active",
+            error: "session is not active",
+          }),
+        );
+        return;
+      }
+      this.#events.set(sessionId, [
+        ...(this.#events.get(sessionId) ?? []),
+        ...turn(this.mode === "foreign" ? "foreign rollup prompt" : message),
+      ]);
+      if (this.mode === "send-disconnect") {
+        request.socket.destroy();
+        return;
       }
       sendJson(response, { sessionId });
       return;
@@ -343,9 +339,9 @@ test("production rollup drops the session and exits 1 for a foreign result", asy
   );
 });
 
-test("an accepted cancel without turn.cancelled blocks a fresh retry", async (t) => {
+test("a send disconnect after server acceptance blocks a fresh retry without confirmed cancellation", async (t) => {
   const fake = new FakeEve();
-  fake.mode = "cancel-unconfirmed";
+  fake.mode = "send-disconnect";
   const host = await fake.start();
   const paths = makeRunDirectory();
   t.after(async () => {
@@ -360,6 +356,14 @@ test("an accepted cancel without turn.cancelled blocks a fresh retry", async (t)
   const run = await runRollup(host, paths);
   assert.notEqual(run.code, 0);
   assert.match(run.stderr, /refusing fresh retry/u);
+  assert.equal(
+    fake.requests.filter(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session/wrun_existing",
+    ).length,
+    1,
+    "the server received the ambiguous send before dropping its response",
+  );
   assert.equal(
     fake.requests.some(
       ({ method, pathname }) =>
@@ -379,5 +383,40 @@ test("an accepted cancel without turn.cancelled blocks a fresh retry", async (t)
   assert.match(
     readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
     /"reason":"cancel-unconfirmed"/u,
+  );
+});
+
+test("a structured 409 session_not_active permits one fresh retry", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "session-not-active";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(
+    fake.requests.filter(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session",
+    ).length,
+    1,
+  );
+  assert.equal(
+    fake.requests.some(({ pathname }) => pathname.endsWith("/cancel")),
+    false,
+  );
+  assert.equal(
+    (JSON.parse(readFileSync(sessionFile, "utf8")) as { sessionId: string })
+      .sessionId,
+    "wrun_fake_1",
   );
 });

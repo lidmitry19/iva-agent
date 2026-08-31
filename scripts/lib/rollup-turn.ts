@@ -26,9 +26,8 @@ interface TurnTimeoutOptions extends TimeoutOptions {
 }
 
 interface RetryState {
-  readonly accepted: boolean;
-  readonly sendRejected: boolean;
   readonly cancelConfirmed: boolean;
+  readonly sessionNotActive: boolean;
 }
 
 interface CancelSession<T = unknown> {
@@ -80,15 +79,22 @@ export class RollupTurnTimeoutError extends Error {
 
 export const DEFAULT_CANCEL_TIMEOUT_MS = 30_000;
 
-// Свежая сессия безопасна, когда send явно отклонён до принятия хода либо сервер
-// подтвердил отмену. Неразрешившийся send мог быть принят сервером и требует cancel.
+// Любой сетевой отказ send двусмысленен: сервер мог принять ход до обрыва ответа.
+// Без отмены retry безопасен только для штатного 409 session_not_active от eve.
+export function isSessionNotActiveError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as {
+    readonly code?: unknown;
+    readonly status?: unknown;
+  };
+  return candidate.status === 409 && candidate.code === "session_not_active";
+}
+
 export function canRetryFresh({
-  accepted,
-  sendRejected,
   cancelConfirmed,
+  sessionNotActive,
 }: RetryState): boolean {
-  if (accepted) return cancelConfirmed === true;
-  return sendRejected === true || cancelConfirmed === true;
+  return sessionNotActive === true || cancelConfirmed === true;
 }
 
 // Отмена проигравшего гонку хода. Таймаут не останавливает ход на сервере — тот продолжает

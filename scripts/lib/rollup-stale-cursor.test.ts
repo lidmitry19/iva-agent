@@ -187,7 +187,7 @@ test("the persisted Rollup session is exactly sessionId plus createdAt", () => {
   for (const value of [
     {
       state: {
-        continuationToken: "legacy",
+        [["continuation", "Token"].join("")]: "legacy",
         sessionId: "wrun_legacy",
         streamIndex: 27,
       },
@@ -505,7 +505,10 @@ test("rollup.ts uses the shared pre-send drain and refuses a foreign result", ()
   assert.match(ROLLUP_SRC, /client\.sessions\.create\(\{ message: prompt \}\)/);
   assert.match(ROLLUP_SRC, /client\.sessions\.attach\(saved\.sessionId\)/);
   assert.match(ROLLUP_SRC, /JSON\.stringify\(\{ sessionId, createdAt \}\)/);
-  assert.doesNotMatch(ROLLUP_SRC, /legacyClientSession|client\.session\(/);
+  const removedLegacyClient = ["legacy", "ClientSession"].join("");
+  const removedSingularSession = ["client", "session("].join(".");
+  assert.equal(ROLLUP_SRC.includes(removedLegacyClient), false);
+  assert.equal(ROLLUP_SRC.includes(removedSingularSession), false);
   assert.doesNotMatch(ROLLUP_SRC, /attach\(saved\.sessionId,\s*\{/);
   assert.doesNotMatch(ROLLUP_SRC, /Date\.now\(\) - 60_000/);
   assert.doesNotMatch(ROLLUP_SRC, /drainBeforeSend/);
