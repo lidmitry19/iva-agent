@@ -1205,6 +1205,15 @@ test("every pre-snapshot command fault leaves the live tree untouched", async (t
         readFileSync(calls, "utf8"),
         /reset --hard|rebase --abort|stash apply/u,
       );
+      assert.equal(
+        git(
+          fixture.local,
+          "for-each-ref",
+          "--format=%(refname)",
+          "refs/iva/update-recovery",
+        ),
+        "",
+      );
     });
   }
 });

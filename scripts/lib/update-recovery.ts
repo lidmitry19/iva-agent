@@ -174,13 +174,31 @@ export class UpdateRecoveryOwner {
       files,
     });
     await owner.#mustGit(["update-ref", ref, headOid]);
-    const durableOid = await owner.#mustGit([
-      "rev-parse",
-      "--verify",
-      `${ref}^{commit}`,
-    ]);
-    if (durableOid !== headOid)
-      throw new Error("durable recovery guard OID does not match");
+    try {
+      const durableOid = await owner.#mustGit([
+        "rev-parse",
+        "--verify",
+        `${ref}^{commit}`,
+      ]);
+      if (durableOid !== headOid)
+        throw new Error("durable recovery guard OID does not match");
+    } catch (error) {
+      const deleted = await git.run(["update-ref", "-d", ref, headOid]);
+      if (deleted.code !== 0)
+        throw new AggregateError(
+          [
+            error,
+            new Error(
+              deleted.stderr ||
+                deleted.stdout ||
+                "recovery guard cleanup failed",
+            ),
+          ],
+          "recovery guard verification and cleanup failed",
+          { cause: error },
+        );
+      throw error;
+    }
     return owner;
   }
 
