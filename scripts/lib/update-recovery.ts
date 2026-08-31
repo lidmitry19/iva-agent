@@ -97,6 +97,7 @@ export class UpdateRecoveryOwner {
   readonly #untracked: OriginalUntrackedOwner;
   readonly #applied: AppliedRecoveryVerifier;
   readonly #snapshotVerifier: RecoverySnapshotVerifier;
+  #ownedOid: string;
   #state: OwnerState = { phase: "guard" };
 
   private constructor({
@@ -120,6 +121,7 @@ export class UpdateRecoveryOwner {
     this.#retentionRoot = retentionRoot;
     this.#git = git;
     this.#files = files;
+    this.#ownedOid = headOid;
     this.#objects = new RecoveryObjectStore({
       git,
       liveBytes: (entry) => this.#liveBytes(entry),
@@ -191,7 +193,7 @@ export class UpdateRecoveryOwner {
   }
 
   get recoveryOid(): string {
-    return this.snapshotOid || this.#headOid;
+    return this.#ownedOid;
   }
 
   get originalUntracked(): readonly string[] {
@@ -369,6 +371,7 @@ export class UpdateRecoveryOwner {
       verifyFlags: true,
     });
     await this.#mustGit(["update-ref", this.#ref, oid, this.#headOid]);
+    this.#ownedOid = oid;
     const durableOid = await this.#mustGit([
       "rev-parse",
       "--verify",
