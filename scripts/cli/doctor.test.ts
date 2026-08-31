@@ -166,9 +166,7 @@ async function bridgeBacklogEvents(
     log: () => undefined,
     exit: () => undefined,
   })();
-  return events.filter(([, message]) =>
-    message.startsWith("bridge backlog:"),
-  );
+  return events.filter(([, message]) => message.startsWith("bridge backlog:"));
 }
 
 test("non-systemd doctor preserves exact counter and exit semantics", async (t) => {

@@ -252,8 +252,7 @@ export async function promoteReadyInbox({
       const failures = (backoff.get(key)?.failures ?? 0) + 1;
       backoff.set(key, {
         failures,
-        nextAttemptAt:
-          now() + Math.min(15_000 * 2 ** (failures - 1), 300_000),
+        nextAttemptAt: now() + Math.min(15_000 * 2 ** (failures - 1), 300_000),
       });
       continue;
     }
