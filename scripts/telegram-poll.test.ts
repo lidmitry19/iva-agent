@@ -24,6 +24,7 @@ type AcceptanceFailure = {
 type DeliverOptions = {
   timeoutMs?: number;
   retryAcceptanceTimeout?: boolean;
+  boundedAttempts?: number;
   onAcceptanceFailure: (failure: AcceptanceFailure) => Promise<void>;
 };
 type RouteOptions = {
@@ -383,6 +384,7 @@ test("a direct acceptance timeout is rejected after one cleanup and notification
         deliveries++;
         assert.equal(options.timeoutMs, 90_000);
         assert.equal(options.retryAcceptanceTimeout, false);
+        assert.equal(options.boundedAttempts, 3);
         current = {
           status: "running",
           generation: 5,

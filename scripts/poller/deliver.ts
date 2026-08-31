@@ -27,6 +27,7 @@ export type DeliverOptions = {
   queueReceipt?: boolean;
   retry?: boolean;
   retryAcceptanceTimeout?: boolean;
+  boundedAttempts?: number;
   timeoutMs?: number;
   onAcceptanceFailure?: (details: Record<string, unknown>) => Promise<unknown>;
 };
@@ -56,6 +57,7 @@ async function deliver(
     queueReceipt: requestedQueueReceipt,
     retry = true,
     retryAcceptanceTimeout = retry,
+    boundedAttempts = BOUNDED_ATTEMPTS,
     timeoutMs,
     onAcceptanceFailure,
   }: DeliverOptions = {},
@@ -148,15 +150,15 @@ async function deliver(
         return false;
       }
       if (cls === "bounded") {
-        if (attempt < BOUNDED_ATTEMPTS) {
+        if (attempt < boundedAttempts) {
           log(
-            `deliver: eve replied ${res.status} (attempt ${attempt}/${BOUNDED_ATTEMPTS}) — retrying (may be transient)`,
+            `deliver: eve replied ${res.status} (attempt ${attempt}/${boundedAttempts}) — retrying (may be transient)`,
           );
           await sleep(wait);
           continue;
         }
         log(
-          `deliver: eve replied ${res.status} ${BOUNDED_ATTEMPTS} times; giving up this pass; durable owner retains update ${String(update.update_id)}`,
+          `deliver: eve replied ${res.status} ${boundedAttempts} times; giving up this pass; durable owner retains update ${String(update.update_id)}`,
         );
         await notifyDeliverProblem("retained", res.status);
         return false;
@@ -201,15 +203,15 @@ async function deliver(
         return false;
       }
       if (acceptanceTimeout) {
-        if (attempt < BOUNDED_ATTEMPTS) {
+        if (attempt < boundedAttempts) {
           log(
-            `deliver: acceptance timed out (attempt ${attempt}/${BOUNDED_ATTEMPTS}) — retrying`,
+            `deliver: acceptance timed out (attempt ${attempt}/${boundedAttempts}) — retrying`,
           );
           await sleep(wait);
           continue;
         }
         log(
-          `deliver: acceptance timed out ${BOUNDED_ATTEMPTS} times; giving up this pass; durable owner retains update ${String(update.update_id)}`,
+          `deliver: acceptance timed out ${boundedAttempts} times; giving up this pass; durable owner retains update ${String(update.update_id)}`,
         );
         await notifyDeliverProblem("retained", "timeout");
         return false;
