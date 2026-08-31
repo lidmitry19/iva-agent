@@ -173,8 +173,8 @@ export class UpdateRecoveryOwner {
       git,
       files,
     });
-    await owner.#mustGit(["update-ref", ref, headOid]);
     try {
+      await owner.#mustGit(["update-ref", ref, headOid]);
       const durableOid = await owner.#mustGit([
         "rev-parse",
         "--verify",
@@ -183,20 +183,15 @@ export class UpdateRecoveryOwner {
       if (durableOid !== headOid)
         throw new Error("durable recovery guard OID does not match");
     } catch (error) {
-      const deleted = await git.run(["update-ref", "-d", ref, headOid]);
-      if (deleted.code !== 0)
+      try {
+        await owner.#deleteOwnedRef(headOid);
+      } catch (cleanupError) {
         throw new AggregateError(
-          [
-            error,
-            new Error(
-              deleted.stderr ||
-                deleted.stdout ||
-                "recovery guard cleanup failed",
-            ),
-          ],
+          [error, cleanupError],
           "recovery guard verification and cleanup failed",
-          { cause: error },
+          { cause: cleanupError },
         );
+      }
       throw error;
     }
     return owner;
@@ -567,25 +562,7 @@ export class UpdateRecoveryOwner {
       await dropExactStash(this.#state.snapshot.oid);
       if (this.#state.cleanup.kind === "prune-stashes") return;
     }
-    const deleted = await this.#git.run([
-      "update-ref",
-      "-d",
-      this.#ref,
-      this.recoveryOid,
-    ]);
-    if (deleted.code !== 0)
-      throw new Error(
-        deleted.stderr || deleted.stdout || "recovery ref cleanup failed",
-      );
-    const remaining = await this.#git.run([
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      this.#ref,
-    ]);
-    if (remaining.code === 0)
-      throw new Error("recovery ref cleanup did not remove the owned ref");
-    if (remaining.stderr) throw new Error(remaining.stderr);
+    await this.#deleteOwnedRef(this.recoveryOid);
   }
 
   async #restoreSnapshot(
@@ -861,6 +838,45 @@ export class UpdateRecoveryOwner {
     if (this.#state.phase !== "snapshot")
       throw new Error("a complete recovery snapshot is required");
     return this.#state;
+  }
+
+  async #deleteOwnedRef(oid: string): Promise<void> {
+    const failures: Error[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const deleted = await this.#git.run([
+        "update-ref",
+        "-d",
+        this.#ref,
+        oid,
+      ]);
+      if (deleted.code !== 0)
+        failures.push(
+          new Error(
+            deleted.stderr || deleted.stdout || "recovery ref cleanup failed",
+          ),
+        );
+
+      const remaining = await this.#git.run([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        this.#ref,
+      ]);
+      if (remaining.code !== 0 && !remaining.stderr) return;
+      if (remaining.code === 0 && remaining.stdout !== oid)
+        throw new Error("recovery ref ownership changed before cleanup");
+      if (remaining.code !== 0)
+        failures.push(
+          new Error(remaining.stderr || "recovery ref cleanup verification failed"),
+        );
+      else if (deleted.code === 0)
+        failures.push(
+          new Error("recovery ref cleanup reported success but kept the ref"),
+        );
+    }
+    throw new AggregateError(failures, "recovery ref cleanup failed", {
+      cause: failures[0],
+    });
   }
 
   async #mustGit(args: string[], rawOutput = false): Promise<string> {
