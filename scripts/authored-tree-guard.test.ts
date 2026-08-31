@@ -105,11 +105,14 @@ function escapes(): string[] {
   return [...found].sort();
 }
 
-test("the authored tree has one explicit shared-package edge", () => {
+test("the authored tree has explicit shared-runtime edges", () => {
   assert.deepEqual(
     escapes(),
-    ["agent/lib/data-dir.ts -> ../../packages/data-dir/index.ts"],
-    "agent/ may leave its tree only for the canonical data-dir package that Eve bundles",
+    [
+      "agent/lib/data-dir.ts -> ../../packages/data-dir/index.ts",
+      "agent/lib/schedule-runner.ts -> ../../scripts/lib/night-health.ts",
+    ],
+    "agent/ external runtime edges must be explicit so the promoted tree carries them",
   );
 });
 
@@ -160,7 +163,7 @@ test("every tree the runtime imports is carried into the promoted runtime", () =
 test("the cross-tree scan reads the edges it judges", () => {
   // Both halves are pinned: a scan that stopped matching would pass the guard above
   // vacuously, and a new tree in the topology has to be seen by a human.
-  assert.deepEqual(treesTheRuntimeImports(), ["agent", "packages"]);
+  assert.deepEqual(treesTheRuntimeImports(), ["agent", "packages", "scripts"]);
 });
 
 // Only `from "..."` clauses: a dynamic import() is exactly the escape hatch a CLI module
@@ -273,11 +276,13 @@ test("the broken-tree walk covers every node unit deploy/ starts", () => {
   assert.deepEqual(unitNodeEntrypoints(), [
     "scripts/check-update.mjs",
     "scripts/memory/brain.ts",
+    "scripts/night-watchdog.ts",
     "scripts/telegram-poll.mjs",
   ]);
   assert.deepEqual(brokenTreeUnitEntrypoints(), [
     "scripts/check-update.mjs",
     "scripts/memory/brain.ts",
+    "scripts/night-watchdog.ts",
   ]);
 });
 

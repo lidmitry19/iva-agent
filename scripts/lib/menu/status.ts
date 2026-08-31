@@ -11,6 +11,7 @@ import { catalogModel, catalogProvider } from "../model-catalog.ts";
 import { SEARCH_CATALOG } from "../search-catalog.ts";
 import { readEntries, summarize } from "../usage.ts";
 import { probeUserbotHealth } from "../userbot-health.ts";
+import { nightTargetDate, readNightHealth } from "../night-health.ts";
 
 type Env = Record<string, string | undefined>;
 type VersionPackage = { version?: unknown };
@@ -87,6 +88,7 @@ function usageToday(
 
 // Собирает быстрые поля (без медленной пробы) — переиспользуется первым рендером и async-edit'ом.
 function fastFields(env: Env, ctx: MenuContext) {
+  const T = ctx.tr;
   const configuredProvider = env.MODEL_PROVIDER ?? "ollama";
   const cat = catalogProvider(configuredProvider);
   const searchProv =
@@ -105,6 +107,14 @@ function fastFields(env: Env, ctx: MenuContext) {
     lang: ctx.getLang(),
     gws: existsSync(join(homedir(), ".config/gws/client_secret.json")),
     usage: usageToday(ctx.deps.dataDir, env.ASSISTANT_TIMEZONE, ctx.tr),
+    night: (() => {
+      const targetDate = nightTargetDate(env.ASSISTANT_TIMEZONE);
+      const health = readNightHealth(ctx.deps.dataDir, targetDate);
+      if (!health) return T("missing", "нет данных");
+      const label = (state: string) =>
+        state === "success" ? "✓" : state === "failed" ? "⚠" : state === "running" ? "…" : "–";
+      return `${health.targetDate} · memory ${label(health.jobs.memoryRollup.state)} · Bitrix ${label(health.jobs.bitrixSync.state)} · digest ${label(health.jobs.digest.state)}`;
+    })(),
   };
 }
 
@@ -144,6 +154,7 @@ function buildView(
       `Google: ${d.gws ? "настроен" : "не настроен"}`,
     ),
     T(`Usage today: ${d.usage}`, `Расход за сегодня: ${d.usage}`),
+    T(`Night: ${d.night}`, `Ночь: ${d.night}`),
   ];
   const rows = [
     [ctx.btn(T("🔄 Refresh", "🔄 Обновить"), "iva_menu:st:rf")],

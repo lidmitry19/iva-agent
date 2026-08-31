@@ -137,7 +137,7 @@ void test("status preserves command order and ignores non-zero command results",
   assert.deepEqual(events, [
     "runtime.requireSystemd",
     "runtime.run:systemctl:--user|status|--no-pager|-n|5|iva.service|iva-telegram-poll.service",
-    "runtime.run:systemctl:--user|list-timers|--no-pager|iva-brain.timer|iva-update-check.timer",
+    "runtime.run:systemctl:--user|list-timers|--no-pager|iva-brain.timer|iva-night-watchdog.timer|iva-update-check.timer",
   ]);
 });
 
@@ -164,7 +164,7 @@ void test("status lists and flags a pre-rename nightly timer the migration had t
     "runtime.requireSystemd",
     "runtime.run:systemctl:--user|status|--no-pager|-n|5|iva.service|iva-telegram-poll.service",
     "runtime.warn:iva-memory-doctor.timer still installed — the Brain rename did not finish; run: iva doctor",
-    "runtime.run:systemctl:--user|list-timers|--no-pager|iva-brain.timer|iva-update-check.timer|iva-memory-doctor.timer",
+    "runtime.run:systemctl:--user|list-timers|--no-pager|iva-brain.timer|iva-night-watchdog.timer|iva-update-check.timer|iva-memory-doctor.timer",
   ]);
 });
 

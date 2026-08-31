@@ -66,7 +66,8 @@ export function createCliRuntime(root: string) {
   const BRAIN_SERVICE = "iva-brain.service";
   const BRAIN_TIMER = "iva-brain.timer";
   const UPDATE_TIMER = "iva-update-check.timer";
-  const TIMERS = [BRAIN_TIMER, UPDATE_TIMER];
+  const NIGHT_WATCHDOG_TIMER = "iva-night-watchdog.timer";
+  const TIMERS = [BRAIN_TIMER, NIGHT_WATCHDOG_TIMER, UPDATE_TIMER];
 
   const SVC_USERBOT = "iva-telegram-userbot.service";
   const USERBOT_DIR = join(ROOT, "services/telegram-userbot");
@@ -215,6 +216,7 @@ export function createCliRuntime(root: string) {
     BRAIN_SERVICE,
     BRAIN_TIMER,
     UPDATE_TIMER,
+    NIGHT_WATCHDOG_TIMER,
     TIMERS,
     SVC_USERBOT,
     USERBOT_DIR,

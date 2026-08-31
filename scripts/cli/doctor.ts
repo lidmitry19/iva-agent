@@ -23,6 +23,11 @@ import {
   KEEP,
 } from "../lib/version-store.ts";
 import { hasEmbeddingSource } from "../lib/memory-mode.ts";
+import {
+  nightTargetDate,
+  readNightHealth,
+  verifyNightArtifacts,
+} from "../lib/night-health.ts";
 import type { createCliRuntime } from "./runtime.ts";
 import type { createCliSystemd } from "./systemd.ts";
 
@@ -465,6 +470,54 @@ export function createDoctorCommand(
           warnN++;
         }
       }
+    }
+
+    // The manifest is the cross-process contract for the 03:20/04:00/08:00
+    // chain. Unlike rollup-status it contains the actual artifact paths and
+    // the Bitrix outcome, so a clean exit cannot masquerade as a useful night.
+    const targetDate = nightTargetDate(env.ASSISTANT_TIMEZONE);
+    const night = readNightHealth(dataDirectory, targetDate);
+    for (const job of ["memoryRollup", "bitrixSync", "digest"] as const) {
+      const record = night?.jobs[job];
+      if (!record) {
+        warn(`night health ${job} has no record for ${targetDate}`);
+        warnN++;
+        continue;
+      }
+      const artifactError =
+        record.state === "success" ? verifyNightArtifacts(record.artifacts) : null;
+      if (record.state === "success" && !artifactError) {
+        ok(
+          `night health ${job}: success (${night?.runId}, ${targetDate}${record.mode ? `, ${record.mode}` : ""})`,
+        );
+        okN++;
+      } else {
+        warn(
+          `night health ${job}: ${record.state}${record.error ? ` — ${record.error}` : ""}${artifactError ? ` — ${artifactError}` : ""}`,
+        );
+        warnN++;
+      }
+    }
+
+    // A unit pointing at scripts/bitrix-sync.ts is vulnerable to immutable
+    // version flips (the incident that triggered this contract). The package
+    // CLI is a stable entrypoint and must exist in the active version too.
+    const bitrixUnitPath = join(UNIT_DIR, "iva-bitrix-sync.service");
+    try {
+      const unit = readFileSync(bitrixUnitPath, "utf8");
+      if (
+        unit.includes("bin/iva.mjs bitrix sync --daily") &&
+        existsSync(join(ROOT, "bin", "iva.mjs"))
+      ) {
+        ok("Bitrix unit uses the package CLI entrypoint");
+        okN++;
+      } else {
+        bad("Bitrix unit has no valid package CLI entrypoint — run: iva doctor");
+        badN++;
+      }
+    } catch {
+      warn("Bitrix unit is not installed");
+      warnN++;
     }
 
     // 6. Vault + git origin (report only — we don't initiate git operations)

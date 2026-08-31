@@ -1,0 +1,15 @@
+[Unit]
+Description=Iva Bitrix24 read-only task synchronization
+After=network-online.target iva.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__PROJECT_DIR__/.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Invoke the package CLI. A version flip can remove a source .ts path while the
+# systemd unit survives; bin/iva.mjs is the versioned, supported entrypoint.
+ExecStart=__NODE_BIN__ __PROJECT_DIR__/bin/iva.mjs bitrix sync --daily
+NoNewPrivileges=true
+PrivateTmp=true
