@@ -424,6 +424,45 @@ test("unsafe large IDs never reach the legacy integer-only API", async () => {
   );
 });
 
+test("missing tasks are distinct from nonempty task ID mismatches", async () => {
+  const missingClient = new ScriptedClient(({ method }) => {
+    const ready = preflight(method);
+    if (ready) return ready;
+    if (method === "tasks.task.get") return { result: { task: false } };
+    throw new Error("Missing task should have blocked before " + method);
+  });
+  await assert.rejects(
+    new BitrixReadOnlyGateway({ client: missingClient }).taskSnapshot("123"),
+    {
+      code: "TASK_NOT_FOUND",
+      status: 404,
+      category: "not_found",
+    },
+  );
+  assert.equal(
+    missingClient.calls.some(
+      (call) => call.method === "task.checklistitem.getlist",
+    ),
+    false,
+  );
+
+  const mismatchClient = new ScriptedClient(({ method }) => {
+    const ready = preflight(method);
+    if (ready) return ready;
+    if (method === "tasks.task.get")
+      return { result: { task: rawTask({ ID: "124" }) } };
+    throw new Error("Task mismatch should have blocked before " + method);
+  });
+  await assert.rejects(
+    new BitrixReadOnlyGateway({ client: mismatchClient }).taskSnapshot("123"),
+    {
+      code: "TASK_ID_MISMATCH",
+      status: 502,
+      category: "invalid_response",
+    },
+  );
+});
+
 test("direct task access re-applies policy before checklist or discussion", async () => {
   const client = new ScriptedClient(({ method }) => {
     const ready = preflight(method);

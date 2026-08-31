@@ -17,6 +17,7 @@
     "eslint.config.ts",
     "scripts/**/*.ts",
     "services/**/*.ts",
+    "tests/bitrix/**/*.ts",
     "**/*.mts",
     ".eve/**/*.d.ts"
   ]

@@ -251,6 +251,16 @@ export class BitrixReadOnlyGateway {
     const task = normalizeTask(taskFromGet(rawResponse), {
       portalOrigin: this.client.portalOrigin,
     });
+    if (!task.id) {
+      throw new GatewayError(
+        "TASK_NOT_FOUND",
+        "Bitrix did not return the requested task.",
+        {
+          status: 404,
+          category: "not_found",
+        },
+      );
+    }
     if (task.id !== normalizedTaskId) {
       throw new GatewayError(
         "TASK_ID_MISMATCH",

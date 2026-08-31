@@ -166,6 +166,7 @@ export class BitrixTaskService {
     created: number;
     updated: number;
     unchanged: number;
+    finalized: Array<{ taskId: string; code: string }>;
     failed: Array<{ taskId: string; code: string }>;
   }> {
     const activeSummaries = (await this.gateway.listActiveTasks()).tasks;
@@ -209,6 +210,7 @@ export class BitrixTaskService {
             PERMANENT_FINAL_CANDIDATE_CODES.has(code.toLowerCase())
           ) {
             await this.repository.markDailyFinalized(taskId);
+            return { taskId, outcome: "finalized" as const, code };
           }
           return { taskId, outcome: "failed" as const, code };
         }
@@ -221,6 +223,17 @@ export class BitrixTaskService {
       updated: results.filter((result) => result.outcome === "updated").length,
       unchanged: results.filter((result) => result.outcome === "unchanged")
         .length,
+      finalized: results
+        .filter(
+          (
+            result,
+          ): result is {
+            taskId: string;
+            outcome: "finalized";
+            code: string;
+          } => result.outcome === "finalized",
+        )
+        .map(({ taskId, code }) => ({ taskId, code })),
       failed: results
         .filter(
           (

@@ -35,7 +35,7 @@ const snapshot: BitrixTaskSnapshot = {
   discussion: { source: "none", messages: [] },
 };
 
-void test("the production install uses Node 24's built-in TypeScript runner", async () => {
+void test("the production Bitrix unit uses the pinned Node 24 package CLI", async () => {
   const packageJson = JSON.parse(
     await readFile(new URL("../../package.json", import.meta.url), "utf8"),
   ) as {
@@ -68,7 +68,7 @@ void test("the production install uses Node 24's built-in TypeScript runner", as
   assert.doesNotMatch(unit, /tsx/u);
   assert.match(
     unit,
-    /__NODE_BIN__ --env-file=\.env scripts\/bitrix-sync\.ts --daily/u,
+    /__NODE_BIN__ __PROJECT_DIR__\/bin\/iva\.mjs bitrix sync --daily/u,
   );
 });
 
@@ -342,4 +342,76 @@ void test("daily sync finalizes declined and closedAt tasks once and skips newly
   assert.equal(activeListCalls, 2);
   assert.deepEqual([...snapshotCalls].sort(), ["42", "46"]);
   assert.equal(await repository.readState("45"), null);
+});
+
+void test("daily sync reports permanent stale failures as finalized while active failures stay loud", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "iva-bitrix-daily-finalized-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = new BitrixTaskRepository(
+    join(root, "vault"),
+    join(root, "data"),
+  );
+  const taskSnapshot = (id: string): BitrixTaskSnapshot => {
+    const value = structuredClone(snapshot);
+    Object.assign(value.task, {
+      id,
+      url: `https://b24.example/task/${id}/`,
+    });
+    return value;
+  };
+  await repository.sync(taskSnapshot("70"));
+  await repository.sync(taskSnapshot("71"));
+
+  let phase = 1;
+  const snapshotCalls: string[] = [];
+  const summary = (id: string) => {
+    const task = taskSnapshot(id).task;
+    return {
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      realStatus: task.realStatus,
+      closed: task.closed,
+      deadline: task.deadline,
+      role: "responsible" as const,
+      changedAt: task.changedAt,
+    };
+  };
+  const gateway = {
+    listActiveTasks: () => {
+      const tasks =
+        phase === 3 ? [summary("70"), summary("71")] : [summary("71")];
+      return Promise.resolve({ userId: "1274", tasks, total: tasks.length });
+    },
+    getSnapshot: (taskId: string | number) => {
+      const id = String(taskId);
+      snapshotCalls.push(id);
+      if (id === "70" && phase === 3)
+        return Promise.resolve(taskSnapshot("70"));
+      return Promise.reject(new BitrixGatewayError("TASK_NOT_FOUND", "gone"));
+    },
+  } as unknown as BitrixGatewayClient;
+  const service = new BitrixTaskService(gateway, repository);
+
+  const first = await service.syncDaily(2);
+  assert.deepEqual(first.finalized, [{ taskId: "70", code: "task_not_found" }]);
+  assert.deepEqual(first.failed, [{ taskId: "71", code: "task_not_found" }]);
+  assert.equal((await repository.readState("70"))?.dailyFinalized, true);
+  assert.equal((await repository.readState("71"))?.dailyFinalized, false);
+
+  phase = 2;
+  snapshotCalls.length = 0;
+  const second = await service.syncDaily(2);
+  assert.deepEqual(snapshotCalls, ["71"]);
+  assert.deepEqual(second.finalized, []);
+  assert.deepEqual(second.failed, [{ taskId: "71", code: "task_not_found" }]);
+
+  phase = 3;
+  snapshotCalls.length = 0;
+  const third = await service.syncDaily(2);
+  assert.deepEqual([...snapshotCalls].sort(), ["70", "71"]);
+  assert.equal(third.unchanged, 1);
+  assert.deepEqual(third.finalized, []);
+  assert.deepEqual(third.failed, [{ taskId: "71", code: "task_not_found" }]);
+  assert.equal((await repository.readState("70"))?.dailyFinalized, false);
 });
