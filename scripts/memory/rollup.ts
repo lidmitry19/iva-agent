@@ -305,7 +305,7 @@ const guardedTurn = (
             send,
             (error) => {
               console.error(
-                `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
+                `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — aborting send`,
               );
             },
             TURN_TIMEOUT_MS,
@@ -410,8 +410,9 @@ try {
       session,
       mainPrompt,
       "main-turn",
-      (acceptedSession) => {
+      (acceptedSession, turnResult) => {
         session = acceptedSession;
+        acceptedTurnResult = turnResult;
       },
     );
     ({ result, sentNotBefore, session } = retry);
@@ -432,8 +433,22 @@ if (
     sentNotBefore,
   })
 ) {
+  const cancelConfirmed = await cancelTurnAndConfirmQuietly(
+    activeSession,
+    acceptedTurnResult,
+  );
+  if (!cancelConfirmed) {
+    console.error(
+      `rollup ${period}: result does not match the prompt just sent (stale stream cursor); cancellation was not confirmed — keeping session`,
+    );
+    logAbandoned(
+      activeSession.state.sessionId,
+      "stale-result-cancel-unconfirmed",
+    );
+    process.exit(1);
+  }
   console.error(
-    `rollup ${period}: result does not match the prompt just sent (stale stream cursor) — dropping session`,
+    `rollup ${period}: result does not match the prompt just sent (stale stream cursor); cancellation confirmed — dropping session`,
   );
   logAbandoned(activeSession.state.sessionId, "stale-result");
   try {

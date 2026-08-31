@@ -107,6 +107,19 @@ export async function drainStreamBefore<T>(
   onError?: (error: Error) => void,
   timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
 ): Promise<T> {
-  await drainStreamToTail(session, onError, timeoutMs);
+  let drainError: Error | undefined;
+  try {
+    await drainStreamToTail(
+      session,
+      (error) => {
+        drainError = error;
+        onError?.(error);
+      },
+      timeoutMs,
+    );
+  } catch (error) {
+    throw drainError ?? error;
+  }
+  if (drainError) throw drainError;
   return await action();
 }

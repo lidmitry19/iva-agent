@@ -187,7 +187,7 @@ test("the persisted Rollup session is exactly sessionId plus createdAt", () => {
   for (const value of [
     {
       state: {
-        [["continuation", "Token"].join("")]: "legacy",
+        ["continuationToken"]: "legacy",
         sessionId: "wrun_legacy",
         streamIndex: 27,
       },
@@ -312,7 +312,7 @@ test("drainStreamToTail advances a lagged cursor to the tail before send", async
   );
 });
 
-test("drainStreamToTail swallows a stream error so send can still proceed", async () => {
+test("drainStreamToTail reports a stream error without throwing itself", async () => {
   const session = {
     stream(options?: {
       follow: false;
@@ -326,6 +326,33 @@ test("drainStreamToTail swallows a stream error so send can still proceed", asyn
   const errors: string[] = [];
   await drainStreamToTail(session, (error) => errors.push(error.message));
   assert.deepEqual(errors, ["stream unavailable"]);
+});
+
+test("drainStreamBefore refuses the action when the stream drain fails", async () => {
+  const streamError = new Error("stream unavailable before send");
+  const session = {
+    stream(): AsyncIterable<never> {
+      throw streamError;
+    },
+  };
+  let actionCalls = 0;
+  const reported: Error[] = [];
+
+  await assert.rejects(
+    () =>
+      drainStreamBefore(
+        asClientStream(session),
+        () => {
+          actionCalls++;
+          return Promise.resolve();
+        },
+        (error) => reported.push(error),
+      ),
+    (error) => error === streamError,
+  );
+
+  assert.equal(actionCalls, 0);
+  assert.deepEqual(reported, [streamError]);
 });
 
 test("drainStreamToTail finishes when both next and return hang past the timeout", async () => {

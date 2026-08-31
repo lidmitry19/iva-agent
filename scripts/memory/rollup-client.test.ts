@@ -32,7 +32,12 @@ interface RollupRun {
   readonly stdout: string;
 }
 
-type FakeMode = "own" | "foreign" | "send-disconnect" | "session-not-active";
+type FakeMode =
+  | "own"
+  | "foreign"
+  | "foreign-cancel-confirmed"
+  | "send-disconnect"
+  | "session-not-active";
 
 function event(type: string, data?: Record<string, unknown>): object {
   return {
@@ -127,11 +132,16 @@ class FakeEve {
 
     const cancel = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/cancel$/u);
     if (method === "POST" && cancel) {
-      sendJson(response, {
-        ok: true,
-        sessionId: decodeURIComponent(cancel[1] ?? ""),
-        status: "accepted",
-      });
+      sendJson(
+        response,
+        this.mode === "foreign-cancel-confirmed"
+          ? { ok: true, status: "no_active_turn" }
+          : {
+              ok: true,
+              sessionId: decodeURIComponent(cancel[1] ?? ""),
+              status: "accepted",
+            },
+      );
       return;
     }
 
@@ -167,7 +177,11 @@ class FakeEve {
       }
       this.#events.set(sessionId, [
         ...(this.#events.get(sessionId) ?? []),
-        ...turn(this.mode === "foreign" ? "foreign rollup prompt" : message),
+        ...turn(
+          this.mode === "foreign" || this.mode === "foreign-cancel-confirmed"
+            ? "foreign rollup prompt"
+            : message,
+        ),
       ]);
       if (this.mode === "send-disconnect") {
         request.socket.destroy();
@@ -314,7 +328,7 @@ test("production rollup creates for legacy state, then attaches, drains, and sen
   assert.deepEqual(JSON.parse(readFileSync(sessionFile, "utf8")), saved);
 });
 
-test("production rollup drops the session and exits 1 for a foreign result", async (t) => {
+test("production rollup keeps the session when a foreign result cannot be cancelled", async (t) => {
   const fake = new FakeEve();
   fake.mode = "foreign";
   const host = await fake.start();
@@ -331,8 +345,33 @@ test("production rollup drops the session and exits 1 for a foreign result", asy
 
   const run = await runRollup(host, paths);
   assert.equal(run.code, 1, run.stderr);
-  assert.equal(existsSync(sessionFile), false);
+  assert.equal(existsSync(sessionFile), true);
   assert.match(run.stderr, /stale stream cursor/u);
+  assert.match(
+    readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
+    /"reason":"stale-result-cancel-unconfirmed"/u,
+  );
+});
+
+test("production rollup drops the session after confirmed cancellation of a foreign result", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "foreign-cancel-confirmed";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(existsSync(sessionFile), false);
+  assert.match(run.stderr, /cancellation confirmed/u);
   assert.match(
     readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
     /"reason":"stale-result"/u,
