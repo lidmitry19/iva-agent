@@ -33,6 +33,7 @@ type RouteOptions = {
     queues: Record<string, unknown>;
   }>;
   runningImpl: (chatKey: string) => boolean;
+  turnPolicyImpl: () => "queue" | "steer";
   inFlight: Map<string, InFlight>;
   queueCountImpl: () => number;
   replyToBotImpl: (message: unknown) => boolean;
@@ -209,6 +210,7 @@ function routeDeps(overrides: Partial<RouteOptions> = {}): RouteOptions {
     chatKeyImpl: () => "1:",
     loadQueueImpl: async () => ({ version: 1, queues: {} }),
     runningImpl: () => false,
+    turnPolicyImpl: () => "queue",
     inFlight: new Map<string, InFlight>(),
     queueCountImpl: () => 0,
     replyToBotImpl: () => false,
@@ -254,6 +256,64 @@ test("routeMessageUpdate enqueues and acknowledges one busy update", async () =>
         acknowledged++;
         assert.equal(update, routedUpdate);
         assert.equal(count, 3);
+      },
+      deliverImpl: async () => {
+        delivered++;
+        return true;
+      },
+    }),
+  );
+
+  assert.equal(result, "queued");
+  assert.equal(enqueued, 1);
+  assert.equal(acknowledged, 1);
+  assert.equal(delivered, 0);
+});
+
+test("routeMessageUpdate delivers a busy update directly in steer mode", async () => {
+  let enqueued = 0;
+  let acknowledged = 0;
+  let delivered = 0;
+  const result = await routeMessageUpdate(
+    routedUpdate,
+    routeDeps({
+      runningImpl: () => true,
+      turnPolicyImpl: () => "steer",
+      enqueueImpl: async () => {
+        enqueued++;
+        return { count: 1 };
+      },
+      acknowledgeImpl: async () => {
+        acknowledged++;
+      },
+      deliverImpl: async () => {
+        delivered++;
+        return true;
+      },
+    }),
+  );
+
+  assert.equal(result, "delivered");
+  assert.equal(enqueued, 0);
+  assert.equal(acknowledged, 0);
+  assert.equal(delivered, 1);
+});
+
+test("routeMessageUpdate keeps an in-flight steer update in the queue", async () => {
+  let enqueued = 0;
+  let acknowledged = 0;
+  let delivered = 0;
+  const result = await routeMessageUpdate(
+    routedUpdate,
+    routeDeps({
+      turnPolicyImpl: () => "steer",
+      inFlight: new Map([["1:", { state: "delivering" }]]),
+      enqueueImpl: async () => {
+        enqueued++;
+        return { count: 1 };
+      },
+      acknowledgeImpl: async () => {
+        acknowledged++;
       },
       deliverImpl: async () => {
         delivered++;
