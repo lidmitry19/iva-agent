@@ -312,7 +312,7 @@ fc9607a97a12442c90d1eaebacaebbc4015dbd3d3b8dbc67daeadce2d344737d  services/bitri
 4ff3a1b5b01dfc0bae4335a2fec72060d9f00d86c3db3fc1534cf2f60075a33b  services/bitrix-gateway/deploy/audit-secret.py
 0e8b2374ddd468e37861e3a7e33866426521d19a6bcf488b3897f2cc2782069d  services/bitrix-gateway/deploy/iva-bitrix-gateway.service
 a9740208be8b846439674b3208db52c2f5107416cfd8eed8e6269b024730a55d  services/bitrix-gateway/deploy/install.sh
-0df96fc4350bdde2d5b282d30bc0b9aba984003c6bc4404220539d266b58703a  services/bitrix-gateway/deploy/install-and-start.sh
+d55ada07a9247b58dd3a684d82b7ef2dad131ba674ee9e31324a8ef322c0aa1f  services/bitrix-gateway/deploy/install-and-start.sh
 MANIFEST
 }
 
@@ -438,5 +438,5 @@ if [[ $secret_is_valid != 1 ]]; then
   SECRET_TMP=
 fi
 
-"$STAGE_ROOT/$INSTALLER_REL" "$EXPECTED_COMMIT"
+/bin/sh "$STAGE_ROOT/$INSTALLER_REL" "$EXPECTED_COMMIT"
 INSTALL_SUCCESS=1

@@ -410,7 +410,7 @@ fi
 
 ROLLBACK_ARMED=1
 CLEANUP_NEEDED=1
-/usr/bin/env IVA_BITRIX_TRANSACTION=1 "$SCRIPT_DIR/install.sh" "$RELEASE_ID"
+/usr/bin/env IVA_BITRIX_TRANSACTION=1 /bin/sh "$SCRIPT_DIR/install.sh" "$RELEASE_ID"
 assert_exact_loaded_gateway_unit
 systemctl cat --no-pager "$UNIT"
 systemctl enable "$UNIT"

@@ -7,7 +7,13 @@
 import "./lib/ts-esm-hooks.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -79,9 +85,16 @@ test("правка карточки извне той же длины тоже �
   makeCard(dir, "other", "Иван Петров");
   assert.equal(resolveCard(dir, "Ясмин").matchedBy, "title");
 
+  const personPath = join(dir, "person.md");
+  const priorMtimeMs = statSync(personPath).mtimeMs;
   makeCard(dir, "person", "Асель"); // те же пять букв → байт в байт тот же размер
+  // Некоторые production-файловые системы округляют timestamps до миллисекунды.
+  // Явно сдвигаем mtime, чтобы тест проверял заявленный mtime+size контракт, а не
+  // случайно требовал обнаружить две неразличимые для stat записи в одном тике.
+  const changedAt = new Date(priorMtimeMs + 1_000);
+  utimesSync(personPath, changedAt, changedAt);
   assert.equal(
-    statSync(join(dir, "person.md")).size,
+    statSync(personPath).size,
     Buffer.byteLength(
       "---\ntype: contact\nstatus: active\n---\n# Ясмин\n\nтело\n",
     ),

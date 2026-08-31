@@ -270,7 +270,7 @@ test("transactional root wrapper restores prior link, unit, enablement, and acti
     verifyRollback,
   );
   const installer = wrapper.indexOf(
-    '/usr/bin/env IVA_BITRIX_TRANSACTION=1 "$SCRIPT_DIR/install.sh" "$RELEASE_ID"',
+    '/usr/bin/env IVA_BITRIX_TRANSACTION=1 /bin/sh "$SCRIPT_DIR/install.sh" "$RELEASE_ID"',
   );
   const loadedUnitInvariant = wrapper.indexOf(
     "\nassert_exact_loaded_gateway_unit\n",
@@ -1019,7 +1019,7 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
   );
   const stop = admin.indexOf('stop_unit_set "$EXPECTED_UNITS"', publish);
   const installer = admin.indexOf(
-    '"$STAGE_ROOT/$INSTALLER_REL" "$EXPECTED_COMMIT"',
+    '/bin/sh "$STAGE_ROOT/$INSTALLER_REL" "$EXPECTED_COMMIT"',
     stop,
   );
   const cleanup = admin.indexOf("cleanup()");
@@ -1154,6 +1154,30 @@ test("root-owned secret audit fails closed without printing the webhook", async 
   assert.doesNotMatch(
     audit,
     /print\(\s*(?:secret|secret_text|webhook_lines)\b|shell=True/iu,
+  );
+});
+
+test("staged shell scripts use fixed interpreters on a noexec runtime mount", async () => {
+  const [wrapper, admin] = await Promise.all([
+    readFile(new URL("install-and-start.sh", deployRoot), "utf8"),
+    readFile(new URL("admin-install.sh", deployRoot), "utf8"),
+  ]);
+
+  assert.match(
+    admin,
+    /^\/bin\/sh "\$STAGE_ROOT\/\$INSTALLER_REL" "\$EXPECTED_COMMIT"$/mu,
+  );
+  assert.match(
+    wrapper,
+    /^\/usr\/bin\/env IVA_BITRIX_TRANSACTION=1 \/bin\/sh "\$SCRIPT_DIR\/install\.sh" "\$RELEASE_ID"$/mu,
+  );
+  assert.doesNotMatch(
+    admin,
+    /^"\$STAGE_ROOT\/\$INSTALLER_REL" "\$EXPECTED_COMMIT"$/mu,
+  );
+  assert.doesNotMatch(
+    wrapper,
+    /^\/usr\/bin\/env IVA_BITRIX_TRANSACTION=1 "\$SCRIPT_DIR\/install\.sh" "\$RELEASE_ID"$/mu,
   );
 });
 
