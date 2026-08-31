@@ -9,16 +9,20 @@ import type {
   TelegramQueueMessage,
   TelegramQueueUpdate,
 } from "../lib/telegram-queue.ts";
-import { toChannelLocalToken } from "#lib/telegram-continuation-token.ts";
 import {
   clearTelegramResetIntent,
   loadTelegramResetIntents,
   persistTelegramResetIntent,
 } from "../lib/telegram-reset-intent.ts";
-import { requestTelegramReset } from "../lib/telegram-reset.ts";
+import {
+  requestTelegramReset,
+  telegramAddressFromChatKey,
+  type TelegramResetTarget,
+} from "../lib/telegram-reset.ts";
 import {
   getChatStatus,
   listChatStatuses,
+  RETIRED_SESSION_ROUTING_FIELD,
   RUN_STALE_MS,
   setChatStatus,
   setChatStatusIf,
@@ -36,14 +40,12 @@ type RunStatus = Record<string, unknown> & {
   ingressId?: unknown;
   ingressAt?: unknown;
   statusMessageId?: unknown;
-  continuationToken?: unknown;
 };
 type ResetResult = { status?: unknown; [key: string]: unknown };
-type ResetRequest = { chatKey: string; continuationToken: string };
+type ResetRequest = { chatKey: string; target: TelegramResetTarget };
 type ResetRequestImpl = (request: ResetRequest) => Promise<ResetResult>;
 type CompleteStateImpl = (
   chatKey: string,
-  continuationToken: string,
   options: { clearQueue?: boolean },
 ) => Promise<void>;
 type LogImpl = (...args: unknown[]) => void;
@@ -118,7 +120,6 @@ async function clearChatQueue(chatKey: string) {
 
 export async function completeScopedResetState(
   chatKey: string,
-  rawContinuationToken: string,
   {
     clearQueue = false,
     clearQueueImpl = clearChatQueue,
@@ -137,15 +138,9 @@ export async function completeScopedResetState(
   // status in place and lets a repeated /new retry safely.
   if (clearQueue) await clearQueueImpl(chatKey);
 
-  // Надгробие переживает рестарты и потом уходит в reset как есть — только channel-local.
-  const continuationToken = toChannelLocalToken(rawContinuationToken);
-
-  // Keep an idle token tombstone: Telegram updates are at-least-once. If the
-  // same group /new is replayed after a crash, the second reset remains an
-  // idempotent no_active_session instead of losing the group anchor.
   setStatusImpl(chatKey, {
     status: "idle",
-    continuationToken,
+    [RETIRED_SESSION_ROUTING_FIELD]: null,
     sessionId: null,
     turnId: null,
     statusMessageId: null,
@@ -162,13 +157,8 @@ export async function completeScopedResetState(
 
 export async function persistPrivateResetIntent(
   chatKey: string,
-  continuationToken: string,
 ) {
-  return persistTelegramResetIntent(
-    RESET_INTENT_DIR,
-    chatKey,
-    continuationToken,
-  );
+  return persistTelegramResetIntent(RESET_INTENT_DIR, chatKey);
 }
 
 export async function loadPrivateResetIntents() {
@@ -179,16 +169,16 @@ export async function clearPrivateResetIntent(chatKey: string) {
   return clearTelegramResetIntent(RESET_INTENT_DIR, chatKey);
 }
 
-const requestResetFromIntent: ResetRequestImpl = ({ continuationToken }) =>
+const requestResetFromIntent: ResetRequestImpl = ({ target }) =>
   requestTelegramReset({
     url: RESET_ROUTE,
     secret: SECRET as string,
-    continuationToken,
+    target,
   });
 
-export async function releaseScopedContinuation(
+export async function releaseScopedSession(
   chatKey: string,
-  continuationToken: string,
+  target: TelegramResetTarget,
   {
     requestResetImpl = requestResetFromIntent,
     logImpl = log,
@@ -197,32 +187,26 @@ export async function releaseScopedContinuation(
     logImpl?: LogImpl;
   } = {},
 ) {
-  // Наружу уходит только channel-local токен: reset-роут клеит имя канала сам (#110).
-  const token = toChannelLocalToken(continuationToken);
   let result;
   try {
-    result = await requestResetImpl({ chatKey, continuationToken: token });
+    result = await requestResetImpl({ chatKey, target });
   } catch (error) {
     withResetPhase(error, "remote");
     throw error;
   }
-  // Ответ no_active_session идемпотентен и для реплея апдейта нормален, но именно он
-  // маскировал #110: сброс «удавался», ничего не сбрасывая. В журнале исход виден.
-  logResetOutcome(logImpl, chatKey, token, result);
+  logResetOutcome(logImpl, chatKey, target, result);
   return result;
 }
 
 function logResetOutcome(
   logImpl: LogImpl,
   chatKey: string,
-  continuationToken: string,
+  target: TelegramResetTarget,
   result: ResetResult,
 ) {
   try {
-    // chatKey сам оканчивается двоеточием (chat:topic) — отделяем явным словом, иначе
-    // строка читается как «reset 7091451031:: …» и ключ путается с токеном.
     logImpl(
-      `reset for chat ${chatKey} -> ${(result?.status as string | undefined) ?? "unknown"} (token ${continuationToken})`,
+      `reset for chat ${chatKey} -> ${(result?.status as string | undefined) ?? "unknown"} (${"sessionId" in target ? target.sessionId : "address"})`,
     );
   } catch {
     // Журналирование не должно ронять сброс.
@@ -231,7 +215,7 @@ function logResetOutcome(
 
 export async function performScopedReset(
   chatKey: string,
-  continuationToken: string,
+  target: TelegramResetTarget,
   {
     clearQueue = false,
     persistIntentImpl = persistPrivateResetIntent,
@@ -241,10 +225,7 @@ export async function performScopedReset(
     logImpl = log,
   }: {
     clearQueue?: boolean;
-    persistIntentImpl?: (
-      chatKey: string,
-      continuationToken: string,
-    ) => Promise<unknown>;
+    persistIntentImpl?: (chatKey: string) => Promise<unknown>;
     requestResetImpl?: ResetRequestImpl;
     completeStateImpl?: CompleteStateImpl;
     clearIntentImpl?: (chatKey: string) => Promise<unknown>;
@@ -253,18 +234,18 @@ export async function performScopedReset(
 ) {
   if (clearQueue) {
     try {
-      await persistIntentImpl(chatKey, continuationToken);
+      await persistIntentImpl(chatKey);
     } catch (error) {
       withResetPhase(error, "intent");
       throw error;
     }
   }
-  await releaseScopedContinuation(chatKey, continuationToken, {
+  await releaseScopedSession(chatKey, target, {
     requestResetImpl,
     logImpl,
   });
   try {
-    await completeStateImpl(chatKey, continuationToken, { clearQueue });
+    await completeStateImpl(chatKey, { clearQueue });
   } catch (error) {
     withResetPhase(error, "cleanup");
     throw error;
@@ -294,11 +275,14 @@ export async function reconcileScopedResetIntents({
 } = {}) {
   const intents = await loadIntentsImpl();
   for (const intent of intents) {
-    // Интент мог быть записан версией до фикса #110 — с именем канала в токене.
-    const continuationToken = toChannelLocalToken(intent.continuationToken);
-    const result = await requestResetImpl({ ...intent, continuationToken });
-    logResetOutcome(logImpl, intent.chatKey, continuationToken, result);
-    await completeStateImpl(intent.chatKey, continuationToken, {
+    const address = telegramAddressFromChatKey(intent.chatKey);
+    if (address === null) {
+      throw new Error(`invalid Telegram reset intent chat key: ${intent.chatKey}`);
+    }
+    const target = { address } as const;
+    const result = await requestResetImpl({ chatKey: intent.chatKey, target });
+    logResetOutcome(logImpl, intent.chatKey, target, result);
+    await completeStateImpl(intent.chatKey, {
       clearQueue: true,
     });
     await clearIntentImpl(intent.chatKey);
@@ -428,7 +412,7 @@ async function clearFailedDirectIngress(
 export async function reapStaleRuns({
   listStatusesImpl = listChatStatuses,
   setStatusIfImpl = setChatStatusIf,
-  resetImpl = releaseScopedContinuation,
+  resetImpl = releaseScopedSession,
   sendImpl = sendStaleRunNotice,
   deleteMessageImpl = deleteStaleWorkingMessage,
   now = Date.now,
@@ -439,7 +423,10 @@ export async function reapStaleRuns({
 }: {
   listStatusesImpl?: () => StatusRecord[] | Promise<StatusRecord[]>;
   setStatusIfImpl?: SetStatusIfImpl;
-  resetImpl?: (chatKey: string, continuationToken: string) => Promise<unknown>;
+  resetImpl?: (
+    chatKey: string,
+    target: TelegramResetTarget,
+  ) => Promise<unknown>;
   sendImpl?: (chatKey: string, text: string) => Promise<unknown>;
   deleteMessageImpl?: (
     chatKey: string,
@@ -513,18 +500,14 @@ export async function reapStaleRuns({
     if (!flipped) continue;
     reaped++;
 
-    if (
-      typeof status.continuationToken === "string" &&
-      status.continuationToken.length > 0
-    ) {
+    if (typeof status.sessionId === "string" && status.sessionId.length > 0) {
       try {
-        // Статусы, записанные до фикса #110, хранят токен с именем канала впереди.
-        await resetImpl(key, toChannelLocalToken(status.continuationToken));
+        await resetImpl(key, { sessionId: status.sessionId });
       } catch (error) {
         safeLog(`stale run reset failed for ${key}:`, errorMessage(error));
       }
     } else {
-      safeLog(`stale run ${key} has no continuation token`);
+      safeLog(`stale run ${key} has no session id`);
     }
 
     try {

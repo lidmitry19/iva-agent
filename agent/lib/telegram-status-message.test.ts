@@ -115,7 +115,7 @@ await test("обычный финал гасит статус и убирает 
     statusMessageId: 500,
   });
   const { calls, tg } = handle();
-  const channel = { continuation: { token: "telegram:77" }, telegram: tg };
+  const channel = { telegram: tg };
 
   assert.equal(
     await status.finishTelegramStatus(channel, "s-1", "completed"),
@@ -146,7 +146,7 @@ await test("отмена переписывает статус и оставля
 
   assert.equal(
     await status.finishTelegramStatus(
-      { continuation: { token: "telegram:77" }, telegram: tg },
+      { telegram: tg },
       "s-2",
       "cancelled",
     ),
@@ -171,7 +171,7 @@ await test("сбой Bot API на уборке не рушит терминал 
 
   assert.equal(
     await status.finishTelegramStatus(
-      { continuation: { token: "telegram:77" }, telegram: failing },
+      { telegram: failing },
       "s-3",
       "failed",
     ),

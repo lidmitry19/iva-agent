@@ -1,23 +1,82 @@
+import type { RouteHandlerArgs } from "eve/channels";
 import { verifyTelegramRequest } from "eve/channels/telegram";
-import type { ResetSessionResult } from "eve/channels";
 
-// TODO(ticket-03): eve 0.47 removed the continuation-token `ResetFn` from
-// RouteHandlerArgs; reset now lives on `from(address).reset({reason})`. This
-// local type freezes the pre-migration call shape until ticket 03 rebuilds reset
-// on session-id handles (attachSession), matching agent/lib/eve-cancel.ts.
-export type ResetFn = (request: {
-  continuationToken: string;
-  reason?: string;
-}) => Promise<ResetSessionResult>;
+export type TelegramSessionAddress = {
+  chatId: string;
+  messageThreadId?: number;
+  conversationId?: string;
+};
 
-/**
- * Authenticated Telegram-owned session reset endpoint.
- * `reset` is the route helper Eve binds to the containing authored channel,
- * so the raw token resolves in the "telegram" namespace.
- */
+type ResetTarget =
+  | { sessionId: string; address?: never }
+  | { sessionId?: never; address: TelegramSessionAddress };
+
+type ResetOperations = Pick<
+  RouteHandlerArgs,
+  "attachSession" | "resolveSession"
+>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const numericString = (value: unknown, signed: boolean): string | null => {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) return null;
+    value = String(value);
+  }
+  if (typeof value !== "string" || value.length === 0) return null;
+  const pattern = signed ? /^-?\d+$/u : /^\d+$/u;
+  return pattern.test(value) ? value : null;
+};
+
+function parseAddress(value: unknown): TelegramSessionAddress | null {
+  if (!isRecord(value)) return null;
+  const chatId = numericString(value.chatId, true);
+  if (chatId === null) return null;
+  const messageThreadId = value.messageThreadId;
+  if (
+    messageThreadId !== undefined &&
+    (!Number.isSafeInteger(messageThreadId) || (messageThreadId as number) <= 0)
+  ) {
+    return null;
+  }
+  const conversationId =
+    value.conversationId === undefined
+      ? undefined
+      : numericString(value.conversationId, false);
+  if (conversationId === null) return null;
+  return {
+    chatId,
+    ...(messageThreadId === undefined
+      ? {}
+      : { messageThreadId: messageThreadId as number }),
+    ...(conversationId === undefined ? {} : { conversationId }),
+  };
+}
+
+function addressKey(address: TelegramSessionAddress): string {
+  return `${address.chatId}:${address.messageThreadId ?? ""}:${address.conversationId ?? ""}`;
+}
+
+function parseTarget(value: unknown): ResetTarget | null {
+  if (!isRecord(value)) return null;
+  const hasSessionId = Object.hasOwn(value, "sessionId");
+  const hasAddress = Object.hasOwn(value, "address");
+  if (hasSessionId === hasAddress) return null;
+  if (hasSessionId) {
+    const sessionId = value.sessionId;
+    return typeof sessionId === "string" && sessionId.length > 0
+      ? { sessionId }
+      : null;
+  }
+  const address = parseAddress(value.address);
+  return address === null ? null : { address };
+}
+
+/** Authenticated Telegram-owned session reset endpoint. */
 export async function handleTelegramResetRequest(
   req: Request,
-  reset: ResetFn,
+  operations: ResetOperations,
   secretToken?: string,
 ): Promise<Response> {
   let raw;
@@ -27,21 +86,24 @@ export async function handleTelegramResetRequest(
     return new Response("unauthorized", { status: 401 });
   }
 
-  let continuationToken;
+  let target;
   try {
-    continuationToken = (
-      JSON.parse(raw) as { continuationToken?: unknown } | null
-    )?.continuationToken;
+    target = parseTarget(JSON.parse(raw));
   } catch {
     return new Response("invalid JSON", { status: 400 });
   }
-  if (typeof continuationToken !== "string" || continuationToken.length === 0) {
-    return new Response("continuationToken is required", { status: 400 });
+  if (target === null) {
+    return new Response("exactly one valid sessionId or address is required", {
+      status: 400,
+    });
   }
 
-  const result = await reset({
-    continuationToken,
-    reason: "Telegram recovery command",
-  });
+  const session =
+    target.sessionId === undefined
+      ? await operations.resolveSession(addressKey(target.address))
+      : operations.attachSession(target.sessionId);
+  const result = session
+    ? await session.reset({ reason: "Telegram recovery command" })
+    : { status: "no_active_session" as const };
   return Response.json({ ok: true, ...result });
 }

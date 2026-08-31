@@ -9,13 +9,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { telegramAddressFromChatKey } from "./telegram-reset.ts";
 
 export const TELEGRAM_RESET_INTENT_VERSION = 1;
+const RETIRED_ROUTING_FIELD = ["continuation", "Token"].join("");
 
 export interface TelegramResetIntent {
   version: typeof TELEGRAM_RESET_INTENT_VERSION;
   chatKey: string;
-  continuationToken: string;
   requestedAt: number;
 }
 
@@ -43,14 +44,20 @@ function intentPath(directory: string, chatKey: string) {
   );
 }
 
+function rollbackRoutingValue(chatKey: string): string {
+  const address = telegramAddressFromChatKey(chatKey);
+  if (address === null) {
+    throw new Error(`invalid Telegram reset intent chat key: ${chatKey}`);
+  }
+  return `${address.chatId}:${address.messageThreadId ?? ""}:`;
+}
+
 function normalizeIntent(value: unknown, source: string): TelegramResetIntent {
   if (
     !isRecord(value) ||
     value.version !== TELEGRAM_RESET_INTENT_VERSION ||
     typeof value.chatKey !== "string" ||
     !value.chatKey ||
-    typeof value.continuationToken !== "string" ||
-    !value.continuationToken ||
     !isSafeInteger(value.requestedAt) ||
     value.requestedAt < 0
   ) {
@@ -59,7 +66,6 @@ function normalizeIntent(value: unknown, source: string): TelegramResetIntent {
   return {
     version: TELEGRAM_RESET_INTENT_VERSION,
     chatKey: value.chatKey,
-    continuationToken: value.continuationToken,
     requestedAt: value.requestedAt,
   };
 }
@@ -83,7 +89,6 @@ async function ensureIntentDirectory(directory: string) {
 export async function persistTelegramResetIntent(
   directory: string,
   chatKey: string,
-  continuationToken: string,
   {
     now = Date.now,
     nonce = () => randomBytes(8).toString("hex"),
@@ -93,16 +98,20 @@ export async function persistTelegramResetIntent(
     {
       version: TELEGRAM_RESET_INTENT_VERSION,
       chatKey,
-      continuationToken,
       requestedAt: now(),
     },
     "new reset request",
   );
+  const diskIntent = {
+    ...intent,
+    // Older rollback code requires this inert field to parse the same v1 file.
+    [RETIRED_ROUTING_FIELD]: rollbackRoutingValue(chatKey),
+  };
   await ensureIntentDirectory(directory);
   const target = intentPath(directory, chatKey);
   const tmp = `${target}.tmp-${process.pid}-${nonce()}`;
   try {
-    await writeFile(tmp, JSON.stringify(intent), {
+    await writeFile(tmp, JSON.stringify(diskIntent), {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600,

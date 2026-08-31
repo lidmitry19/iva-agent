@@ -803,7 +803,6 @@ void test("a missing terminal event becomes drainable after the run-status TTL",
   const key = "9:";
   status.setChatStatus(key, {
     status: "running",
-    continuationToken: "9::",
     sessionId: "orphaned-session",
     turnId: "orphaned-turn",
   });

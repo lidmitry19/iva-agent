@@ -51,7 +51,10 @@ type HarnessOptions = {
   collectQuietMs?: string;
   directAcceptanceTimeoutMs?: string;
 };
-type ResetRequest = { chatKey: string; continuationToken: string };
+type ResetRequest = {
+  chatKey: string;
+  target: { sessionId: string } | { address: { chatId: string } };
+};
 type RoutingCall =
   | ["enqueue", string, TelegramQueueUpdate]
   | ["acknowledge", TelegramQueueUpdate, number]
@@ -136,11 +139,11 @@ async function waitForFile(file: string): Promise<void> {
   assert.fail(`timed out waiting for ${file}`);
 }
 
-test("direct queue runtime normalizes a namespaced reset token", async () => {
+test("direct queue runtime forwards an immutable session target", async () => {
   const requests: ResetRequest[] = [];
-  const result = await queueRuntime.releaseScopedContinuation(
+  const result = await queueRuntime.releaseScopedSession(
     "1:",
-    "telegram:1::",
+    { sessionId: "session-1" },
     {
       requestResetImpl: async (request) => {
         requests.push(request);
@@ -151,7 +154,9 @@ test("direct queue runtime normalizes a namespaced reset token", async () => {
   );
 
   assert.deepEqual(result, { ok: true, status: "reset" });
-  assert.deepEqual(requests, [{ chatKey: "1:", continuationToken: "1::" }]);
+  assert.deepEqual(requests, [
+    { chatKey: "1:", target: { sessionId: "session-1" } },
+  ]);
 });
 
 test("direct routing runtime durably queues a busy private update", async () => {

@@ -11,6 +11,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import type {
+  ChannelSource,
+  RouteHandlerArgs,
+  Session,
+} from "eve/channels";
+import type { TelegramChannelState } from "eve/channels/telegram";
 
 const dataDir = mkdtempSync(join(tmpdir(), "iva-telegram-failures-"));
 process.env.ASSISTANT_DATA_DIR = dataDir;
@@ -35,7 +41,6 @@ type HeldSend = {
 type EventOptions = {
   chatId: string;
   sessionId: string;
-  continuationToken?: string;
 };
 type ChannelEventHandler = (
   data: Record<string, unknown>,
@@ -46,8 +51,9 @@ type FailureAdapter = {
   createAdapterContext: (base: {
     ctx: unknown;
     session: {
-      continuationToken: string;
-      setContinuationToken: (token: string) => void;
+      id: string;
+      auth: { current: null; initiator: null };
+      continuation: { token: string; rekey: (token: string) => void };
     };
     state: Record<string, unknown>;
   }) => unknown;
@@ -72,6 +78,7 @@ type FailureAdapter = {
 };
 
 const apiCalls: ApiCall[] = [];
+const hitlResponses: unknown[][] = [];
 let heldSend: HeldSend | undefined;
 globalThis.fetch = async (url, init = {}) => {
   // eslint-disable-next-line @typescript-eslint/no-base-to-string -- preserve the original mock's exact String coercion.
@@ -140,7 +147,6 @@ after(() => rmSync(dataDir, { recursive: true, force: true }));
 function eventContext({
   chatId,
   sessionId,
-  continuationToken = `telegram:${chatId}::`,
 }: EventOptions) {
   const ctx = new ContextContainer();
   ctx.set(SessionKey, {
@@ -149,9 +155,11 @@ function eventContext({
     turn: { id: "turn_0", sequence: 0 },
   });
   const session = {
-    continuationToken,
-    setContinuationToken(token: string) {
-      this.continuationToken = token;
+    id: sessionId,
+    auth: { current: null, initiator: null } as const,
+    continuation: {
+      token: `telegram:${chatId}::`,
+      rekey() {},
     },
   };
   const state = {
@@ -618,6 +626,39 @@ async function postWebhookUpdate(update: Record<string, unknown>) {
   // Канал подтверждает вебхук раньше диспетчеризации и уводит работу в waitUntil —
   // без дожидания фоновых задач тест увидел бы пустоту.
   const background: Promise<unknown>[] = [];
+  const routeSession: Session = {
+    id: "webhook-test-session",
+    send: unusedRouteArg,
+    respond: unusedRouteArg,
+    cancel: unusedRouteArg,
+    compact: unusedRouteArg,
+    clear: unusedRouteArg,
+    reset: unusedRouteArg,
+    getEventStream: unusedRouteArg,
+    getStreamTailIndex: unusedRouteArg,
+  };
+  const source: ChannelSource<TelegramChannelState> = {
+    send: unusedRouteArg,
+    respond: (responses) => {
+      hitlResponses.push([...responses]);
+      return Promise.resolve(routeSession);
+    },
+    cancel: unusedRouteArg,
+    compact: unusedRouteArg,
+    clear: unusedRouteArg,
+    reset: unusedRouteArg,
+  };
+  const routeArgs: RouteHandlerArgs<TelegramChannelState> = {
+    attachSession: () => routeSession,
+    from: () => source,
+    resolveSession: () => Promise.resolve(routeSession),
+    to: unusedRouteArg,
+    params: {},
+    waitUntil: (task: Promise<unknown>) => {
+      background.push(Promise.resolve(task));
+    },
+    requestIp: "127.0.0.1",
+  };
   const response = await webhookHandler(
     new Request("http://iva.test/eve/v1/telegram", {
       method: "POST",
@@ -627,23 +668,9 @@ async function postWebhookUpdate(update: Record<string, unknown>) {
       },
       body: JSON.stringify(update),
     }),
-    {
-      send: unusedRouteArg,
-      resolveActiveSession: unusedRouteArg,
-      cancel: unusedRouteArg,
-      clear: unusedRouteArg,
-      compact: unusedRouteArg,
-      reset: unusedRouteArg,
-      getSession: unusedRouteArg,
-      receive: unusedRouteArg,
-      params: {},
-      waitUntil: (task: Promise<unknown>) => {
-        background.push(Promise.resolve(task));
-      },
-      requestIp: "127.0.0.1",
-    } as never,
+    routeArgs,
   );
-  await Promise.allSettled(background);
+  await Promise.all(background);
   return response;
 }
 
@@ -668,8 +695,6 @@ test("the Stop button reaches the channel's own cancel route when no bridge is r
   const key = chatKeyOf(chatId);
   setChatStatus(key, {
     status: "running",
-    // Namespaced-токен пишут версии до фикса #110 — наружу обязан уйти channel-local.
-    continuationToken: `telegram:${chatId}::`,
     sessionId: "webhook-stop-session",
     turnId: "turn_7",
   });
@@ -680,7 +705,7 @@ test("the Stop button reaches the channel's own cancel route when no bridge is r
   const cancels = callsSince(before, "cancel");
   assert.equal(cancels.length, 1, "нажатие не дошло до cancel-роута");
   assert.deepEqual(cancels[0].body, {
-    continuationToken: `${chatId}::`,
+    sessionId: "webhook-stop-session",
     turnId: "turn_7",
   });
   const acks = callsSince(before, "answerCallbackQuery");
@@ -693,7 +718,6 @@ test("Trace: исход «Стопа» ложится в журнал хода",
   const key = chatKeyOf(chatId);
   setChatStatus(key, {
     status: "running",
-    continuationToken: `${chatId}::`,
     sessionId: "trace-stop-session",
     turnId: "turn_11",
   });
@@ -725,7 +749,6 @@ test("an idle chat and an untrusted tap never reach the cancel route", async () 
   const liveChat = "733";
   setChatStatus(chatKeyOf(liveChat), {
     status: "running",
-    continuationToken: `${liveChat}::`,
     sessionId: "guarded-session",
     turnId: "turn_8",
   });
@@ -740,12 +763,15 @@ test("an idle chat and an untrusted tap never reach the cancel route", async () 
   // HITL-колбэк самого eve ("eve:" — TELEGRAM_HITL_CALLBACK_PREFIX) разбирается ДО
   // нашего хука: он не наш, до cancel не доходит, и отвечает на него eve.
   const beforeHitl = apiCalls.length;
+  const beforeHitlResponses = hitlResponses.length;
   await postWebhookUpdate({
     ...stopTap(liveChat, 9),
     callback_query: { ...stopTap(liveChat, 9).callback_query, data: "eve:1" },
   });
   assert.equal(callsSince(beforeHitl, "cancel").length, 0);
   assert.equal(callsSince(beforeHitl, "answerCallbackQuery").length, 1);
+  assert.equal(hitlResponses.length, beforeHitlResponses + 1);
+  assert.equal(hitlResponses.at(-1)?.length, 1);
 
   // А вот НЕ-HITL чужой колбэк (кнопка меню, долетевшая до eve) попадает уже в наш
   // хук. Само его наличие навсегда закрывает дефолтную ветку eve «Unsupported
@@ -769,7 +795,6 @@ test("non-private webhook Stop callbacks never reach the cancel route", async ()
     const chatId = String(740 + apiCalls.length);
     setChatStatus(chatKeyOf(chatId), {
       status: "running",
-      continuationToken: `${chatId}::`,
       sessionId: `guarded-${String(chatType)}`,
       turnId: "turn_private_boundary",
     });
@@ -814,7 +839,6 @@ test("a crashed turn's stale status is not stoppable in webhook mode either", as
   const key = chatKeyOf(chatId);
   setChatStatus(key, {
     status: "running",
-    continuationToken: `${chatId}::`,
     sessionId: "crashed-session",
     turnId: "turn_9",
   });

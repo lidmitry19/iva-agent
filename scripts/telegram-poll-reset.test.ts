@@ -7,7 +7,6 @@ import test from "node:test";
 
 type ChatStatus = {
   status: string;
-  continuationToken?: string;
   sessionId?: string;
   turnId?: string;
   [key: string]: unknown;
@@ -31,7 +30,10 @@ type QueueDocument = {
   version: number;
   queues: Record<string, QueueItem[]>;
 };
-type ResetIntent = { chatKey: string; continuationToken: string };
+type ResetIntent = {
+  chatKey: string;
+  target: { sessionId: string } | { address: { chatId: string; messageThreadId?: number } };
+};
 type CompleteResetOptions = {
   clearQueue?: boolean;
   clearQueueImpl?: () => Promise<unknown>;
@@ -61,7 +63,6 @@ type PollModule = {
   clearPrivateResetIntent: (chatKey: string) => Promise<void>;
   completeScopedResetState: (
     chatKey: string,
-    continuationToken: string,
     options: CompleteResetOptions,
   ) => Promise<void>;
   drainReadyQueueHeads: (options: DrainOptions) => Promise<number>;
@@ -69,13 +70,10 @@ type PollModule = {
   loadQueue: () => Promise<QueueDocument>;
   performScopedReset: (
     chatKey: string,
-    continuationToken: string,
+    target: ResetIntent["target"],
     options?: PerformResetOptions,
   ) => Promise<void>;
-  persistPrivateResetIntent: (
-    chatKey: string,
-    continuationToken: string,
-  ) => Promise<void>;
+  persistPrivateResetIntent: (chatKey: string) => Promise<void>;
   reconcileScopedResetIntents: (
     options?: ReconcileResetOptions,
   ) => Promise<number>;
@@ -110,13 +108,11 @@ const status = runStatusModule as RunStatusModule;
 test("private reset clears only the target chat status and queue", async () => {
   status.setChatStatus("chat-a:", {
     status: "running",
-    continuationToken: "101::",
     sessionId: "session-a",
     turnId: "turn-a",
   });
   status.setChatStatus("chat-b:7", {
     status: "running",
-    continuationToken: "-102:7:55",
     sessionId: "session-b",
     turnId: "turn-b",
   });
@@ -128,18 +124,16 @@ test("private reset clears only the target chat status and queue", async () => {
     }),
   );
 
-  await completeScopedResetState("chat-a:", "101::", { clearQueue: true });
+  await completeScopedResetState("chat-a:", { clearQueue: true });
 
   const reset = status.getChatStatus("chat-a:");
   assert.equal(reset.status, "idle");
-  assert.equal(reset.continuationToken, "101::");
   assert.equal(reset.sessionId, undefined);
   assert.equal(reset.turnId, undefined);
 
   const untouched = status.getChatStatus("chat-b:7");
   assert.equal(untouched.status, "running");
   assert.equal(untouched.sessionId, "session-b");
-  assert.equal(untouched.continuationToken, "-102:7:55");
 
   const queue = JSON.parse(
     readFileSync(join(dataDir, "telegram-queue.json"), "utf8"),
@@ -152,7 +146,6 @@ test("private reset clears only the target chat status and queue", async () => {
 test("group reset preserves the shared topic queue", async () => {
   status.setChatStatus("group:7", {
     status: "running",
-    continuationToken: "-103:7:56",
     sessionId: "session-a",
   });
   writeFileSync(
@@ -163,7 +156,7 @@ test("group reset preserves the shared topic queue", async () => {
     }),
   );
 
-  await completeScopedResetState("group:7", "-103:7:56", {
+  await completeScopedResetState("group:7", {
     clearQueue: false,
   });
 
@@ -182,12 +175,11 @@ test("group reset preserves the shared topic queue", async () => {
 test("failed private queue cleanup does not expose an idle tombstone", async () => {
   status.setChatStatus("chat-c:", {
     status: "running",
-    continuationToken: "104::",
     sessionId: "session-c",
   });
 
   await assert.rejects(
-    completeScopedResetState("chat-c:", "104::", {
+    completeScopedResetState("chat-c:", {
       clearQueue: true,
       clearQueueImpl: async () => {
         throw new Error("disk full");
@@ -201,7 +193,7 @@ test("failed private queue cleanup does not expose an idle tombstone", async () 
 
 test("private reset intent is durable before remote reset and clears after local cleanup", async () => {
   const events: string[] = [];
-  await performScopedReset("chat-intent:", "105::", {
+  await performScopedReset("chat-intent:", { sessionId: "session-105" }, {
     clearQueue: true,
     persistIntentImpl: async () => events.push("intent"),
     requestResetImpl: async () => events.push("remote"),
@@ -213,11 +205,9 @@ test("private reset intent is durable before remote reset and clears after local
 });
 
 test("startup reconciliation prevents a remotely reset private queue from draining after a crash", async () => {
-  const key = "chat-crash:";
-  const continuationToken = "106::";
+  const key = "106:";
   status.setChatStatus(key, {
     status: "running",
-    continuationToken,
     sessionId: "old-session",
     turnId: "old-turn",
   });
@@ -243,7 +233,7 @@ test("startup reconciliation prevents a remotely reset private queue from draini
       ],
     },
   });
-  await persistPrivateResetIntent(key, continuationToken);
+  await persistPrivateResetIntent(key);
 
   const remoteRetries: ResetIntent[] = [];
   await reconcileScopedResetIntents({
@@ -252,13 +242,9 @@ test("startup reconciliation prevents a remotely reset private queue from draini
     },
   });
 
-  assert.deepEqual(
-    remoteRetries.map(({ chatKey, continuationToken: token }) => [
-      chatKey,
-      token,
-    ]),
-    [[key, continuationToken]],
-  );
+  assert.deepEqual(remoteRetries, [
+    { chatKey: key, target: { address: { chatId: "106" } } },
+  ]);
   assert.deepEqual(await loadPrivateResetIntents(), []);
   assert.equal(status.getChatStatus(key).status, "idle");
   assert.equal(status.getChatStatus(key).sessionId, undefined);
@@ -284,8 +270,8 @@ test("startup reconciliation prevents a remotely reset private queue from draini
 });
 
 test("failed reset reconciliation keeps its durable intent for the next startup", async () => {
-  const key = "chat-retry:";
-  await persistPrivateResetIntent(key, "107::");
+  const key = "107:";
+  await persistPrivateResetIntent(key);
 
   await assert.rejects(
     reconcileScopedResetIntents({
@@ -339,12 +325,11 @@ test("corrupt queue is not treated as empty during reset", async () => {
   writeFileSync(queueFile, corrupt);
   status.setChatStatus("chat-f:", {
     status: "running",
-    continuationToken: "108::",
     sessionId: "session-f",
   });
 
   await assert.rejects(
-    completeScopedResetState("chat-f:", "108::", { clearQueue: true }),
+    completeScopedResetState("chat-f:", { clearQueue: true }),
     SyntaxError,
   );
 
@@ -366,54 +351,60 @@ test("ordinary queue load quarantines corrupt bytes and continues", async () => 
   assert.equal(readFileSync(join(dataDir, backups[0]), "utf8"), corrupt);
 });
 
-test("reset tombstone stores the token channel-local (#110)", async () => {
-  // Токен приходит из статуса, а тот до фикса заполнялся namespaced-значением eve.
-  // Надгробие переживает рестарт и потом само уходит в reset — сохранить его как есть
-  // значило бы законсервировать «telegram:telegram:…» и молчаливый no_active_session.
-  await completeScopedResetState("7091451031:", "telegram:7091451031::", {
+test("reset tombstone retires the legacy routing field", async () => {
+  const legacyField = "continuation" + "Token";
+  status.setChatStatus("7091451031:", {
+    status: "running",
+    sessionId: "session-old",
+    [legacyField]: "legacy-value",
+  });
+  await completeScopedResetState("7091451031:", {
     clearQueue: true,
   });
 
   const tombstone = status.getChatStatus("7091451031:");
   assert.equal(tombstone.status, "idle");
-  assert.equal(tombstone.continuationToken, "7091451031::");
+  assert.equal(Object.hasOwn(tombstone, legacyField), false);
 });
 
-test("a reset intent written before the fix is retried channel-local (#110)", async () => {
+test("a durable reset intent reconstructs its Telegram address", async () => {
   const key = "429888768:";
-  await persistPrivateResetIntent(key, "telegram:429888768::");
+  await persistPrivateResetIntent(key);
 
-  const requested: string[] = [];
+  const requested: ResetIntent[] = [];
   await reconcileScopedResetIntents({
-    requestResetImpl: async ({ continuationToken }) => {
-      // Точка выхода наружу — то, что реально уедет в /eve/v1/telegram/reset.
-      requested.push(continuationToken);
+    requestResetImpl: async (request) => {
+      requested.push(request);
     },
   });
 
-  assert.deepEqual(requested, ["429888768::"]);
-  assert.equal(status.getChatStatus(key).continuationToken, "429888768::");
+  assert.deepEqual(requested, [
+    { chatKey: key, target: { address: { chatId: "429888768" } } },
+  ]);
+  assert.equal(status.getChatStatus(key).status, "idle");
 });
 
-test("/new sends the reset channel-local even from a namespaced status (#110)", async () => {
-  const requested: string[] = [];
-  await performScopedReset("7091451031:", "telegram:7091451031::", {
+test("/new sends the exact stored session target", async () => {
+  const requested: ResetIntent[] = [];
+  await performScopedReset("7091451031:", { sessionId: "session-1" }, {
     clearQueue: true,
     persistIntentImpl: async () => {},
-    requestResetImpl: async ({ continuationToken }) =>
-      requested.push(continuationToken),
+    requestResetImpl: async (request) => requested.push(request),
     completeStateImpl: async () => {},
     clearIntentImpl: async () => {},
   });
 
-  assert.deepEqual(requested, ["7091451031::"]);
+  assert.deepEqual(requested, [
+    {
+      chatKey: "7091451031:",
+      target: { sessionId: "session-1" },
+    },
+  ]);
 });
 
-test("reset outcome is logged, including the silent no_active_session (#110)", async () => {
-  // Именно no_active_session маскировал баг: сброс «удавался», не сбросив ничего.
-  // Теперь исход и точный токен видны в journalctl моста.
+test("reset outcome is logged for session and address targets", async () => {
   const lines: string[] = [];
-  await performScopedReset("7091451031:", "telegram:7091451031::", {
+  await performScopedReset("7091451031:", { sessionId: "session-1" }, {
     clearQueue: true,
     persistIntentImpl: async () => {},
     requestResetImpl: async () => ({ ok: true, status: "no_active_session" }),
@@ -423,11 +414,14 @@ test("reset outcome is logged, including the silent no_active_session (#110)", a
   });
 
   assert.deepEqual(lines, [
-    "reset for chat 7091451031: -> no_active_session (token 7091451031::)",
+    "reset for chat 7091451031: -> no_active_session (session-1)",
   ]);
 
   const successes: string[] = [];
-  await performScopedReset("7091451031:", "7091451031::", {
+  await performScopedReset(
+    "7091451031:",
+    { address: { chatId: "7091451031" } },
+    {
     persistIntentImpl: async () => {},
     requestResetImpl: async () => ({
       ok: true,
@@ -437,14 +431,15 @@ test("reset outcome is logged, including the silent no_active_session (#110)", a
     completeStateImpl: async () => {},
     clearIntentImpl: async () => {},
     logImpl: (line) => successes.push(line),
-  });
+    },
+  );
   assert.deepEqual(successes, [
-    "reset for chat 7091451031: -> reset (token 7091451031::)",
+    "reset for chat 7091451031: -> reset (address)",
   ]);
 });
 
 test("intent reconciliation logs its reset outcome too", async () => {
-  await persistPrivateResetIntent("429888768:", "telegram:429888768::");
+  await persistPrivateResetIntent("429888768:");
   const lines: string[] = [];
   await reconcileScopedResetIntents({
     requestResetImpl: async () => ({ ok: true, status: "reset" }),
@@ -452,6 +447,6 @@ test("intent reconciliation logs its reset outcome too", async () => {
   });
 
   assert.deepEqual(lines, [
-    "reset for chat 429888768: -> reset (token 429888768::)",
+    "reset for chat 429888768: -> reset (address)",
   ]);
 });

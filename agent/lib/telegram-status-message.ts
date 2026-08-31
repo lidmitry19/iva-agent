@@ -1,18 +1,19 @@
 // Статус-сообщение хода: «Работаю…» с кнопкой [⏹ Стоп] и его уборка в терминале.
 // Это UI самого канала, не текст модели, поэтому мимо Outbox.
 //
-// turn.started шлёт статус и пишет running+continuationToken+turnId в run-status.
-// Нажатие кнопки (и /stop) ловит мост: он берёт из статуса токен и зовёт cancel-роут
+// turn.started шлёт статус и пишет running+sessionId+turnId в run-status.
+// Нажатие кнопки (и /stop) ловит Bridge: он берёт sessionId и зовёт cancel-роут
 // канала, а terminal-событие приводит статус в порядок: обычный финал удаляет
 // сообщение, отмена переписывает его на «Остановлено».
 //
 // Про eve модуль не знает: канал передаёт хендл Bot API структурно.
 import { tr } from "./i18n.ts";
-import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
 import {
-  requireContinuationToken,
-  toChannelLocalToken,
-} from "./telegram-continuation-token.ts";
+  chatKeyOf,
+  getChatStatus,
+  RETIRED_SESSION_ROUTING_FIELD,
+  setChatStatusIf,
+} from "./run-status.ts";
 import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
 // В callback_data кладём только константу: лимит 64 байта не вмещает sessionId,
@@ -124,7 +125,6 @@ export async function enableWorkingStatusStop(
 // или переписать на «Остановлено» (отмена). Сбои уборки не критичны — глотаем.
 export async function finishTelegramStatus(
   channel: {
-    continuation?: { readonly token: string };
     telegram: TelegramStatusHandle;
   },
   sessionId: string,
@@ -141,9 +141,7 @@ export async function finishTelegramStatus(
       { sessionId },
       {
         status: "idle",
-        continuationToken: toChannelLocalToken(
-          requireContinuationToken(channel),
-        ),
+        [RETIRED_SESSION_ROUTING_FIELD]: null,
         sessionId: null,
         turnId: null,
         statusMessageId: null,

@@ -71,7 +71,10 @@ type ReaperOptions = {
     expected: Record<string, unknown>,
     patch: Record<string, unknown>,
   ) => Record<string, unknown> | null;
-  resetImpl: (chatKey: string, token: string) => Promise<unknown>;
+  resetImpl: (
+    chatKey: string,
+    target: { sessionId: string } | { address: { chatId: string } },
+  ) => Promise<unknown>;
   sendImpl: (chatKey: string, text: string) => Promise<unknown>;
   deleteMessageImpl: (chatKey: string, messageId: number) => Promise<unknown>;
   now: () => number;
@@ -654,14 +657,10 @@ test("routeMessageUpdate reports enqueue failure without acknowledging", async (
 });
 
 const reaperNow = 2_000_000;
-// Токен намеренно оставлен namespaced: ровно так его писали версии до фикса #110, и жнец
-// обязан лечить такие статусы — reset-роут клеит имя канала сам, а "telegram:telegram:1::"
-// не находит владельца и молча отвечает no_active_session.
 const staleStatus = {
   status: "running",
   generation: 7,
   updatedAt: reaperNow - 31_000,
-  continuationToken: "telegram:1::",
   sessionId: "session-1",
   turnId: "turn-1",
   statusMessageId: 77,
@@ -694,7 +693,7 @@ test("reapStaleRuns flips one stale run, resets Eve, notifies, and removes worki
         calls.push(["cas", key, expected, patch]);
         return { ...staleStatus, ...patch, generation: 8 };
       },
-      resetImpl: async (key, token) => calls.push(["reset", key, token]),
+      resetImpl: async (key, target) => calls.push(["reset", key, target]),
       sendImpl: async (key, text) => calls.push(["send", key, text]),
       deleteMessageImpl: async (key, messageId) =>
         calls.push(["delete", key, messageId]),
@@ -710,8 +709,7 @@ test("reapStaleRuns flips one stale run, resets Eve, notifies, and removes worki
   assert.equal((calls[0][3] as StatusRecord).status, "idle");
   assert.equal((calls[0][3] as StatusRecord).resetAt, reaperNow);
   assert.deepEqual(calls.slice(1), [
-    // Сброс уходит channel-local, хотя в статусе лежит namespaced-токен.
-    ["reset", "1:", "1::"],
+    ["reset", "1:", { sessionId: "session-1" }],
     ["send", "1:", "Предыдущий ход оборвался - повтори запрос или /new"],
     ["delete", "1:", 77],
   ]);
@@ -803,7 +801,6 @@ test("a long silent turn survives the reaper while its heartbeat runs; a dead on
     status: "running",
     generation: 1,
     updatedAt: nowMs,
-    continuationToken: "1::",
     sessionId: "session-live",
     turnId: "turn-live",
   };
@@ -1221,7 +1218,6 @@ test("property: a turn with live activity is never reaped, a dead one is reaped 
       status: "running",
       generation: 1,
       updatedAt: startedAt,
-      continuationToken: "1::",
       sessionId: `session-${iteration}`,
       turnId: `turn-${iteration}`,
     };

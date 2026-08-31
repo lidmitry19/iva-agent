@@ -46,12 +46,6 @@ import {
   TELEGRAM_CANCEL_ROUTE,
 } from "../lib/telegram-cancel-route.js";
 import { handleTelegramStopCallback } from "../lib/telegram-stop.js";
-// Eve отдаёт обработчикам событий токен с именем канала впереди, а reset-роут клеит его
-// сам. Сохраняем только channel-local вид, иначе /new сбрасывает несуществующий токен (#110).
-import {
-  requireContinuationToken,
-  toChannelLocalToken,
-} from "../lib/telegram-continuation-token.js";
 import {
   handleAcceptedTelegramWebhook,
   TELEGRAM_ACCEPTANCE_ROUTE,
@@ -72,7 +66,7 @@ import {
 // --- ESC-остановка хода (аналог ESC в Claude Code) ---
 //
 // turn.started шлёт «Работаю…» с кнопкой [⏹ Стоп] (agent/lib/telegram-status-message.ts)
-// и пишет running+continuationToken+turnId в run-status. Нажатие кнопки (и /stop) ловит
+// и пишет running+sessionId+turnId в run-status. Нажатие кнопки (и /stop) ловит
 // МОСТ: он читает статус и зовёт POST /eve/v1/telegram/cancel, а тот — публичный cancel
 // eve из RouteHandlerArgs (agent/lib/eve-cancel.ts). Дальше eve абортит ход и присылает
 // turn.cancelled, который правит статус-сообщение.
@@ -202,9 +196,6 @@ const telegram = telegramChannel({
       const tg = channel.telegram;
       await publishTelegramTurnStarted({
         chatKey: chatKeyOf(tg.chatId, tg.messageThreadId),
-        continuationToken: toChannelLocalToken(
-          requireContinuationToken(channel),
-        ),
         sessionId: ctx.session.id,
         turnId: data.turnId,
         getStatusImpl: getChatStatus,
@@ -396,9 +387,6 @@ if (!telegramWebhookRoute || telegramWebhookRoute.transport === "websocket") {
   throw new Error("telegramChannel did not expose its expected webhook route");
 }
 
-// The generic eveChannel reset endpoint owns the "eve" continuation namespace,
-// while these sessions belong to "telegram". Keep reset on the same authored
-// channel so Eve prepends the correct channel name before resolving ownership.
 export default {
   ...telegram,
   routes: [
@@ -410,33 +398,17 @@ export default {
         args,
       ),
     ),
-    // TODO(ticket-03): eve 0.47 removed the continuation-token `reset`/`cancel`
-    // helpers from RouteHandlerArgs (they now live on `from(address)`), so this
-    // route no longer has a working dispatch target. Stub fails loudly instead of
-    // silently no-oping; ticket 03 rebuilds this on session-id handles
-    // (attachSession), see agent/lib/eve-cancel.ts.
-    POST("/eve/v1/telegram/reset", (req) =>
+    POST("/eve/v1/telegram/reset", (req, args) =>
       handleTelegramResetRequest(
         req,
-        () => {
-          throw new Error(
-            "telegram reset not implemented after eve 0.47 bump (ticket 03)",
-          );
-        },
+        args,
         process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
       ),
     ),
-    // Same reasoning for cancel: the route helper used to be bound to this
-    // authored channel, so a channel-local token resolved in the "telegram"
-    // namespace. See the TODO above.
-    POST(TELEGRAM_CANCEL_ROUTE, (req) =>
+    POST(TELEGRAM_CANCEL_ROUTE, (req, { attachSession }) =>
       handleTelegramCancelRequest(
         req,
-        () => {
-          throw new Error(
-            "telegram cancel not implemented after eve 0.47 bump (ticket 03)",
-          );
-        },
+        attachSession,
         process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
       ),
     ),

@@ -16,7 +16,10 @@ import type {
   TelegramContext,
   TelegramMessage,
 } from "eve/channels/telegram";
-import type { RouteHandlerArgs, Session } from "eve/channels";
+import type {
+  RouteHandlerArgs,
+  Session,
+} from "eve/channels";
 import {
   createQueueItem,
   enqueueItem,
@@ -27,6 +30,7 @@ import {
   addTelegramQueueReceipt,
   handleAcceptedTelegramWebhook,
   TELEGRAM_CLOSED_SESSION_KIND,
+  telegramTurnPolicy,
   wrapTelegramQueueOnMessage,
 } from "#lib/telegram-acceptance.ts";
 import { TELEGRAM_QUEUE_RECEIPT_FIELD } from "#lib/telegram-parts.ts";
@@ -67,7 +71,7 @@ function inboundMessage(chatId: number, messageId: number): TelegramMessage {
     text: "привет",
   } as unknown as TelegramMessage;
 }
-type TestUpdate = {
+type TestMessageUpdate = {
   update_id: number;
   message: {
     message_id: number;
@@ -78,6 +82,20 @@ type TestUpdate = {
     [key: string]: unknown;
   };
 };
+type TestCallbackUpdate = {
+  update_id: number;
+  callback_query: {
+    id: string;
+    from: { id: number; is_bot: boolean; first_name: string };
+    message: {
+      message_id: number;
+      date: number;
+      chat: { id: number; type: string };
+    };
+    data: string;
+  };
+};
+type TestUpdate = TestMessageUpdate | TestCallbackUpdate;
 type DeliveryResult = true | false | "handled" | "closed-session";
 type SendImpl = (
   update: TestUpdate,
@@ -93,6 +111,7 @@ type DeliveryOptions = {
   marked?: boolean;
   webhookSecretHeader?: string;
   completedUpdatesFile?: string;
+  observeResponse?: (response: Response) => void;
 };
 type DrainReadyQueueHeads = (
   options: Record<string, unknown>,
@@ -111,14 +130,25 @@ const isCompletedLedger = (
 
 const fakeBotToken = (id: number, label: string): string =>
   `${id}:${Buffer.from(label).toString("base64url")}`;
-// TODO(ticket-04): eve 0.47 grew `Session` (send/respond/compact/clear/reset are
-// now required); this mock never implemented those and the whole acceptance harness
-// predates the new `from(address)` dispatch surface. Cast, don't redesign, here.
-const fakeSession = (id: string): Session =>
-  ({
+const fakeSession = (
+  id: string,
+  respond: Session["respond"] = async () => ({
+    sessionId: id,
+    status: "accepted",
+  }),
+): Session => ({
     id,
-    continuationToken: id,
+    respond,
+    send: () => {
+      throw new Error("not used");
+    },
     cancel: () => {
+      throw new Error("not used");
+    },
+    clear: () => {
+      throw new Error("not used");
+    },
+    compact: () => {
       throw new Error("not used");
     },
     getEventStream: () => {
@@ -127,7 +157,10 @@ const fakeSession = (id: string): Session =>
     getStreamTailIndex: () => {
       throw new Error("not used");
     },
-  }) as unknown as Session;
+    reset: () => {
+      throw new Error("not used");
+    },
+  });
 process.env.TELEGRAM_BOT_TOKEN = fakeBotToken(999, "acceptance-default");
 process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN = WEBHOOK_SECRET;
 process.env.TELEGRAM_ALLOWED_USER_IDS = "42";
@@ -137,7 +170,14 @@ const { drainReadyQueueHeads } = (await import(pollModulePath)) as {
   drainReadyQueueHeads: DrainReadyQueueHeads;
 };
 
-const privateUpdate = (updateId: number, text?: string): TestUpdate => ({
+test("turn policy defaults to queue and accepts only the steer setting", () => {
+  assert.equal(telegramTurnPolicy({}), "queue");
+  assert.equal(telegramTurnPolicy({ turnPolicy: "queue" }), "queue");
+  assert.equal(telegramTurnPolicy({ turnPolicy: "steer" }), "steer");
+  assert.equal(telegramTurnPolicy({ turnPolicy: "junk" }), "queue");
+});
+
+const privateUpdate = (updateId: number, text?: string): TestMessageUpdate => ({
   update_id: updateId,
   message: {
     message_id: updateId,
@@ -145,6 +185,20 @@ const privateUpdate = (updateId: number, text?: string): TestUpdate => ({
     chat: { id: 1, type: "private" },
     from: { id: 42, is_bot: false, first_name: "Owner" },
     text,
+  },
+});
+
+const hitlCallbackUpdate = (updateId: number): TestCallbackUpdate => ({
+  update_id: updateId,
+  callback_query: {
+    id: `callback-${updateId}`,
+    from: { id: 42, is_bot: false, first_name: "Owner" },
+    message: {
+      message_id: updateId - 1,
+      date: 1,
+      chat: { id: 1, type: "private" },
+    },
+    data: "eve:1",
   },
 });
 
@@ -177,6 +231,7 @@ function productionTelegramDelivery(
     onMessage = () => ({ auth: null }),
     marked = true,
     webhookSecretHeader = WEBHOOK_SECRET,
+    observeResponse,
     completedUpdatesFile = join(
       mkdtempSync(join(tmpdir(), "iva-completed-updates-test-")),
       "completed-updates.json",
@@ -184,7 +239,11 @@ function productionTelegramDelivery(
   }: DeliveryOptions = {},
 ): (update: TestUpdate) => Promise<DeliveryResult> {
   const channel = telegramChannel({
+    api: {
+      fetch: async () => Response.json({ ok: true, result: true }),
+    },
     credentials: {
+      botToken: fakeBotToken(999, "acceptance-channel"),
       webhookVerifier:
         webhookVerifier ?? (async (_request, rawBody) => rawBody),
     },
@@ -201,35 +260,47 @@ function productionTelegramDelivery(
   assert.ok(route && route.transport !== "websocket");
 
   return async (update: TestUpdate) => {
-    // TODO(ticket-04): eve 0.47 removed `send`/`resolveActiveSession` from
-    // RouteHandlerArgs (dispatch moved to `from(address)`/`attachSession`); this
-    // harness mocks the pre-migration shape so the real telegramChannel route
-    // handler no longer finds the dispatch surface it expects. Cast keeps this
-    // compiling; ticket 04 rebuilds the harness on the new surface.
+    const sessionId = `test-session-${update.update_id}`;
+    const call = async (input: unknown, options: unknown) =>
+      sendImpl(update, input, options);
     const routeArgs = {
-      send: async (input: unknown, options: unknown) => {
-        await sendImpl(update, input, options);
-        return fakeSession(`test-session-${update.update_id}`);
-      },
-      resolveActiveSession: () => {
-        throw new Error("not used");
-      },
-      cancel: () => {
-        throw new Error("not used");
-      },
-      clear: () => {
-        throw new Error("not used");
-      },
-      compact: () => {
-        throw new Error("not used");
-      },
-      reset: () => {
-        throw new Error("not used");
-      },
-      getSession: () => {
-        throw new Error("not used");
-      },
-      receive: () => {
+      attachSession: (id: string) => fakeSession(id),
+      from: () => ({
+        send: async (message: unknown, options: unknown) => {
+          await call({ message }, options);
+          return fakeSession(sessionId);
+        },
+        respond: () => {
+          throw new Error("acceptance proxy must own respond");
+        },
+        cancel: () => {
+          throw new Error("not used");
+        },
+        clear: () => {
+          throw new Error("not used");
+        },
+        compact: () => {
+          throw new Error("not used");
+        },
+        reset: () => {
+          throw new Error("not used");
+        },
+      }),
+      resolveSession: async () =>
+        fakeSession(sessionId, async (inputResponses, options) => {
+          const message = "message" in update ? update.message.text ?? "" : "";
+          const result = await call(
+            { inputResponses, message },
+            options,
+          );
+          return typeof result === "object" &&
+            result !== null &&
+            "status" in result &&
+            result.status === "session_not_active"
+            ? { status: "session_not_active" }
+            : { sessionId, status: "accepted" };
+        }),
+      to: () => {
         throw new Error("not used");
       },
       params: {},
@@ -249,6 +320,7 @@ function productionTelegramDelivery(
       routeArgs,
       { completedUpdatesFile },
     );
+    observeResponse?.(response);
     if (!response.ok) {
       return response.headers.get("x-iva-telegram-acceptance") ===
         TELEGRAM_CLOSED_SESSION_KIND
@@ -401,38 +473,20 @@ test("acceptance route preserves Telegram auth failure and rejects malformed no-
       headers: { "content-type": "application/json" },
       body: "{broken",
     }),
-    // TODO(ticket-04): same pre-migration RouteHandlerArgs mock as
-    // productionTelegramDelivery above (see its cast comment).
     {
-      send: () => {
+      attachSession: () => fakeSession("unused"),
+      from: () => {
         sendCalls++;
         throw new Error("must not run");
       },
-      resolveActiveSession: () => {
-        throw new Error("must not run");
-      },
-      cancel: () => {
-        throw new Error("must not run");
-      },
-      clear: () => {
-        throw new Error("must not run");
-      },
-      compact: () => {
-        throw new Error("must not run");
-      },
-      reset: () => {
-        throw new Error("must not run");
-      },
-      getSession: () => {
-        throw new Error("must not run");
-      },
-      receive: () => {
+      resolveSession: async () => undefined,
+      to: () => {
         throw new Error("must not run");
       },
       params: {},
       waitUntil: () => {},
       requestIp: "127.0.0.1",
-    } as unknown as RouteHandlerArgs<TelegramChannelState>,
+    },
   );
   assert.equal(malformed.ok, false);
   assert.equal(malformed.status, 503);
@@ -740,11 +794,8 @@ test("Trace: обёртка пишет состав контекста и свя
 });
 
 // --- Reply на закрытую сессию (issue #203) ---
-// eve строит inputResponses из reply на сообщение бота. Сессия под цитатой закрывается
-// штатно (ротация, ночной сброс, /new, рестарт при апдейте), и тогда send падает
-// навсегда: доставить inputResponses уже некуда.
-const CLOSED_SESSION_ERROR =
-  "Cannot deliver inputResponses — the target session was not found via continuation token.";
+// eve строит inputResponses из reply на сообщение бота. Сессия под цитатой может
+// закрыться штатно. Session.respond сообщает это структурным session_not_active.
 
 const replyToBotUpdate = (updateId: number, text: string): TestUpdate => ({
   ...privateUpdate(updateId, text),
@@ -775,7 +826,7 @@ test("a reply to a closed session is delivered as a new turn exactly once", asyn
     const delivery = productionTelegramDelivery(async (_update, input) => {
       attempts.push(input);
       if (inputResponsesOf(input).length > 0)
-        throw new Error(CLOSED_SESSION_ERROR);
+        return { status: "session_not_active" };
       return { id: "new-turn" };
     });
     assert.equal(await delivery(replyToBotUpdate(1101, "и что дальше?")), true);
@@ -808,7 +859,7 @@ test("a new turn refused by an unavailable eve is retained, then delivered on th
     const delivery = productionTelegramDelivery(async (_update, input) => {
       attempts.push(input);
       if (inputResponsesOf(input).length > 0)
-        throw new Error(CLOSED_SESSION_ERROR);
+        return { status: "session_not_active" };
       if (eveIsDown) throw new Error("eve is restarting");
       return { id: "new-turn" };
     });
@@ -825,23 +876,60 @@ test("a new turn refused by an unavailable eve is retained, then delivered on th
   assert.equal(inputResponsesOf(attempts[3]).length, 0);
 });
 
-test("a new turn that is itself refused as a closed session is terminal, not retried", async () => {
-  let attempts = 0;
+test("a HITL callback to a closed session returns the frozen 409 receipt", async () => {
+  const attempts: unknown[] = [];
+  let responseStatus: number | undefined;
   const priorError = console.error;
   console.error = () => {};
   try {
-    const delivery = productionTelegramDelivery(async () => {
-      attempts++;
-      throw new Error(CLOSED_SESSION_ERROR);
-    });
+    const delivery = productionTelegramDelivery(
+      async (_update, input) => {
+        attempts.push(input);
+        return { status: "session_not_active" };
+      },
+      {
+        marked: false,
+        observeResponse: (response) => {
+          responseStatus = response.status;
+        },
+      },
+    );
     assert.equal(
-      await delivery(replyToBotUpdate(1104, "и что дальше?")),
+      await delivery(hitlCallbackUpdate(1104)),
       TELEGRAM_CLOSED_SESSION_KIND,
     );
   } finally {
     console.error = priorError;
   }
-  assert.equal(attempts, 2, "перемаршрутизация пробуется ровно один раз");
+
+  assert.equal(responseStatus, 409);
+  assert.equal(attempts.length, 1);
+  assert.equal(inputResponsesOf(attempts[0]).length, 1);
+});
+
+test("a failed HITL callback response returns 503 through the production route", async () => {
+  let responseStatus: number | undefined;
+  const priorError = console.error;
+  console.error = () => {};
+  try {
+    const delivery = productionTelegramDelivery(
+      async (_update, input) => {
+        assert.equal(inputResponsesOf(input).length, 1);
+        throw new Error("HITL delivery failed");
+      },
+      {
+        marked: false,
+        observeResponse: (response) => {
+          responseStatus = response.status;
+        },
+      },
+    );
+    assert.equal(await delivery(hitlCallbackUpdate(1105)), false);
+  } finally {
+    console.error = priorError;
+  }
+
+  assert.equal(responseStatus, 503);
 });
 
 test("an ordinary send failure stays transient and never claims the closed-session class", async () => {

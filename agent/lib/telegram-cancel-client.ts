@@ -18,14 +18,14 @@ type FetchImpl = (url: string, init: RequestInit) => Promise<FetchResponse>;
 export async function requestTelegramCancel({
   url,
   secret,
-  continuationToken,
+  sessionId,
   turnId,
   fetchImpl = fetch as unknown as FetchImpl,
   timeoutMs = 15_000,
 }: {
   url: string;
   secret: string;
-  continuationToken: string;
+  sessionId: string;
   turnId?: string;
   fetchImpl?: FetchImpl;
   timeoutMs?: number;
@@ -37,7 +37,7 @@ export async function requestTelegramCancel({
       "X-Telegram-Bot-Api-Secret-Token": secret,
     },
     body: JSON.stringify({
-      continuationToken,
+      sessionId,
       ...(turnId === undefined ? {} : { turnId }),
     }),
     signal: AbortSignal.timeout(timeoutMs),
