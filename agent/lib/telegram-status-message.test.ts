@@ -171,3 +171,53 @@ await test("сбой Bot API на уборке не рушит терминал 
   );
   assert.equal(runStatus.getChatStatus(key)?.status, "idle");
 });
+
+await test("чужая живая сессия не трогается поздним финишем", async () => {
+  // Regression anchor from code review: a late terminal must not delete another
+  // session's status message. Not a full discriminator of the current impl.
+  const key = runStatus.chatKeyOf("77", undefined);
+  // Живая чужая сессия — поздний terminal от старой сессии должен быть no-op.
+  runStatus.setChatStatus(key, {
+    status: "running",
+    sessionId: "s-live",
+    statusMessageId: 777,
+  });
+  const { calls, tg } = handle();
+
+  assert.equal(
+    await status.finishTelegramStatus(
+      { telegram: tg },
+      "s-old-finished",
+      "completed",
+    ),
+    false,
+  );
+  assert.equal(calls.length, 0);
+  const live = runStatus.getChatStatus(key);
+  assert.equal(live?.status, "running");
+  assert.equal(live?.sessionId, "s-live");
+  assert.equal(live?.statusMessageId, 777);
+});
+
+await test("своя сессия гасит статус-сообщение", async () => {
+  // Regression anchor from code review: a late terminal must not delete another
+  // session's status message. Not a full discriminator of the current impl.
+  const key = runStatus.chatKeyOf("77", undefined);
+  runStatus.setChatStatus(key, {
+    status: "running",
+    sessionId: "s-own",
+    statusMessageId: 801,
+  });
+  const { calls, tg } = handle();
+
+  assert.equal(
+    await status.finishTelegramStatus({ telegram: tg }, "s-own", "completed"),
+    true,
+  );
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["deleteMessage"],
+  );
+  assert.equal(calls[0].body.message_id, 801);
+  assert.equal(runStatus.getChatStatus(key)?.status, "idle");
+});

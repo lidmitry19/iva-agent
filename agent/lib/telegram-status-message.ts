@@ -130,44 +130,46 @@ export async function finishTelegramStatus(
   const st = getChatStatus(key);
   // Compare and update happen under one per-chat lock. A reset can remove
   // sessionId after this read; a late terminal event then becomes a no-op.
-  if (
-    !setChatStatusIf(
-      key,
-      { sessionId },
-      {
-        status: "idle",
-        sessionId: null,
-        turnId: null,
-        statusMessageId: null,
-        ingressId: null,
-        ingressAt: null,
-        statusAt: null,
-        turnAt: null,
-        firstOutputAt: null,
-        latencyLogged: null,
-        ...(mode === "cancelled" ? { wasCancelled: true } : {}),
-      },
-    )
-  ) {
-    return false;
-  }
-  const msgId = st?.statusMessageId;
-  if (typeof msgId !== "number") return true;
-  try {
-    if (mode === "cancelled") {
-      await tg.request("editMessageText", {
-        chat_id: tg.chatId,
-        message_id: msgId,
-        text: stoppedText(),
-      });
-    } else {
-      await tg.request("deleteMessage", {
-        chat_id: tg.chatId,
-        message_id: msgId,
-      });
+  const casOk = setChatStatusIf(
+    key,
+    { sessionId },
+    {
+      status: "idle",
+      sessionId: null,
+      turnId: null,
+      statusMessageId: null,
+      ingressId: null,
+      ingressAt: null,
+      statusAt: null,
+      turnAt: null,
+      firstOutputAt: null,
+      latencyLogged: null,
+      ...(mode === "cancelled" ? { wasCancelled: true } : {}),
+    },
+  );
+  // Only touch Telegram when the pre-CAS snapshot was OUR session. A late
+  // terminal event from an old finished session must not delete another
+  // live session's Working… message in the same chat.
+  if (st?.sessionId === sessionId) {
+    const msgId = st.statusMessageId;
+    if (typeof msgId === "number") {
+      try {
+        if (mode === "cancelled") {
+          await tg.request("editMessageText", {
+            chat_id: tg.chatId,
+            message_id: msgId,
+            text: stoppedText(),
+          });
+        } else {
+          await tg.request("deleteMessage", {
+            chat_id: tg.chatId,
+            message_id: msgId,
+          });
+        }
+      } catch {
+        /* статус-сообщение не убралось — не критично */
+      }
     }
-  } catch {
-    /* статус-сообщение не убралось — не критично */
   }
-  return true;
+  return Boolean(casOk);
 }

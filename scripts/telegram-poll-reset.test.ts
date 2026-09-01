@@ -45,6 +45,10 @@ type ResetIntent = {
 type CompleteResetOptions = {
   clearQueue?: boolean;
   clearQueueImpl?: () => Promise<unknown>;
+  deleteMessageImpl?: (
+    chatKey: string,
+    messageId: string | number,
+  ) => Promise<unknown>;
 };
 type PerformResetOptions = {
   clearQueue?: boolean;
@@ -178,6 +182,28 @@ test("group reset preserves the shared topic queue", async () => {
       "other:9": ["keep me too"],
     },
   );
+});
+
+test("scoped reset deletes the pre-reset Working message", async () => {
+  const key = "chat-working:";
+  status.setChatStatus(key, {
+    status: "running",
+    sessionId: "s1",
+    statusMessageId: 999,
+  });
+  const calls: Array<{ calledKey: string; id: string | number }> = [];
+
+  await completeScopedResetState(key, {
+    clearQueue: false,
+    deleteMessageImpl: async (calledKey, id) => {
+      calls.push({ calledKey, id });
+    },
+  });
+
+  assert.deepEqual(calls, [{ calledKey: key, id: 999 }]);
+  const reset = status.getChatStatus(key);
+  assert.equal(reset.status, "idle");
+  assert.equal(reset.statusMessageId, undefined);
 });
 
 test("failed private queue cleanup does not expose an idle tombstone", async () => {

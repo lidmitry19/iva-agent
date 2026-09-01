@@ -444,20 +444,22 @@ function writeAlertState(dataDir: string, state: AlertState): void {
 }
 
 /**
- * Пора ли говорить: записи нет, существо проблемы сменилось, прошла неделя — или часы
- * ушли назад (запись из будущего иначе заглушила бы алерт навсегда).
+ * Пора ли говорить: записи нет, существо проблемы сменилось, прошёл период
+ * повтора (по умолчанию неделя) — или часы ушли назад (запись из будущего
+ * иначе заглушила бы алерт навсегда).
  */
 export function alertDue(
   dataDir: string,
   key: string,
   essence: string,
   now: number = Date.now(),
+  repeatMs: number = ALERT_REPEAT_MS,
 ): boolean {
   const record = readAlertState(dataDir)[key];
   if (!record) return true;
   if (record.essence !== essence) return true;
   const elapsed = now - record.lastSentAt;
-  return elapsed >= ALERT_REPEAT_MS || elapsed < 0;
+  return elapsed >= repeatMs || elapsed < 0;
 }
 
 /**
@@ -469,8 +471,10 @@ export async function alertOnce(
   key: string,
   essence: string,
   send: () => Promise<boolean>,
+  repeatMs: number = ALERT_REPEAT_MS,
 ): Promise<"sent" | "throttled" | "failed"> {
-  if (!alertDue(dataDir, key, essence)) return "throttled";
+  if (!alertDue(dataDir, key, essence, Date.now(), repeatMs))
+    return "throttled";
   if (!(await send())) return "failed";
   const state = readAlertState(dataDir);
   state[key] = { essence, lastSentAt: Date.now() };

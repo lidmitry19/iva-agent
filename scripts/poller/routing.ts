@@ -72,6 +72,8 @@ const errorMessage = (error: unknown) => (error as ErrorLike).message;
 const errorCode = (error: unknown) =>
   (error as ErrorLike | null | undefined)?.code;
 const pacedDelivery: DeliverImpl = pacedDeliver;
+// Приёмка падает часто при живой поломке — ждать неделю бессмысленно.
+const TELEGRAM_ACCEPTANCE_ALERT_REPEAT_MS = 10 * 60 * 1000;
 
 type DirectDeliveryOptions = {
   key?: string | null;
@@ -161,6 +163,7 @@ async function deliverDirectUpdate(
           );
           return true;
         },
+        TELEGRAM_ACCEPTANCE_ALERT_REPEAT_MS,
       );
     } catch (error) {
       logImpl(

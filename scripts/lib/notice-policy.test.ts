@@ -666,6 +666,94 @@ test("a clock that jumped back cannot mute an alert forever", (t) => {
   assert.equal(alertDue(dir, "vault-remote", "missing", now), true);
 });
 
+test("a custom repeat period re-arms sooner; the default stays a week", async (t) => {
+  const dir = dataDir(t);
+  const repeatMs = 10 * 60 * 1000;
+  let sent = 0;
+  const send = () => {
+    sent += 1;
+    return Promise.resolve(true);
+  };
+
+  assert.equal(
+    await alertOnce(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      send,
+      repeatMs,
+    ),
+    "sent",
+  );
+  assert.equal(sent, 1);
+
+  const lastSentAt = (
+    alertState(dir)["telegram-acceptance:k"] as { lastSentAt: number }
+  ).lastSentAt;
+
+  assert.equal(
+    alertDue(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      lastSentAt + 5 * 60 * 1000,
+      repeatMs,
+    ),
+    false,
+  );
+  assert.equal(
+    alertDue(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      lastSentAt + 11 * 60 * 1000,
+      repeatMs,
+    ),
+    true,
+  );
+  // Без своего периода через 11 минут всё ещё неделя — дроссель жив.
+  assert.equal(
+    alertDue(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      lastSentAt + 11 * 60 * 1000,
+    ),
+    false,
+  );
+
+  assert.equal(
+    await alertOnce(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      send,
+      repeatMs,
+    ),
+    "throttled",
+  );
+  writeFileSync(
+    join(dir, "alert-state.json"),
+    JSON.stringify({
+      "telegram-acceptance:k": {
+        essence: "message acceptance failed",
+        lastSentAt: Date.now() - 11 * 60 * 1000,
+      },
+    }),
+  );
+  assert.equal(
+    await alertOnce(
+      dir,
+      "telegram-acceptance:k",
+      "message acceptance failed",
+      send,
+      repeatMs,
+    ),
+    "sent",
+  );
+  assert.equal(sent, 2);
+});
+
 test("the alert state is written atomically and stays private", async (t) => {
   const dir = dataDir(t);
   await alertOnce(dir, "core-cap", "clamped", () => Promise.resolve(true));
