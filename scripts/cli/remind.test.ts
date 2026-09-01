@@ -35,6 +35,7 @@ function remindCommand(
   const sent: SendCall[] = [];
   const prompts: string[] = [];
   const feedback: string[] = [];
+  const closed: string[] = [];
   const read: string[] = [];
   const messages: string[] = [];
   let feedbackError: Error | undefined;
@@ -54,15 +55,33 @@ function remindCommand(
         return Promise.reject(new Error("eve unavailable"));
       if (agentOutcome === "timeout") return new Promise(() => {});
       if (agentOutcome === "failed")
-        return Promise.resolve({ status: "failed", message: "ignore me" });
+        return Promise.resolve({
+          status: "failed",
+          message: "ignore me",
+          close: () => {
+            closed.push("closed");
+            return Promise.resolve();
+          },
+        });
       if (agentOutcome === "empty")
-        return Promise.resolve({ status: "waiting", message: "" });
+        return Promise.resolve({
+          status: "waiting",
+          message: "",
+          close: () => {
+            closed.push("closed");
+            return Promise.resolve();
+          },
+        });
       return Promise.resolve({
         status: "waiting",
         message: "Короткое напоминание",
         feedback: (message) => {
           if (feedbackError) return Promise.reject(feedbackError);
           feedback.push(message);
+          return Promise.resolve();
+        },
+        close: () => {
+          closed.push("closed");
           return Promise.resolve();
         },
       });
@@ -80,6 +99,7 @@ function remindCommand(
   );
   return {
     cmdRemind,
+    closed,
     envPath: base.ENV_PATH,
     failFeedback: (error: Error) => {
       feedbackError = error;
@@ -164,6 +184,7 @@ void test("a refused Reminder send reports the Telegram error and exits one", as
     "exit:1",
   ]);
   assert.equal(remind.sent.length, 1);
+  assert.deepEqual(remind.closed, ["closed"]);
 });
 
 void test("a missing token or chat fails before the agent turn", async () => {

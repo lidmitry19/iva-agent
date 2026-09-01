@@ -55,6 +55,50 @@ type RollupStatus = Record<string, RollupEntry | null | undefined>;
 
 /** Сколько ждём `/health` прокси: он на loopback, и медленный ответ — уже симптом. */
 const HEALTH_TIMEOUT_MS = 1500;
+const WORKFLOW_RUNNING_LIMIT = 5;
+
+type WorkflowStoreReport = {
+  readonly runs: Readonly<Record<string, number>>;
+  readonly hookFiles: number;
+};
+
+function workflowStoreReport(root: string): WorkflowStoreReport {
+  const store = join(root, ".eve", ".workflow-data");
+  const entries = (directory: string) => {
+    try {
+      return readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  };
+  const runs: Record<string, number> = {};
+  for (const entry of entries(join(store, "runs"))) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const file = join(store, "runs", entry.name);
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    const status = (parsed as { status?: unknown } | null)?.status;
+    if (typeof status !== "string" || status.length === 0)
+      throw new Error(`${file} has no workflow status`);
+    runs[status] = (runs[status] ?? 0) + 1;
+  }
+  const hookFiles = entries(join(store, "hooks")).filter(
+    (entry) => entry.isFile() && entry.name.endsWith(".json"),
+  ).length;
+  return { runs, hookFiles };
+}
+
+function formatWorkflowStore(report: WorkflowStoreReport): string {
+  const statuses = Object.entries(report.runs).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const total = statuses.reduce((count, [, value]) => count + value, 0);
+  const details =
+    statuses.length === 0
+      ? ""
+      : ` (${statuses.map(([status, count]) => `${status} ${count}`).join(", ")})`;
+  return `${total} runs${details}; ${report.hookFiles} hook files`;
+}
 
 /** Free bytes in the short units used by the installation report. */
 function formatFreeSpace(bytes: number): string {
@@ -276,6 +320,26 @@ export function createDoctorCommand(
         "systemd unavailable (not Linux) — skipping service and timer checks",
       );
       return finish();
+    }
+
+    try {
+      const workflow = workflowStoreReport(ROOT);
+      const running = workflow.runs.running ?? 0;
+      const report = `workflow store: ${formatWorkflowStore(workflow)}`;
+      if (running > WORKFLOW_RUNNING_LIMIT) {
+        warn(
+          `${report} — running count ${running} exceeds ${WORKFLOW_RUNNING_LIMIT}`,
+        );
+        warnN++;
+      } else {
+        ok(report);
+        okN++;
+      }
+    } catch (error) {
+      warn(
+        `workflow store unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      warnN++;
     }
 
     // 4. Units installed
