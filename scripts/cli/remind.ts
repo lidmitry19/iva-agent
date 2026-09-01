@@ -55,8 +55,9 @@ async function runAgentTurn(prompt: string): Promise<ReminderTurn> {
     host,
     ...(bearer ? { auth: { bearer: () => Promise.resolve(bearer) } } : {}),
   });
-  const session = client.session();
-  const response = await session.send(prompt);
+  const { response, session } = await client.sessions.create({
+    message: prompt,
+  });
   const result = await response.result();
   return {
     status: result.status,

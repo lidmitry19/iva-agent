@@ -108,7 +108,7 @@ What Iva knows about _you_ is memory, not code — that's `CORE.md` in the vault
 ## Local development
 
 ```bash
-npm ci        # postinstall applies patches/eve+0.30.8.patch
+npm ci        # postinstall applies patches/eve+0.47.3.patch
 npm run dev   # eve dev TUI, server on http://127.0.0.1:2000
 npm run build:core  # maintainer build of the current source tree
 npm exec -- eve dev --no-ui --logs all   # headless
@@ -123,8 +123,8 @@ const res = await session.send("Add a task: buy coffee, high priority.");
 console.log((await res.result()).message);
 ```
 
-One gotcha — Iva runs eve **0.30.8**:
+One gotcha — Iva runs eve **0.47.3**:
 
-- 🩹 **patch-package** — `patches/eve+0.30.8.patch` makes deterministic model-call errors (invalid prompt, unknown tool) fail fast instead of parking a poisoned session; upstream still classifies them as recoverable in 0.30.8. If you bump Eve, regenerate the patch (re-apply the edit to `node_modules/eve/dist/src/harness/model-call-error.js`, then `npx patch-package eve`) or drop it only after the targeted classification test passes against upstream.
+- 🩹 **patch-package** — `patches/eve+0.47.3.patch` makes deterministic model-call errors (invalid prompt, unknown tool) fail fast instead of parking a poisoned session. It also preserves the structured HTTP status from `web_fetch`. If you bump Eve, regenerate the patch or drop each edit only after its targeted contract test passes against upstream.
 
 The Eve 0.11.4 schedule crash (`eve dev` dying when a schedule handler imported another authored module) is fixed since 0.27.8. Iva now ships five `agent/schedules/*.ts` handlers: four memory rollups and the opt-in digest. On a VPS they run in the `iva.service` process; the two remaining systemd timers are watchdogs for the nightly Brain pass and update-check ([deploy.md](./deploy.md)).

@@ -1,13 +1,11 @@
 import { existsSync, readFileSync, readdirSync, statfsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { listChatStatuses, RUN_STALE_MS } from "#lib/run-status.ts";
-import {
-  loadQueueFile,
-  queueKeys,
-  TELEGRAM_QUEUE_ACK_PENDING_SUFFIX,
-  type TelegramQueueDocument,
-} from "../lib/telegram-queue.ts";
+// CLI обязан грузиться без authored tree и без "#lib"-маппинга
+// (scripts/cli/entrypoints.test.ts), поэтому run-status и telegram-queue
+// подгружаются динамически в самой проверке, а здесь — только типы.
+import type { listChatStatuses } from "../../agent/lib/run-status.ts";
+import type { TelegramQueueDocument } from "../lib/telegram-queue.ts";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
 import { leftoverPluginDirs, pluginReadProblem } from "./plugin-cli-context.ts";
@@ -104,7 +102,7 @@ export function createDoctorCommand(
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
   const nodeVersion = dependencies.nodeVersion ?? process.versions.node;
-  const listStatuses = dependencies.listChatStatusesImpl ?? listChatStatuses;
+  const listStatusesOverride = dependencies.listChatStatusesImpl;
 
   return async function cmdDoctor(): Promise<void> {
     let okN = 0;
@@ -487,61 +485,81 @@ export function createDoctorCommand(
 
     // The queue loader normally repairs pending/corrupt files. Doctor only observes them,
     // so its injected file operations suppress recovery and quarantine writes.
-    const loadBridgeQueue = async (file: string) => {
-      const raw = await readFile(file, "utf8");
-      if (raw.length === 0) return null;
-      return (
-        await loadQueueFile(file, {
-          strict: true,
-          readFileImpl: async (candidate, encoding) => {
-            if (candidate.endsWith(TELEGRAM_QUEUE_ACK_PENDING_SUFFIX)) {
-              throw Object.assign(new Error("pending recovery is read-only"), {
-                code: "ENOENT",
-              });
-            }
-            if (candidate === file) return raw;
-            return readFile(candidate, encoding);
-          },
-          renameImpl: () => Promise.resolve(),
-        })
-      ).document;
-    };
+    let queueModule: typeof import("../lib/telegram-queue.ts") | null = null;
+    try {
+      queueModule = await import("../lib/telegram-queue.ts");
+    } catch {
+      // Без "#lib"-маппинга (урезанная установка) модуль очередей недоступен —
+      // проверка затора моста в этой среде честно пропускается.
+    }
     const bridgeDocuments: TelegramQueueDocument[] = [];
     let bridgeUnreadable = false;
-    for (const file of [telegramInboxFile, telegramQueueFile]) {
-      try {
-        const document = await loadBridgeQueue(file);
-        if (document) bridgeDocuments.push(document);
-      } catch (error) {
-        if (
-          (error as NodeJS.ErrnoException | null | undefined)?.code === "ENOENT"
-        ) {
-          continue;
+    if (queueModule !== null) {
+      const { loadQueueFile, TELEGRAM_QUEUE_ACK_PENDING_SUFFIX } = queueModule;
+      const loadBridgeQueue = async (file: string) => {
+        const raw = await readFile(file, "utf8");
+        if (raw.length === 0) return null;
+        return (
+          await loadQueueFile(file, {
+            strict: true,
+            readFileImpl: async (candidate, encoding) => {
+              if (candidate.endsWith(TELEGRAM_QUEUE_ACK_PENDING_SUFFIX)) {
+                throw Object.assign(
+                  new Error("pending recovery is read-only"),
+                  { code: "ENOENT" },
+                );
+              }
+              if (candidate === file) return raw;
+              return readFile(candidate, encoding);
+            },
+            renameImpl: () => Promise.resolve(),
+          })
+        ).document;
+      };
+      for (const file of [telegramInboxFile, telegramQueueFile]) {
+        try {
+          const document = await loadBridgeQueue(file);
+          if (document) bridgeDocuments.push(document);
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException | null | undefined)?.code ===
+            "ENOENT"
+          ) {
+            continue;
+          }
+          warn(
+            `bridge backlog: ${file} unreadable — check: journalctl --user -u iva-telegram-poll`,
+          );
+          warnN++;
+          bridgeUnreadable = true;
         }
-        warn(
-          `bridge backlog: ${file} unreadable — check: journalctl --user -u iva-telegram-poll`,
-        );
-        warnN++;
-        bridgeUnreadable = true;
       }
     }
     let statuses: ReturnType<typeof listChatStatuses> = [];
+    let staleRunMs: number | null = null;
     try {
-      statuses = listStatuses();
+      const runStatus = await import("../../agent/lib/run-status.ts");
+      statuses = (listStatusesOverride ?? runStatus.listChatStatuses)();
+      staleRunMs = runStatus.RUN_STALE_MS;
     } catch {
-      // A missing or unreadable run-status directory contributes no stale chats.
+      // Authored tree или run-status каталог недоступны (CLI обязан грузиться
+      // и без них) — протухшие чаты в этой среде проверить нечем.
     }
     const checkedAt = now();
-    const stuckChats = statuses.filter(
-      ({ status }) =>
-        status.status === "running" &&
-        (typeof status.updatedAt !== "number" ||
-          checkedAt - status.updatedAt > RUN_STALE_MS),
-    ).length;
+    const stuckChats =
+      staleRunMs === null
+        ? 0
+        : statuses.filter(
+            ({ status }) =>
+              status.status === "running" &&
+              (typeof status.updatedAt !== "number" ||
+                checkedAt - status.updatedAt > staleRunMs),
+          ).length;
     let itemCount = 0;
     let oldestEnqueuedAt: number | null = null;
     for (const document of bridgeDocuments) {
-      for (const key of queueKeys(document)) {
+      if (queueModule === null) break;
+      for (const key of queueModule.queueKeys(document)) {
         for (const item of document.queues[key]) {
           itemCount++;
           if (

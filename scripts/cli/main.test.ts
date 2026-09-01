@@ -63,6 +63,29 @@ void test("missing and unknown commands preserve help, diagnostics, and exit cod
   }
 });
 
+void test("command help flags show help without executing the command", () => {
+  for (const flag of ["--help", "-h"]) {
+    const events: string[] = [];
+    const commands: Record<string, CliCommand> = {
+      rollback: () => events.push("command"),
+    };
+
+    assert.throws(
+      () =>
+        dispatchCli(["rollback", flag], commands, {
+          bad: assert.fail,
+          help: () => events.push("help"),
+          exit: (code): never => {
+            events.push(`exit:${code}`);
+            throw new ExitSignal(code);
+          },
+        }),
+      (error: unknown) => error instanceof ExitSignal && error.code === 0,
+    );
+    assert.deepEqual(events, ["help", "exit:0"]);
+  }
+});
+
 void test("sync throws escape before Promise.resolve while async rejections use the legacy catch", async () => {
   const marker = Symbol("sync failure");
   const syncCommands: Record<string, CliCommand> = {

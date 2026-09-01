@@ -52,7 +52,7 @@ export const completeScopedResetState = queue.completeScopedResetState;
 export const persistPrivateResetIntent = queue.persistPrivateResetIntent;
 export const loadPrivateResetIntents = queue.loadPrivateResetIntents;
 export const clearPrivateResetIntent = queue.clearPrivateResetIntent;
-export const releaseScopedContinuation = queue.releaseScopedContinuation;
+export const releaseScopedSession = queue.releaseScopedSession;
 export const performScopedReset = queue.performScopedReset;
 export { reconcileScopedResetIntents, reapStaleRuns };
 export { routeMessageUpdate, drainReadyQueueHeads };

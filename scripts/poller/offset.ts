@@ -89,7 +89,7 @@ async function fastForwardOffset({
   }
 }
 
-// Serialization key = eve continuation hook (telegram:<chatId>:<threadId>:):
+// Ключ сериализации — чат/тема Telegram; активную сессию eve маршрутизирует по sessionId.
 // one chat (+ forum topic) — one session, deliver into it one at a time with a pause.
 function chatKey(update: TelegramUpdate) {
   const msg = update.message ?? update.callback_query?.message;

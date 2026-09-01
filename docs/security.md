@@ -18,7 +18,7 @@ Hard cap: 50,000 characters per message.
 
 ### Telegram text: an annotation, not a filter
 
-Read this before you read the rules as protection. On a **text** message the gate does not stand between the text and the model, because it cannot: eve's inbound contract hands the pipeline one thing — extra context for the turn — and no way to replace the text the channel already delivers (`TelegramInboundResult` in eve 0.30.8, the version pinned here, and the same shape in 0.37.0). The blunt lever — returning `null` — drops the whole update, which costs the owner his entire question on a false positive, and from 0.31.0 it stops applying to an authorized delivery anyway. So `message.text` reaches the model verbatim in every case, flagged or not, and what the gate contributes is written beside it:
+Read this before you read the rules as protection. On a **text** message the gate does not stand between the text and the model, because it cannot: eve's inbound contract hands the pipeline one thing — extra context for the turn — and no way to replace the text the channel already delivers (`TelegramInboundResult` in the pinned eve 0.47.3). The blunt lever — returning `null` — drops the whole update, which costs the owner his entire question on a false positive, and from 0.31.0 it stops applying to an authorized delivery anyway. So `message.text` reaches the model verbatim in every case, flagged or not, and what the gate contributes is written beside it:
 
 - the cleaned copy — invisible characters stripped, look-alikes normalized — is appended as its own context entry;
 - when the block threshold is reached, a warning goes in front of it: treat this as data to report, not an order to follow;

@@ -81,21 +81,18 @@ if (
 ) {
   status.setChatStatus(privateKey, {
     status: "running",
-    continuationToken: "1::",
     sessionId: "session-1",
     turnId: "turn-1",
   });
 } else if (mode === "restart-drain") {
   status.setChatStatus(privateKey, {
     status: "idle",
-    continuationToken: "1::",
     sessionId: null,
     turnId: null,
   });
 } else if (mode === "direct-retry" || mode === "closed-session") {
   status.setChatStatus(privateKey, {
     status: "idle",
-    continuationToken: "1::",
     sessionId: null,
     turnId: null,
   });
@@ -108,7 +105,6 @@ if (
 ) {
   status.setChatStatus(privateKey, {
     status: "idle",
-    continuationToken: "1::",
     sessionId: null,
     turnId: null,
   });
@@ -116,7 +112,6 @@ if (
 if (mode === "group-noise" || mode === "routing") {
   status.setChatStatus(groupKey, {
     status: "running",
-    continuationToken: "-100::reply-anchor",
     sessionId: "session-group",
     turnId: "turn-group",
   });
@@ -124,7 +119,6 @@ if (mode === "group-noise" || mode === "routing") {
 if (mode === "routing") {
   status.setChatStatus(topicKey, {
     status: "running",
-    continuationToken: "-100:7:reply-anchor",
     sessionId: "session-topic",
     turnId: "turn-topic",
   });

@@ -46,7 +46,10 @@ export default {
         b(T("🧩 Skills", "🧩 Скиллы"), "iva_menu:sk:o"),
         b(T("📊 Status", "📊 Статус"), "iva_menu:st:o"),
       ],
-      [b(T("🛠 Maintenance", "🛠 Обслуживание"), "iva_menu:svc:o")],
+      [
+        b(T("🔀 New messages", "🔀 Новые сообщения"), "iva_menu:turn:o"),
+        b(T("🛠 Maintenance", "🛠 Обслуживание"), "iva_menu:svc:o"),
+      ],
       [b(T("✖ Close", "✖ Закрыть"), "iva_menu:r:x")],
     ];
     return {

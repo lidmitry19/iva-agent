@@ -8,7 +8,7 @@
 //
 // Грамматика callback_data: "iva_menu:<sid>:<verb>[:<arg>[:<arg>]]" — ASCII, только
 // enum/индексы, <=64 байта (тот же принцип, что m:<index> в /model). Никаких user data.
-// sid: r srch lang chr core ub gws cron ntc sk st svc (+псевдо mdl/thk — хендофф в визарды).
+// sid: r srch lang chr core ub gws cron ntc sk st turn svc (+псевдо mdl/thk — хендофф в визарды).
 // verbs: o(навигация) x(закрыть) pg:<n> rf(обновить) + data-вербы экрана (set key rs go
 // q:<i>:<v> skip fin redo apply do).
 
@@ -33,6 +33,7 @@ import crons from "./crons.ts";
 import notices from "./notices.ts";
 import skills from "./skills.ts";
 import status from "./status.ts";
+import turnPolicy from "./turn-policy.ts";
 import service from "./service.ts";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -164,6 +165,7 @@ export const SCREENS = {
   ntc: notices,
   sk: skills,
   st: status,
+  turn: turnPolicy,
   svc: service,
 };
 

@@ -1,4 +1,4 @@
-// Обход vercel/eve#2461: на резюмнутой сессии eve-клиент читает поток с сохранённого
+// Обход vercel/eve#2461 для eve 0.47.3: на резюмнутой сессии клиент читает поток с сохранённого
 // streamIndex и останавливается на первой границе хода, не сверяя её с только что
 // отправленным сообщением. Отставший курсор превращает result() в чтение старого хода:
 // ночной отчёт уходит пятидневной давности, а падение реального хода не всплывает.
@@ -14,6 +14,29 @@ import { DEFAULT_TURN_TIMEOUT_MS } from "./rollup-turn.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export interface PersistedRollupSession {
+  readonly sessionId: string;
+  readonly createdAt: number;
+}
+
+export function parsePersistedRollupSession(
+  value: unknown,
+): PersistedRollupSession | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== "createdAt" || keys[1] !== "sessionId")
+    return null;
+  if (
+    typeof value.sessionId !== "string" ||
+    value.sessionId.length === 0 ||
+    value.sessionId !== value.sessionId.trim() ||
+    typeof value.createdAt !== "number" ||
+    !Number.isFinite(value.createdAt)
+  )
+    return null;
+  return { sessionId: value.sessionId, createdAt: value.createdAt };
 }
 
 export function attachRollupNonce(prompt: string, nonce: string): string {
@@ -84,6 +107,19 @@ export async function drainStreamBefore<T>(
   onError?: (error: Error) => void,
   timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
 ): Promise<T> {
-  await drainStreamToTail(session, onError, timeoutMs);
+  let drainError: Error | undefined;
+  try {
+    await drainStreamToTail(
+      session,
+      (error) => {
+        drainError = error;
+        onError?.(error);
+      },
+      timeoutMs,
+    );
+  } catch (error) {
+    throw drainError ?? error;
+  }
+  if (drainError) throw drainError;
   return await action();
 }

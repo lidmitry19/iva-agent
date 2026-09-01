@@ -2,15 +2,14 @@
 // канал (agent/channels/telegram.ts) читают/пишут файлы data/run-status.d/*.json.
 //
 // Зачем: мост решает, доставлять сообщение в eve или буферизовать (агент занят),
-// берёт отсюда continuationToken+turnId для отмены хода по кнопке ⏹ Стоп, а канал
+// берёт отсюда sessionId+turnId для отмены хода по кнопке ⏹ Стоп, а канал
 // пишет сюда пульс живого хода, чтобы жнец моста не снял его как протухший.
 // Отдельный файл на chatKey не даёт параллельной записи одного чата потерять статус
 // другого. Запись одного ключа защищена O_EXCL-локом и атомарна (unique tmp+rename).
 // ЛЮБАЯ успешная запись двигает generation и updatedAt — на updatedAt держится и
 // жнец, и пульс (agent/lib/telegram-turn-start.ts).
 //
-// chatKey = `${chatId}:${threadId ?? ""}` — тот же ключ, что continuation-hook eve
-// (telegram:<chatId>:<threadId>:) и chatKey() моста.
+// chatKey = `${chatId}:${threadId ?? ""}` — тот же ключ, что chatKey() Bridge.
 
 import { readFileSync, readdirSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -30,6 +29,9 @@ type StatusRecord = {
   [key: string]: unknown;
 };
 type StatusPatch = Record<string, unknown>;
+
+// Поле нужно только для отката на 0.3.x. Удалить после стабилизации 0.4.x.
+export const RETIRED_SESSION_ROUTING_FIELD = "continuationToken";
 
 const errorCode = (error: unknown): string | undefined =>
   error !== null && typeof error === "object" && "code" in error
@@ -227,6 +229,7 @@ function updateChatStatus(
       generation: previousGeneration + 1,
       updatedAt: Date.now(),
     };
+    delete next[RETIRED_SESSION_ROUTING_FIELD];
     for (const key of Object.keys(next))
       if (next[key] === null) delete next[key];
     writeCurrent(file, next);

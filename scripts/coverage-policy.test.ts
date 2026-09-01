@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 233;
+const EXPECTED_PRODUCTION_COUNT = 234;
 const EXPECTED_INVENTORY_SHA256 =
-  "364dc2a2fc67e8fcb465c059fe01b0b7d76e3d7b880287b514ed6adee28d50a0";
+  "c5f5d5a21314cc1bc550c49ed71c8014d16024d3809f135f25b9d2f0e0a04eee";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
 // This test pins the exact production path inventory and a separately measured 26-path
@@ -119,6 +119,8 @@ const EXPECTED_INVENTORY_SHA256 =
 // The rollup stale-cursor workaround `scripts/lib/rollup-stale-cursor.ts` came next.
 // Scoped coverage over `scripts/lib/rollup-stale-cursor.test.ts` reports it, so the
 // blind spot stays 26.
+// The turn-policy menu added `scripts/lib/menu/turn-policy.ts` at 100% scoped coverage.
+// Removing the old Telegram routing helper leaves a net one-path increase, still 26 blind.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",

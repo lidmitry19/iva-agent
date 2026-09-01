@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Client, type MessageResult, type SessionState } from "eve/client";
+import { Client, type ClientSession, type MessageResult } from "eve/client";
 import { CORE_CAP } from "#lib/core-cap.ts";
 import { coreDamage, setLastDayPointer } from "#lib/core-clamp.ts";
 import { writeFileAtomicSync } from "#lib/fs-atomic.ts";
@@ -34,6 +34,7 @@ import {
   cancelTurnAndConfirmQuietly,
   canRetryFresh,
   cancelTurnQuietly,
+  isSessionNotActiveError,
   resolveTurnTimeoutMs,
   withTurnTimeout,
 } from "../lib/rollup-turn.ts";
@@ -41,6 +42,7 @@ import {
   attachRollupNonce,
   drainStreamBefore,
   isOwnTurnResult,
+  parsePersistedRollupSession,
   sentNotBeforeIso,
 } from "../lib/rollup-stale-cursor.ts";
 import { sendTelegramHtml } from "../lib/telegram-send.ts";
@@ -202,7 +204,7 @@ const client = new Client({
 // caps that at one run. Rotation stays RARE for that reason: every rotation abandons one
 // run in the store (nothing can close it), so per-night rotation would just re-create the
 // leak. Abandoned sessions are logged to data/rollup-abandoned.jsonl for the record;
-// `iva reset` clears them together with the store. Parked cursor lives in data/.
+// `iva reset` clears them together with the store. The fixed session ID lives in data/.
 const DATA_DIR = resolveDataDir(process.cwd());
 const SESSION_FILE = join(DATA_DIR, `rollup-session-${period}.json`);
 // 14 days, not 90. The session carries the whole history of previous rollups, and the
@@ -214,54 +216,41 @@ const SESSION_FILE = join(DATA_DIR, `rollup-session-${period}.json`);
 // an order of magnitude. Cost is deliberate and bounded; `iva reset` still clears them.
 const SESSION_TTL_MS = 14 * 24 * 3600 * 1000;
 // Did a rollup ever run on this installation? Read here, before this run leaves traces of
-// its own, and read from every trace at once (cursors of all four periods, the schedule
-// status file, daily summaries in the vault) — a single cursor is not enough, dropHungSession
+// its own, and read from every trace at once (session files of all four periods, the schedule
+// status file, daily summaries in the vault) — one session file is not enough; dropHungSession
 // deletes it. It separates an installation that used to get the morning report from a fresh
 // one, which has nothing to miss and must hear nothing. Best-effort by design: ADR-0007.
 const RAN_BEFORE = rollupRanBefore(DATA_DIR, VAULT);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isSessionState(value: unknown): value is SessionState {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.streamIndex === "number" &&
-    Number.isFinite(value.streamIndex) &&
-    (value.sessionId === undefined || typeof value.sessionId === "string") &&
-    (value.continuationToken === undefined ||
-      typeof value.continuationToken === "string")
-  );
-}
-
-function loadSession(): { state: SessionState; createdAt: number } | null {
+function loadSession(): {
+  readonly sessionId: string;
+  readonly createdAt: number;
+} | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
-    if (!isRecord(parsed) || !isSessionState(parsed.state)) return null;
-    const createdAt =
-      typeof parsed.createdAt === "number" && Number.isFinite(parsed.createdAt)
-        ? parsed.createdAt
-        : 0;
-    if (Date.now() - createdAt > SESSION_TTL_MS) {
-      logAbandoned(parsed.state, "ttl-rotation");
+    // The eve <=0.30 file stored `{state:{...},createdAt}`. It is intentionally
+    // incompatible: attaching its opaque cursor would revive a pre-migration session.
+    const saved = parsePersistedRollupSession(parsed);
+    if (!saved) return null;
+    if (Date.now() - saved.createdAt > SESSION_TTL_MS) {
+      logAbandoned(saved.sessionId, "ttl-rotation");
       return null;
     }
-    return { state: parsed.state, createdAt };
+    return saved;
   } catch {
     return null;
   }
 }
 
-// Курсор сессии не должен превращаться в полфайла: следующий прогон прочитал бы
-// огрызок и бросил бы недособранную память.
-function saveSession(state: SessionState, createdAt: number): void {
-  writeFileAtomicSync(SESSION_FILE, JSON.stringify({ state, createdAt }));
+// Курсор потока не персистим: после рестарта #2461 обходится штатным bounded-drain
+// от нуля до хвоста. На диске остаётся только стабильный ID и TTL.
+function saveSession(sessionId: string, createdAt: number): void {
+  writeFileAtomicSync(SESSION_FILE, JSON.stringify({ sessionId, createdAt }));
 }
 
 // Брошенные сессии (ротация/несовместимый курсор) — в журнал: их run-обёртки остаются
 // в сторе до ближайшего `iva reset`, и по журналу видно, чьи они.
-function logAbandoned(state: SessionState, reason: string): void {
+function logAbandoned(sessionId: string, reason: string): void {
   try {
     mkdirSync(DATA_DIR, { recursive: true });
     appendFileSync(
@@ -270,7 +259,7 @@ function logAbandoned(state: SessionState, reason: string): void {
         at: new Date().toISOString(),
         period,
         reason,
-        sessionId: state.sessionId ?? null,
+        sessionId,
       }) + "\n",
       "utf8",
     );
@@ -279,8 +268,8 @@ function logAbandoned(state: SessionState, reason: string): void {
   }
 }
 
-// Ход целиком (send + result) под таймаутом: резюм припаркованной сессии после рестарта
-// сервера умеет виснуть молча (#104), и без гонки с таймером ночь просто не заканчивается.
+// Ход целиком (create/send + result) под таймаутом: резюм припаркованной сессии
+// после рестарта сервера может виснуть молча (vercel/eve#1450).
 const TURN_TIMEOUT_MS = resolveTurnTimeoutMs(
   process.env.ROLLUP_TURN_TIMEOUT_MS,
   {
@@ -288,56 +277,63 @@ const TURN_TIMEOUT_MS = resolveTurnTimeoutMs(
   },
 );
 const guardedTurn = (
-  session: ReturnType<typeof client.session>,
+  session: ClientSession | undefined,
   prompt: string,
   label: string,
-  onAccepted: (result: Promise<MessageResult>) => void = () => {},
-  onSendRejected: () => void = () => {},
+  onAccepted: (
+    session: ClientSession,
+    result: Promise<MessageResult>,
+  ) => void = () => {},
 ) =>
   withTurnTimeout(
     async () => {
       const send = async () => {
         const sentNotBefore = sentNotBeforeIso();
-        return {
-          response: await session.send(prompt),
-          sentNotBefore,
-        };
+        if (session) {
+          return {
+            response: await session.send(prompt),
+            sentNotBefore,
+            session,
+          };
+        }
+        const created = await client.sessions.create({ message: prompt });
+        return { ...created, sentNotBefore };
       };
-      let sent: Awaited<ReturnType<typeof send>>;
-      try {
-        sent = session.state.sessionId
-          ? await drainStreamBefore(
-              session,
-              send,
-              (error) => {
-                console.error(
-                  `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — continuing with current cursor`,
-                );
-              },
-              TURN_TIMEOUT_MS,
-            )
-          : await send();
-      } catch (error) {
-        onSendRejected();
-        throw error;
-      }
+      const sent = session
+        ? await drainStreamBefore(
+            session,
+            send,
+            (error) => {
+              console.error(
+                `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — aborting send`,
+              );
+            },
+            TURN_TIMEOUT_MS,
+          )
+        : await send();
       const result = sent.response.result();
-      onAccepted(result);
-      return { result: await result, sentNotBefore: sent.sentNotBefore };
+      onAccepted(sent.session, result);
+      return {
+        result: await result,
+        sentNotBefore: sent.sentNotBefore,
+        session: sent.session,
+      };
     },
     { timeoutMs: TURN_TIMEOUT_MS, label },
   );
 
-// Зависший ход на сервере не останавливается сам, а его курсор в SESSION_FILE описывает
-// недочитанный ход: следующая ночь резюмнулась бы об него и повисла снова. Поэтому ход
-// гасим, сессию помечаем брошенной и выбрасываем курсор — завтра стартуем со свежей.
-async function dropHungSession(label: string): Promise<void> {
-  await cancelTurnQuietly(session);
-  logAbandoned(session.state, `${label}-timeout`);
+// Зависший ход на сервере не останавливается сам. Поэтому ход гасим, сессию помечаем
+// брошенной и удаляем её ID — завтра стартуем со свежей.
+async function dropHungSession(
+  hungSession: ClientSession,
+  label: string,
+): Promise<void> {
+  await cancelTurnQuietly(hungSession);
+  logAbandoned(hungSession.state.sessionId, `${label}-timeout`);
   try {
     rmSync(SESSION_FILE, { force: true });
   } catch {
-    /* курсор — кэш, его потеря не должна ронять ночь */
+    /* ID сессии — кэш, его потеря не должна ронять ночь */
   }
 }
 
@@ -358,29 +354,25 @@ const yesterday = shiftDate(today, -1);
 const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
-let session = saved ? client.session(saved.state) : client.session();
+let session = saved ? client.sessions.attach(saved.sessionId) : undefined;
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
 // Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
 // на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
 const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
 let result: MessageResult;
 let sentNotBefore: string;
-let accepted = false;
-let sendRejected = false;
 let acceptedTurnResult: Promise<MessageResult> | undefined;
 try {
-  ({ result, sentNotBefore } = await guardedTurn(
+  const main = await guardedTurn(
     session,
     mainPrompt,
     "main-turn",
-    (turnResult) => {
-      accepted = true;
+    (acceptedSession, turnResult) => {
+      session = acceptedSession;
       acceptedTurnResult = turnResult;
     },
-    () => {
-      sendRejected = true;
-    },
-  ));
+  );
+  ({ result, sentNotBefore, session } = main);
 } catch (e) {
   // The parked session may be gone (iva reset quarantined the store) or hung on resume —
   // fall back to a fresh one once only after proving the old turn cannot keep writing.
@@ -388,60 +380,85 @@ try {
   // Выход наверх роняет процесс и отпускает .memory.lock, а зависший ход продолжает писать
   // в vault — уже без всякой защиты от параллельного роллапа. Гасим и на терминальных путях.
   if (!saved) {
-    if (hung) await cancelTurnQuietly(session);
+    if (hung && session) await cancelTurnQuietly(session);
     throw e;
   }
-  // Принятый ход и зависший send могли продолжить писать после локального таймаута. Перед retry
-  // оба требуют терминального подтверждения: no_active_turn либо turn.cancelled в дочитанном
-  // потоке. Успешный ответ cancel со статусом accepted сам по себе второго писателя не разрешает.
+  // Даже отклонённый локально send мог дойти до сервера до сетевого обрыва. Перед retry
+  // он требует no_active_turn либо turn.cancelled. Исключение — штатный 409 session_not_active.
+  // Успешный cancel со статусом accepted сам по себе второго писателя не разрешает.
+  const sessionNotActive = isSessionNotActiveError(e);
   const cancelConfirmed =
-    accepted || hung
+    !sessionNotActive && session
       ? await cancelTurnAndConfirmQuietly(session, acceptedTurnResult)
       : false;
-  if (!canRetryFresh({ accepted, sendRejected, cancelConfirmed })) {
+  if (!canRetryFresh({ sessionNotActive, cancelConfirmed })) {
     console.error(
       `rollup ${period}: could not confirm cancellation of the unresolved turn — refusing fresh retry`,
     );
-    logAbandoned(saved.state, "cancel-unconfirmed");
+    logAbandoned(saved.sessionId, "cancel-unconfirmed");
     throw e;
   }
   console.error(
     `rollup ${period}: parked session ${hung ? "hung" : "unusable"} (${(e as Error).message}) — starting fresh`,
   );
-  logAbandoned(saved.state, hung ? "resume-timeout" : "unusable-cursor");
-  session = client.session();
+  logAbandoned(saved.sessionId, hung ? "resume-timeout" : "unusable-session");
+  session = undefined;
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
   try {
-    ({ result, sentNotBefore } = await guardedTurn(
+    const retry = await guardedTurn(
       session,
       mainPrompt,
       "main-turn",
-    ));
+      (acceptedSession, turnResult) => {
+        session = acceptedSession;
+        acceptedTurnResult = turnResult;
+      },
+    );
+    ({ result, sentNotBefore, session } = retry);
   } catch (retryError) {
-    if ((retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
+    if (
+      (retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT" &&
+      session
+    )
       await cancelTurnQuietly(session);
     throw retryError;
   }
 }
+if (!session) throw new Error("rollup turn finished without a session");
+const activeSession = session;
 if (
   !isOwnTurnResult(result.events, {
     prompt: mainPrompt,
     sentNotBefore,
   })
 ) {
-  console.error(
-    `rollup ${period}: result does not match the prompt just sent (stale stream cursor) — dropping session`,
+  const cancelConfirmed = await cancelTurnAndConfirmQuietly(
+    activeSession,
+    acceptedTurnResult,
   );
-  logAbandoned(session.state, "stale-result");
+  if (!cancelConfirmed) {
+    console.error(
+      `rollup ${period}: result does not match the prompt just sent (stale stream cursor); cancellation was not confirmed — keeping session`,
+    );
+    logAbandoned(
+      activeSession.state.sessionId,
+      "stale-result-cancel-unconfirmed",
+    );
+    process.exit(1);
+  }
+  console.error(
+    `rollup ${period}: result does not match the prompt just sent (stale stream cursor); cancellation confirmed — dropping session`,
+  );
+  logAbandoned(activeSession.state.sessionId, "stale-result");
   try {
     rmSync(SESSION_FILE, { force: true });
   } catch {
-    /* курсор — кэш, его потеря не должна ронять ночь */
+    /* ID сессии — кэш, его потеря не должна ронять ночь */
   }
   process.exit(1);
 }
-saveSession(session.state, sessionCreatedAt);
+saveSession(activeSession.state.sessionId, sessionCreatedAt);
 
 // An interactive turn ends with status "waiting" (the session is ready for the next message),
 // so we rely on the presence of text rather than a "completed" status.
@@ -467,7 +484,7 @@ async function alertOwner(
       return false;
     }
     const sent = await sendTelegramHtml(BOT, CHAT, message, {
-      trace: { session: session.state.sessionId, source: "rollup" },
+      trace: { session: activeSession.state.sessionId, source: "rollup" },
     });
     if (!sent.ok)
       console.error(`rollup ${period}: alert send failed: ${sent.error}`);
@@ -526,19 +543,19 @@ if (period === "daily") {
     // перечитывается как есть, и дальше срабатывает существующая проверка капа.
     try {
       await guardedTurn(
-        session,
+        activeSession,
         `Re-open ${CORE_PATH}: it is ${oldLength} characters, above the hard ${CORE_CAP}-character cap. ` +
           "Compress it now per the core-format rule. Preserve every heading and the Pointers/Указатели " +
           "section; remove stale Preferences/Предпочтения first. Do not return until the file itself is within the cap.",
         "core-correction",
       );
-      saveSession(session.state, sessionCreatedAt);
+      saveSession(activeSession.state.sessionId, sessionCreatedAt);
     } catch (e) {
       console.error(
         `rollup daily: CORE.md correction turn failed (${(e as Error).message})`,
       );
       if ((e as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
-        await dropHungSession("core-correction");
+        await dropHungSession(activeSession, "core-correction");
     }
     const correctedCore = readCore(CORE_PATH);
     if (correctedCore.state === "unreadable") throw correctedCore.error;
@@ -581,11 +598,17 @@ if (REPORTS_TO_TELEGRAM[period]) {
           // по ней читатель сшивает весь ночной ход.
           report: (text: string) =>
             sendTelegramHtml(BOT, CHAT, text, {
-              trace: { session: session.state.sessionId, source: "rollup" },
+              trace: {
+                session: activeSession.state.sessionId,
+                source: "rollup",
+              },
             }),
           notice: (text: string) =>
             sendTelegramHtml(BOT, CHAT, text, {
-              trace: { session: session.state.sessionId, source: "rollup" },
+              trace: {
+                session: activeSession.state.sessionId,
+                source: "rollup",
+              },
             }),
         }
       : null;
@@ -619,24 +642,23 @@ if (REPORTS_TO_TELEGRAM[period]) {
   if (r.fellBack) {
     // HTML didn't parse — the report went out flat. Give the agent feedback in the same
     // session so it formats the next report more simply (one turn, no resend).
-    // ВАЖНО: дождаться конца хода и пересохранить курсор — иначе следующий ночной send
-    // поедет со старым continuation-токеном недочитанного хода.
+    // ВАЖНО: дождаться конца хода, чтобы курсор активного клиента сдвинулся.
     // Best-effort ход: отчёт уже доставлен, поэтому сбой или таймаут здесь только логируем —
     // ронять из-за подсказки о форматировании всю ночь незачем.
     try {
       await guardedTurn(
-        session,
+        activeSession,
         `The last report failed Telegram parse_mode=HTML (${r.error}) and went out as flat text. ` +
           "Next time format it more simply: **bold**, `code`, lists — no raw HTML.",
         "format-feedback",
       );
-      saveSession(session.state, sessionCreatedAt);
+      saveSession(activeSession.state.sessionId, sessionCreatedAt);
     } catch (e) {
       console.error(
         `rollup ${period}: format-feedback turn failed (${(e as Error).message})`,
       );
       if ((e as { code?: string }).code === "ROLLUP_TURN_TIMEOUT")
-        await dropHungSession("format-feedback");
+        await dropHungSession(activeSession, "format-feedback");
     }
   }
   if (r.status === "failed") {

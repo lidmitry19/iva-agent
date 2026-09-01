@@ -26,8 +26,8 @@ asserts an empty set and carries no list to add to, so a new specifier out of `a
 red on sight. The guard scans production files only: tests never reach the bundle eve
 rebuilds, so a specifier in a `*.test.ts` cannot drag `scripts/` into it.
 
-Moved to their canonical home in `agent/lib`: `telegram-continuation-token`,
-`telegram-acceptance`, `run-status`, `settings`, `i18n`, `telegram-format`,
+Moved to their canonical home in `agent/lib`: `telegram-acceptance`, `run-status`,
+`settings`, `i18n`, `telegram-format`,
 `security-gate`, `telegram-reply-context`, `telegram-reset-route`, `telegram-turn-start`,
 `schedule-runner`, the write half of `usage`, then `core-cap`, `core-clamp`, `card-text`,
 `schedule-migration` and the health poll now in `agent/lib/eve-health.ts`. `scripts/`
@@ -226,8 +226,8 @@ night pipeline, a second copy inside TypeScript is not.
 
 On a text message the pipeline can add context to the turn and nothing else: eve's
 `TelegramInboundResult` is `{ auth, context } | null`, so `message.text` is delivered to the
-model by the channel regardless of what `sanitizeInbound` found. Checked against eve 0.30.8
-(the pinned version) and 0.37.0 — the shape is the same in both. The only lever beside it is
+model by the channel regardless of what `sanitizeInbound` found. Checked against the pinned
+eve 0.47.3. The only lever beside it is
 `null`, which drops the entire update: too blunt to spend on a false positive, and from 0.31.0
 it no longer applies to an authorized message at all. So for Telegram **text** the gate is an
 annotation: the cleaned copy, the injection

@@ -1,8 +1,15 @@
 /* eslint-disable @typescript-eslint/no-unnecessary-type-assertion -- conversion keeps the injectable fetch boundary source-compatible. */
-import { telegramContinuationToken } from "eve/channels/telegram";
-import { toChannelLocalToken } from "#lib/telegram-continuation-token.ts";
 
 type Status = Record<string, unknown> | null | undefined;
+export type TelegramSessionAddress = {
+  chatId: string;
+  messageThreadId?: number;
+  conversationId?: string;
+};
+export type TelegramResetTarget =
+  | { sessionId: string; address?: never }
+  | { sessionId?: never; address: TelegramSessionAddress };
+
 type TelegramMessage = {
   chat?: { id?: unknown; type?: unknown };
   message_id?: unknown;
@@ -23,33 +30,63 @@ type FetchResponse = {
 };
 type FetchImpl = (url: string, init: RequestInit) => Promise<FetchResponse>;
 
-function storedToken(status: Status) {
-  const token = status?.continuationToken;
-  if (typeof token !== "string" || token.length === 0) return null;
-  // Статусы, записанные до фикса #110, хранят токен с именем канала впереди.
-  // Нормализация на чтении лечит их без ожидания следующей перезаписи.
-  return toChannelLocalToken(token);
+function storedSession(status: Status): TelegramResetTarget | null {
+  const sessionId = status?.sessionId;
+  return typeof sessionId === "string" && sessionId.length > 0
+    ? { sessionId }
+    : null;
 }
 
-/**
- * Returns the exact channel-local token Eve assigned to this chat/topic.
- * New installs persist it from the Telegram event context. The private-chat
- * fallback makes upgrades from pre-0.27 Eve work before the first new turn.
- */
-export function continuationTokenForControl(
+function numericId(value: unknown, signed: boolean): string | null {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) return null;
+    value = String(value);
+  }
+  if (typeof value !== "string" || value.length === 0) return null;
+  const pattern = signed ? /^-?\d+$/u : /^\d+$/u;
+  return pattern.test(value) ? value : null;
+}
+
+function threadId(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  return Number.isSafeInteger(value) && (value as number) > 0
+    ? (value as number)
+    : null;
+}
+
+function addressForMessage(
+  message: TelegramMessage,
+  conversationId?: unknown,
+): TelegramSessionAddress | null {
+  const chatId = numericId(message.chat?.id, true);
+  const messageThreadId = threadId(message.message_thread_id);
+  const parsedConversationId =
+    conversationId === undefined ? undefined : numericId(conversationId, false);
+  if (
+    chatId === null ||
+    messageThreadId === null ||
+    parsedConversationId === null
+  ) {
+    return null;
+  }
+  return {
+    chatId,
+    ...(messageThreadId === undefined ? {} : { messageThreadId }),
+    ...(parsedConversationId === undefined
+      ? {}
+      : { conversationId: parsedConversationId }),
+  };
+}
+
+/** Builds the exact reset target selected by a Telegram control update. */
+export function resetTargetForControl(
   update: Update,
   status: Status,
   botUserId?: string | number,
-) {
-  const message = update?.message ?? update?.callback_query?.message;
-  if (!message) return storedToken(status);
-  const chatId = message?.chat?.id;
-  if (chatId === undefined) return null;
-  const messageThreadId = message?.message_thread_id;
+): TelegramResetTarget | null {
+  const message = update.message ?? update.callback_query?.message;
+  if (!message) return storedSession(status);
 
-  // In groups, a reply explicitly selects one Eve conversation anchor and
-  // therefore takes precedence over the last active token for this topic.
-  // Match Iva's own numeric bot id, not just any Telegram bot.
   const reply = message.reply_to_message;
   if (message.chat?.type !== "private" && reply !== undefined) {
     if (
@@ -57,46 +94,51 @@ export function continuationTokenForControl(
       String(reply.from.id) === String(botUserId) &&
       reply.message_id !== undefined
     ) {
-      return telegramContinuationToken({
-        chatId: chatId as string | number,
-        messageThreadId: messageThreadId as number | undefined,
-        conversationId: reply.message_id as string | number | undefined,
-      });
+      const address = addressForMessage(message, reply.message_id);
+      return address ? { address } : null;
     }
-    // An explicit reply to another actor must not silently reset the last Iva
-    // conversation merely because that topic still has a stored status token.
     return null;
   }
 
-  const stored = storedToken(status);
-  if (stored !== null) return stored;
-
-  if (message.chat?.type === "private") {
-    return telegramContinuationToken({
-      chatId: chatId as string | number,
-      messageThreadId: messageThreadId as number | undefined,
-    });
-  }
-
-  // A standalone legacy group command cannot reconstruct the old conversation
-  // anchor until the new event handler has persisted its exact token.
-  return null;
+  const stored = storedSession(status);
+  if (stored) return stored;
+  if (message.chat?.type !== "private") return null;
+  const address = addressForMessage(message);
+  return address ? { address } : null;
 }
 
-/**
- * Calls Iva's Telegram-owned reset route. Both statuses are idempotent success:
- * a replayed Telegram update sees no active owner after the first reset.
- */
+/** Reconstructs the private-chat or topic address stored by a reset intent. */
+export function telegramAddressFromChatKey(
+  chatKey: string,
+): TelegramSessionAddress | null {
+  const separator = chatKey.indexOf(":");
+  if (separator <= 0) return null;
+  const chatId = numericId(chatKey.slice(0, separator), true);
+  if (chatId === null) return null;
+  const rawThreadId = chatKey.slice(separator + 1);
+  if (rawThreadId === "") return { chatId };
+  const parsedThreadId = Number(rawThreadId);
+  if (
+    !/^\d+$/u.test(rawThreadId) ||
+    !Number.isSafeInteger(parsedThreadId) ||
+    parsedThreadId <= 0
+  ) {
+    return null;
+  }
+  return { chatId, messageThreadId: parsedThreadId };
+}
+
+/** Calls Iva's Telegram-owned reset route. Both outcomes are successful. */
 export async function requestTelegramReset({
   url,
   secret,
-  continuationToken,
+  target,
   fetchImpl = fetch as unknown as FetchImpl,
   timeoutMs = 15_000,
 }: {
   url: string;
   secret: string;
-  continuationToken: string;
+  target: TelegramResetTarget;
   fetchImpl?: FetchImpl;
   timeoutMs?: number;
 }) {
@@ -106,7 +148,7 @@ export async function requestTelegramReset({
       "Content-Type": "application/json",
       "X-Telegram-Bot-Api-Secret-Token": secret,
     },
-    body: JSON.stringify({ continuationToken }),
+    body: JSON.stringify(target),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok)

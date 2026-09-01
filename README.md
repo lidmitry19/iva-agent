@@ -161,7 +161,16 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.3.34 · 27.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.0 · 31.08.2026 — expand the latest releases</b></summary>
+
+### 31.08.2026
+
+#### v0.4.0
+
+- 🧭 **Iva now runs on eve 0.47.3**: messages address the active session by `sessionId`, so Stop, `/stop`, and `/new` no longer depend on the old continuation mechanism. The update resets conversation contexts; your vault memory stays intact.
+- 🚦 **New messages queue by default**: `/menu` can select “Queue”, which waits for the current reply, or “Interrupt”, which sends the message into the active reply. The choice survives a restart.
+- 🧠 **Nightly Rollup and plugins run on the new runtime**: manual Rollup uses the active session, code plugins build with the same eve version, and `web_fetch` reports the actual HTTP status instead of inferring it from error text.
+- 🛟 **Update rollback protects local changes more carefully**: a recovery ref is removed only after a verified result, never deletes foreign state, and stays available after an ambiguous verification failure.
 
 ### 27.08.2026
 
@@ -177,19 +186,13 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🧾 **Long and formatted messages no longer vanish**: since Bot API 10.1 a client puts such a message in `rich_message` instead of `text` (up to 32768 characters against 4096), and the Bridge admitted only the content keys it already knew, dropping the rest with nothing in the log but an update id — short messages were answered, long ones ignored, `/restart` changed nothing. The Bridge now judges the envelope: any message from an Allowlist user that carries at least one key outside the Bot API metadata is admitted, and what is readable is the agent's call — its rich-message reader has been in place since 0.3.25, so a new Bot API field arrives on its own. With nothing readable inside (`poll`, `contact`, a field Iva does not know yet), Iva answers once, `I can't read this message (fields: poll). Send it as text or a file.`, instead of staying silent. The drop line in `iva logs poll` now names the top-level keys — names only, no message text ever reaches the log. In a group the rule is unchanged: a message with no `text`/`caption` is admitted as a reply to the bot. Sending rich messages (`sendRichMessage` through the Outbox, since 0.3.25) is untouched. New troubleshooting section.
 - 📐 **The admission rule is written down: the Bridge judges the envelope, the Inbound pipeline judges the content**: [ADR-0011](docs/adr/0011-bridge-judges-the-envelope.md) records the boundary, the rejected alternatives (add one field to the key list, add a second normalizer to the Bridge, admit everything and stay silent) and the group gap it hands to `docs/tech-debt.md`.
 
-### 25.08.2026
-
-#### v0.3.32
-
-- 📣 **The new-version notice now says what is new**: the daily “a new Iva version is available” Alert lists the headline of every release between yours and the fresh one, in your language, newest first, with a link to the full list. The source is the What's New section of the README at the offered commit - no second changelog to maintain; a README that fails to parse costs the block, never the notice. Every bullet in this section now opens with an emoji and a bold headline - that headline is exactly what the notice shows.
-
 </details>
 
 Full history — [CHANGELOG.md](CHANGELOG.md).
 
 ## Built on
 
-[eve](https://eve.dev/docs/introduction) 0.30.8, Vercel's agent framework, runs the agent; Node 24's built-in SQLite runs the search index — no separate database. Iva grew out of [agent-second-brain](https://github.com/smixs/agent-second-brain) and [autograph](https://github.com/smixs/autograph) — that story is in [docs/memory.md](docs/memory.md).
+[eve](https://eve.dev/docs/introduction) 0.47.3, Vercel's agent framework, runs the agent; Node 24's built-in SQLite runs the search index — no separate database. Iva grew out of [agent-second-brain](https://github.com/smixs/agent-second-brain) and [autograph](https://github.com/smixs/autograph) — that story is in [docs/memory.md](docs/memory.md).
 
 ## Thanks
 

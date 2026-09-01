@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { toChannelLocalToken } from "./telegram-continuation-token.ts";
 import { traceContextParts, traceTurnBound } from "./trace.ts";
 import { localStamp } from "./vault-daily.ts";
 
@@ -27,7 +26,6 @@ export interface PublishTelegramEarlyStatusOptions {
 
 export interface PublishTelegramTurnStartedOptions {
   chatKey: string;
-  continuationToken: string;
   sessionId: string;
   turnId: string;
   now?: () => number;
@@ -197,7 +195,6 @@ export async function publishTelegramEarlyStatus({
 
 export async function publishTelegramTurnStarted({
   chatKey,
-  continuationToken: rawContinuationToken,
   sessionId,
   turnId,
   now = Date.now,
@@ -218,9 +215,6 @@ export async function publishTelegramTurnStarted({
     process.env.ASSISTANT_VAULT_DIR || "vault",
     localStamp().date,
   );
-  // Обработчики событий eve отдают токен с именем канала впереди. В статусе он должен
-  // лежать только channel-local: reset-роут клеит имя канала сам (#110).
-  const continuationToken = toChannelLocalToken(rawContinuationToken);
   const current = getStatusImpl(chatKey);
   if (
     current?.status !== "running" ||
@@ -239,7 +233,6 @@ export async function publishTelegramTurnStarted({
         { generation: current?.generation },
         {
           status: "running",
-          continuationToken,
           sessionId,
           turnId,
           statusMessageId: null,
@@ -284,7 +277,6 @@ export async function publishTelegramTurnStarted({
         sessionId: undefined,
       },
       {
-        continuationToken,
         sessionId,
         turnId,
         turnAt: now(),

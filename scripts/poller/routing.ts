@@ -21,7 +21,10 @@ import {
   setChatStatusIf,
 } from "#lib/run-status.ts";
 import { tr } from "#lib/i18n.ts";
-import { TELEGRAM_CLOSED_SESSION_KIND } from "#lib/telegram-acceptance.ts";
+import {
+  TELEGRAM_CLOSED_SESSION_KIND,
+  telegramTurnPolicy,
+} from "#lib/telegram-acceptance.ts";
 import {
   ACCEPTANCE_ROUTE,
   ALLOWED,
@@ -208,6 +211,7 @@ export async function routeMessageUpdate(
     chatKeyImpl = chatKey,
     loadQueueImpl = () => loadQueue({ strict: true }),
     runningImpl = isRunning,
+    turnPolicyImpl = telegramTurnPolicy,
     inFlight = queueInFlight,
     queueCountImpl = queueCount,
     replyToBotImpl = isReplyToBot,
@@ -232,6 +236,7 @@ export async function routeMessageUpdate(
     chatKeyImpl?: (update: TelegramQueueUpdate) => string | null;
     loadQueueImpl?: () => MaybePromise<TelegramQueueDocument>;
     runningImpl?: (key: string) => boolean;
+    turnPolicyImpl?: typeof telegramTurnPolicy;
     inFlight?: Map<string, QueuePhase>;
     queueCountImpl?: (queue: TelegramQueueDocument, key?: string) => number;
     replyToBotImpl?: (message: TelegramQueueMessage) => boolean;
@@ -269,10 +274,13 @@ export async function routeMessageUpdate(
   } = {},
 ): Promise<RouteMessageResult> {
   const key = chatKeyImpl(update);
+  const turnPolicy = turnPolicyImpl();
   if (update.message && key !== null && !replyToBotImpl(update.message)) {
     const queue = await loadQueueImpl();
     const mustQueue =
-      runningImpl(key) || inFlight.has(key) || queueCountImpl(queue, key) > 0;
+      inFlight.has(key) ||
+      (turnPolicy === "queue" &&
+        (runningImpl(key) || queueCountImpl(queue, key) > 0));
     if (mustQueue) {
       if (!shouldQueueImpl(update, { allowedUserIds, botUsername })) {
         return "dropped";
