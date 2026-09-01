@@ -161,9 +161,9 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.4.0 · 31.08.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.0 · 01.09.2026 — expand the latest releases</b></summary>
 
-### 31.08.2026
+### 01.09.2026
 
 #### v0.4.0
 
@@ -171,6 +171,9 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🚦 **New messages queue by default**: `/menu` can select “Queue”, which waits for the current reply, or “Interrupt”, which sends the message into the active reply. The choice survives a restart.
 - 🧠 **Nightly Rollup and plugins run on the new runtime**: manual Rollup uses the active session, code plugins build with the same eve version, and `web_fetch` reports the actual HTTP status instead of inferring it from error text.
 - 🛟 **Update rollback protects local changes more carefully**: a recovery ref is removed only after a verified result, never deletes foreign state, and stays available after an ambiguous verification failure.
+- ⚡ **Iva answers within a second of an update**: every update now quarantines the workflow store and expires open sessions in place — no more silence for up to 30 minutes, and a stuck "Working…" clears itself.
+- 🩹 **The Codex provider (ChatGPT subscription) works again**: every turn was failing with HTTP 400 because eve 0.47 injects a `safety_identifier` field for `openai/*` models; it's stripped now, so chat and nightly Rollups on Codex run.
+- 🔁 **Lost-message notices are honest now**: a message Iva couldn't accept used to surface once a week; now it repeats every 10 minutes until you see it.
 
 ### 27.08.2026
 
