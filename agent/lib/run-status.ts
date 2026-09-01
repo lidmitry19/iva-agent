@@ -191,6 +191,34 @@ export function listChatStatuses(): Array<{
   return records;
 }
 
+/** Make every saved chat immediately reapable after an update clears sessions. */
+export function rewriteRunStatusesForUpdate(root: string): void {
+  const dir = join(root, "run-status.d");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const file = join(dir, name);
+    try {
+      const record = readObject(file);
+      if (!record) continue;
+      writeFileAtomicSync(
+        file,
+        JSON.stringify({ ...record, status: "running", updatedAt: 0 }),
+        { mode: 0o600 },
+      );
+    } catch {
+      // One damaged chat record must not block the update or its healthy neighbors.
+    }
+  }
+}
+
 // true, когда по chatKey реально идёт ход (running и не протух).
 export function isRunning(chatKey: string, now = Date.now()): boolean {
   const st = getChatStatus(chatKey);
