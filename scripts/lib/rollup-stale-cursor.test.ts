@@ -527,9 +527,12 @@ test("rollup.ts uses the shared pre-send drain and refuses a foreign result", ()
   assert.match(ROLLUP_SRC, /sentNotBeforeIso\(/);
   assert.match(
     ROLLUP_SRC,
-    /response: await session\.send\(prompt\),\s+sentNotBefore,\s+session,/,
+    /result: await tokenBudget\.send\(session, prompt, \{\s+onAccepted:/,
   );
-  assert.match(ROLLUP_SRC, /client\.sessions\.create\(\{ message: prompt \}\)/);
+  assert.match(
+    ROLLUP_SRC,
+    /tokenBudget\.create\(\s+client\.sessions,\s+\{ message: prompt \},/,
+  );
   assert.match(ROLLUP_SRC, /client\.sessions\.attach\(saved\.sessionId\)/);
   assert.match(ROLLUP_SRC, /JSON\.stringify\(\{ sessionId, createdAt \}\)/);
   const removedLegacyClient = ["legacy", "ClientSession"].join("");

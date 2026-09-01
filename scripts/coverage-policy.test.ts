@@ -8,12 +8,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const EXPECTED_PRODUCTION_COUNT = 234;
+const EXPECTED_PRODUCTION_COUNT = 250;
 const EXPECTED_INVENTORY_SHA256 =
-  "c5f5d5a21314cc1bc550c49ed71c8014d16024d3809f135f25b9d2f0e0a04eee";
+  "54ff4f0ae2ffcf6daa491ec314c8a3b08bddbeed937a82d6b5c9d00aefacba7f";
 
 // Node's native include globs filter loaded modules; they do not load untouched files.
-// This test pins the exact production path inventory and a separately measured 26-path
+// This test pins the exact production path inventory and a separately measured 37-path
 // blind-spot snapshot. It does not determine what the current import graph loads, claim
 // that the other paths are reported, or notice import-graph changes without path changes.
 // Measured again for this inventory: the web inbound-gate round added `agent/lib/web-gate.ts`
@@ -121,6 +121,10 @@ const EXPECTED_INVENTORY_SHA256 =
 // blind spot stays 26.
 // The turn-policy menu added `scripts/lib/menu/turn-policy.ts` at 100% scoped coverage.
 // Removing the old Telegram routing helper leaves a net one-path increase, still 26 blind.
+// The custom integration layer adds 16 production paths. Scoped coverage reports
+// `scripts/bitrix-sync.ts`, night health, provider-limit, session-budget and the watchdog;
+// the ten Bitrix agent/tool modules and the Bitrix CLI are runtime-loaded and remain
+// unreported, so the measured blind-spot snapshot grows from 26 to 37.
 const MEASURED_UNREPORTED_BY_CATEGORY = {
   frameworkBoundaries: [
     "agent/agent.ts",
@@ -155,6 +159,19 @@ const MEASURED_UNREPORTED_BY_CATEGORY = {
     "scripts/setup/main.ts",
     // Runs as its own process, spawned by the version being installed.
     "scripts/update-finish.ts",
+  ],
+  customIntegrationRuntime: [
+    "agent/bitrix/gateway-client.ts",
+    "agent/bitrix/model-safety.ts",
+    "agent/bitrix/repository.ts",
+    "agent/bitrix/runtime.ts",
+    "agent/bitrix/service.ts",
+    "agent/bitrix/types.ts",
+    "agent/tools/bitrix_list_my_tasks.ts",
+    "agent/tools/bitrix_read_task.ts",
+    "agent/tools/bitrix_search_local_tasks.ts",
+    "agent/tools/bitrix_sync_task.ts",
+    "scripts/cli/bitrix.ts",
   ],
 } as const;
 
@@ -211,7 +228,7 @@ function assertProductionPathInventory(
   const measuredUnreported = Object.values(MEASURED_UNREPORTED_BY_CATEGORY)
     .flat()
     .sort();
-  assert.equal(measuredUnreported.length, 26);
+  assert.equal(measuredUnreported.length, 37);
   assert.equal(new Set(measuredUnreported).size, measuredUnreported.length);
   assert.deepEqual(
     measuredUnreported.filter((path) => !productionFiles.includes(path)),

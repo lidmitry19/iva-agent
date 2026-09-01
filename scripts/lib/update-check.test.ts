@@ -432,7 +432,10 @@ test("systemd templates schedule a persistent 10:00 local check and lifecycle co
   assert.match(timer, /Persistent=true/);
   assert.match(service, /scripts\/check-update\.mjs/);
   assert.match(service, /EnvironmentFile=__PROJECT_DIR__\/\.env/);
-  assert.match(cliRuntime, /const TIMERS = \[BRAIN_TIMER, UPDATE_TIMER\]/);
+  assert.match(
+    cliRuntime,
+    /const TIMERS = \[\s*BRAIN_TIMER,\s+NIGHT_WATCHDOG_TIMER,\s+UPDATE_TIMER,?\s*\]/,
+  );
   assert.match(cliSystemd, /replaceAll\("__TIMEZONE__", timezone\)/);
   assert.match(cliUpdate, /systemd\.activate\(\[UPDATE_TIMER\]\)/);
   assert.match(installer, /bin\/iva\.mjs" _activate-units/);
