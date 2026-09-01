@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   readdirSync,
+  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -19,7 +20,9 @@ import {
   isEntrypoint,
   refreshOwnedShim,
   SHIM_PATH,
+  throughLink,
 } from "./lib/version-layout.ts";
+import { conversationStateTargets, quarantinePath } from "./lib/wf-store.ts";
 import {
   adoptUpdateLock,
   layoutFor,
@@ -48,6 +51,49 @@ type WriterRuntime = Pick<
   CliRuntime,
   "BRAIN_TIMER" | "BRAIN_SERVICE" | "SERVICES" | "SVC_USERBOT" | "systemd"
 >;
+
+export type UpdateQuarantine = {
+  readonly path: string;
+  readonly trash: string;
+};
+
+/** Retire open-conversation state as one reversible update step. */
+export function quarantineUpdateState(
+  root: string,
+  dataDir: string,
+  stamp = new Date().toISOString().replace(/[:.]/gu, "-"),
+): UpdateQuarantine[] {
+  const quarantined: UpdateQuarantine[] = [];
+  try {
+    for (const target of conversationStateTargets(root, dataDir)) {
+      const path = throughLink(target);
+      const trash = quarantinePath(target, stamp);
+      if (trash) quarantined.push({ path, trash });
+    }
+    return quarantined;
+  } catch (error) {
+    try {
+      restoreUpdateState(quarantined);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        "update state quarantine and restoration both failed",
+        { cause: restoreError },
+      );
+    }
+    throw error;
+  }
+}
+
+/** Put quarantined state back before the previous version starts. */
+export function restoreUpdateState(
+  quarantined: readonly UpdateQuarantine[],
+): void {
+  for (const entry of [...quarantined].reverse()) {
+    rmSync(entry.path, { recursive: true, force: true });
+    renameSync(entry.trash, entry.path);
+  }
+}
 
 export type OptionalWriterState = {
   readonly unit: string;
@@ -528,6 +574,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const notify: Say = (message) => console.log(`! ${message}`);
   let optionalWriterState: OptionalWriterState[] | undefined;
   let unitMigrationStarted = false;
+  let quarantinedState: UpdateQuarantine[] = [];
   let outcome: UpdateOutcome;
   try {
     outcome = await finishVersionUpdate({
@@ -548,16 +595,28 @@ export async function main(argv: readonly string[]): Promise<number> {
         );
         optionalWriterState = captureOptionalWriterState(runtime);
         stopWriterUnits(runtime, optionalWriterState);
+        quarantinedState = quarantineUpdateState(home, layout.data);
         await Promise.resolve();
       },
       resumeOldWriters: async (root) => {
         const { createCliRuntime } = await import("./cli/runtime.ts");
         const runtime = createCliRuntime(root);
+        let stateReady = true;
         try {
+          if (quarantinedState.length > 0) {
+            stopWriterUnits(runtime, optionalWriterState);
+            try {
+              restoreUpdateState(quarantinedState);
+              quarantinedState = [];
+            } catch (error) {
+              stateReady = false;
+              throw error;
+            }
+          }
           // Recovery before activation must not rewrite or retire old unit files.
           runtime.systemd.restart(runtime.SERVICES);
         } finally {
-          if (optionalWriterState)
+          if (stateReady && optionalWriterState)
             restoreWriterOwnership(runtime, optionalWriterState, {
               unitMigrationStarted,
               legacyMemoryOwnerProven: false,
