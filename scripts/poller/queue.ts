@@ -123,6 +123,7 @@ export async function completeScopedResetState(
     clearQueue = false,
     clearQueueImpl = clearChatQueue,
     setStatusImpl = setChatStatus,
+    deleteMessageImpl = deleteStaleWorkingMessage,
   }: {
     clearQueue?: boolean;
     clearQueueImpl?: (chatKey: string) => Promise<void>;
@@ -130,12 +131,37 @@ export async function completeScopedResetState(
       chatKey: string,
       patch: Record<string, unknown>,
     ) => unknown;
+    deleteMessageImpl?: (
+      chatKey: string,
+      messageId: string | number,
+    ) => unknown;
   } = {},
 ) {
   // For private chats the queue belongs to the reset session, so clear it
   // before exposing an idle tombstone. A failed cleanup leaves the old running
   // status in place and lets a repeated /new retry safely.
   if (clearQueue) await clearQueueImpl(chatKey);
+
+  // /new clears sessionId before a late terminal event can finish the Working…
+  // message, so delete it here from the pre-reset snapshot.
+  const current = getChatStatus(chatKey);
+
+  // Delete before clearing state: a crash after delete is harmless (message
+  // already gone); a crash before either step still leaves state pointing at
+  // the message for the next /new attempt.
+  if (
+    current?.statusMessageId !== undefined &&
+    current.statusMessageId !== null
+  ) {
+    try {
+      await deleteMessageImpl(
+        chatKey,
+        current.statusMessageId as string | number,
+      );
+    } catch {
+      // Reset working messages are removed best-effort, like stale ones.
+    }
+  }
 
   setStatusImpl(chatKey, {
     status: "idle",
