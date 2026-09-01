@@ -60,6 +60,7 @@ const WORKFLOW_RUNNING_LIMIT = 5;
 type WorkflowStoreReport = {
   readonly runs: Readonly<Record<string, number>>;
   readonly hookFiles: number;
+  readonly unreadable: number;
 };
 
 function workflowStoreReport(root: string): WorkflowStoreReport {
@@ -73,19 +74,26 @@ function workflowStoreReport(root: string): WorkflowStoreReport {
     }
   };
   const runs: Record<string, number> = {};
+  let unreadable = 0;
   for (const entry of entries(join(store, "runs"))) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = join(store, "runs", entry.name);
-    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-    const status = (parsed as { status?: unknown } | null)?.status;
-    if (typeof status !== "string" || status.length === 0)
-      throw new Error(`${file} has no workflow status`);
-    runs[status] = (runs[status] ?? 0) + 1;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+      const status = (parsed as { status?: unknown } | null)?.status;
+      if (typeof status !== "string" || status.length === 0) {
+        unreadable++;
+        continue;
+      }
+      runs[status] = (runs[status] ?? 0) + 1;
+    } catch {
+      unreadable++;
+    }
   }
   const hookFiles = entries(join(store, "hooks")).filter(
     (entry) => entry.isFile() && entry.name.endsWith(".json"),
   ).length;
-  return { runs, hookFiles };
+  return { runs, hookFiles, unreadable };
 }
 
 function formatWorkflowStore(report: WorkflowStoreReport): string {
@@ -97,7 +105,9 @@ function formatWorkflowStore(report: WorkflowStoreReport): string {
     statuses.length === 0
       ? ""
       : ` (${statuses.map(([status, count]) => `${status} ${count}`).join(", ")})`;
-  return `${total} runs${details}; ${report.hookFiles} hook files`;
+  const unreadable =
+    report.unreadable > 0 ? `, ${report.unreadable} unreadable` : "";
+  return `${total} runs${details}; ${report.hookFiles} hook files${unreadable}`;
 }
 
 /** Free bytes in the short units used by the installation report. */

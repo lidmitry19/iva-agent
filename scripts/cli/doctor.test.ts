@@ -285,6 +285,53 @@ test("doctor treats a running chat without updatedAt as stuck", async (t) => {
   );
 });
 
+test("doctor keeps workflow counts when one run file is unreadable", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const store = join(root, ".eve", ".workflow-data");
+  mkdirSync(join(store, "runs"), { recursive: true });
+  mkdirSync(join(store, "hooks"), { recursive: true });
+  writeFileSync(join(store, "runs/running.json"), '{"status":"running"}');
+  writeFileSync(join(store, "runs/waiting.json"), '{"status":"waiting"}');
+  writeFileSync(join(store, "runs/damaged.json"), "{not json");
+  writeFileSync(join(store, "hooks/reminder.json"), "{}");
+  const events: Array<[string, string]> = [];
+  const systemd = createSystemdControl({
+    run: () => ({ code: 1, out: "" }),
+  });
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    UNIT_DIR: join(root, "units"),
+    SERVICES: [],
+    TIMERS: [],
+    C: NO_COLOR,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    dataDirAbs: () => join(root, "data"),
+    hasSystemd: () => true,
+    systemd,
+    cap: () => ({ code: 1, out: "", err: "" }),
+  };
+
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+
+  assert.deepEqual(
+    events.filter(([, message]) => message.startsWith("workflow store")),
+    [
+      [
+        "ok",
+        "workflow store: 2 runs (running 1, waiting 1); 1 hook files, 1 unreadable",
+      ],
+    ],
+  );
+});
+
 test("doctor accepts a custom embedding endpoint for hybrid memory search", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "present=true\n");
