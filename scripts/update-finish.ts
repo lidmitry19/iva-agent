@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { rewriteRunStatusesForUpdate } from "../agent/lib/run-status.ts";
 import { CATALOG, catalogProvider } from "./lib/model-catalog.ts";
 import { notificationChat } from "./lib/notification-chat.ts";
 import {
@@ -22,7 +23,7 @@ import {
   SHIM_PATH,
   throughLink,
 } from "./lib/version-layout.ts";
-import { conversationStateTargets, quarantinePath } from "./lib/wf-store.ts";
+import { quarantinePath, sessionStateTargets } from "./lib/wf-store.ts";
 import {
   adoptUpdateLock,
   layoutFor,
@@ -57,15 +58,16 @@ export type UpdateQuarantine = {
   readonly trash: string;
 };
 
-/** Retire open-conversation state as one reversible update step. */
+/** Retire open session state as one reversible update step. */
 export function quarantineUpdateState(
   root: string,
   dataDir: string,
+  notify: Say,
   stamp = new Date().toISOString().replace(/[:.]/gu, "-"),
 ): UpdateQuarantine[] {
   const quarantined: UpdateQuarantine[] = [];
   try {
-    for (const target of conversationStateTargets(root, dataDir)) {
+    for (const target of sessionStateTargets(root, dataDir)) {
       const path = throughLink(target);
       const trash = quarantinePath(target, stamp);
       if (trash) quarantined.push({ path, trash });
@@ -73,7 +75,11 @@ export function quarantineUpdateState(
     return quarantined;
   } catch (error) {
     try {
-      restoreUpdateState(quarantined);
+      restoreUpdateStateOrNotify(
+        quarantined,
+        notify,
+        "update state quarantine and recovery both failed",
+      );
     } catch (restoreError) {
       throw new AggregateError(
         [error, restoreError],
@@ -92,6 +98,22 @@ export function restoreUpdateState(
   for (const entry of [...quarantined].reverse()) {
     rmSync(entry.path, { recursive: true, force: true });
     renameSync(entry.trash, entry.path);
+  }
+}
+
+/** Restore update state and tell the owner where manual recovery data remains. */
+export function restoreUpdateStateOrNotify(
+  quarantined: readonly UpdateQuarantine[],
+  notify: Say,
+  failure: string,
+): void {
+  try {
+    restoreUpdateState(quarantined);
+  } catch (error) {
+    notify(
+      `${failure}; state is in ${quarantined.map(({ trash }) => trash).join(", ")}; manual help is needed`,
+    );
+    throw error;
   }
 }
 
@@ -590,12 +612,16 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { createCliRuntime } = await import("./cli/runtime.ts");
         // Before the first conversion there is no current symlink: the checkout
         // itself is the old writer root and must remain usable until activation.
-        const runtime = createCliRuntime(
-          existsSync(layout.current) ? layout.current : home,
-        );
+        const writerRoot = existsSync(layout.current) ? layout.current : home;
+        const runtime = createCliRuntime(writerRoot);
         optionalWriterState = captureOptionalWriterState(runtime);
         stopWriterUnits(runtime, optionalWriterState);
-        quarantinedState = quarantineUpdateState(home, layout.data);
+        quarantinedState = quarantineUpdateState(
+          writerRoot,
+          layout.data,
+          notify,
+        );
+        rewriteRunStatusesForUpdate(layout.data);
         await Promise.resolve();
       },
       resumeOldWriters: async (root) => {
@@ -606,7 +632,11 @@ export async function main(argv: readonly string[]): Promise<number> {
           if (quarantinedState.length > 0) {
             stopWriterUnits(runtime, optionalWriterState);
             try {
-              restoreUpdateState(quarantinedState);
+              restoreUpdateStateOrNotify(
+                quarantinedState,
+                notify,
+                "recovery after rollback failed",
+              );
               quarantinedState = [];
             } catch (error) {
               stateReady = false;

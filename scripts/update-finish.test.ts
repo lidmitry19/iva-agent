@@ -7,6 +7,7 @@ import {
   restartPluginUnits,
   quarantineUpdateState,
   restoreUpdateState,
+  restoreUpdateStateOrNotify,
   restoreMigratedWriterState,
   restoreOptionalWriterState,
   restoreWriterOwnership,
@@ -20,10 +21,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rewriteRunStatusesForUpdate } from "../agent/lib/run-status.ts";
 import {
   LEGACY_BRAIN_UNITS,
   LEGACY_MEMORY_UNITS,
@@ -47,7 +50,7 @@ test("tombstones follow the canonical custom data directory", (t) => {
   assert.deepEqual(tombstoned(home), ["agent/removed.ts"]);
 });
 
-test("update quarantines conversation state but preserves queued input and Vault", (t) => {
+test("update quarantines session state and rewrites chat status in place", (t) => {
   const home = mkdtempSync(join(tmpdir(), "iva-update-state-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const data = join(home, "data");
@@ -60,19 +63,46 @@ test("update quarantines conversation state but preserves queued input and Vault
     mkdirSync(path, { recursive: true });
   writeFileSync(join(home, ".eve/.workflow-data/run.json"), "old run\n");
   writeFileSync(join(home, ".workflow-data/run.json"), "legacy run\n");
-  writeFileSync(join(data, "run-status.d/chat.json"), "running\n");
+  writeFileSync(
+    join(data, "run-status.d/chat.json"),
+    JSON.stringify({
+      status: "idle",
+      updatedAt: 123,
+      statusMessageId: 42,
+      sessionId: "old-session",
+    }),
+  );
   writeFileSync(join(data, "run-status.json"), "running\n");
   writeFileSync(join(data, "rollup-session-daily.json"), "daily\n");
   writeFileSync(join(data, "telegram-queue.json"), "queued\n");
   writeFileSync(join(home, "vault/memory.md"), "remembered\n");
 
-  const quarantined = quarantineUpdateState(home, data, "update-stamp");
+  const quarantined = quarantineUpdateState(
+    home,
+    data,
+    () => undefined,
+    "update-stamp",
+  );
+  rewriteRunStatusesForUpdate(data);
 
-  assert.equal(quarantined.length, 5);
+  assert.equal(quarantined.length, 3);
   for (const entry of quarantined) {
     assert.equal(existsSync(entry.path), false);
     assert.equal(existsSync(entry.trash), true);
   }
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(data, "run-status.d/chat.json"), "utf8")),
+    {
+      status: "running",
+      updatedAt: 0,
+      statusMessageId: 42,
+      sessionId: "old-session",
+    },
+  );
+  assert.equal(
+    readFileSync(join(data, "run-status.json"), "utf8"),
+    "running\n",
+  );
   assert.equal(
     readFileSync(join(data, "telegram-queue.json"), "utf8"),
     "queued\n",
@@ -83,28 +113,28 @@ test("update quarantines conversation state but preserves queued input and Vault
   );
 });
 
-test("update rollback restores every quarantined path", (t) => {
+test("update rollback restores every quarantined session path", (t) => {
   const home = mkdtempSync(join(tmpdir(), "iva-update-rollback-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const data = join(home, "data");
   const store = join(home, ".eve/.workflow-data");
-  const status = join(data, "run-status.d");
   mkdirSync(store, { recursive: true });
-  mkdirSync(status, { recursive: true });
+  mkdirSync(data, { recursive: true });
   writeFileSync(join(store, "old.json"), "old\n");
-  writeFileSync(join(status, "old.json"), "old\n");
   writeFileSync(join(data, "rollup-session-weekly.json"), "old session\n");
   writeFileSync(join(data, "telegram-queue.json"), "queued\n");
-  const quarantined = quarantineUpdateState(home, data, "rollback-stamp");
+  const quarantined = quarantineUpdateState(
+    home,
+    data,
+    () => undefined,
+    "rollback-stamp",
+  );
   mkdirSync(store, { recursive: true });
-  mkdirSync(status, { recursive: true });
   writeFileSync(join(store, "candidate.json"), "candidate\n");
-  writeFileSync(join(status, "candidate.json"), "candidate\n");
 
   restoreUpdateState(quarantined);
 
   assert.deepEqual(readdirSync(store), ["old.json"]);
-  assert.deepEqual(readdirSync(status), ["old.json"]);
   assert.equal(
     readFileSync(join(data, "rollup-session-weekly.json"), "utf8"),
     "old session\n",
@@ -117,6 +147,49 @@ test("update rollback restores every quarantined path", (t) => {
     quarantined.some(({ trash }) => existsSync(trash)),
     false,
   );
+});
+
+test("managed update keeps the shared workflow-store symlink reachable", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "iva-update-managed-link-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const store = join(home, ".eve/.workflow-data");
+  const versionRoot = join(home, "versions/0.4.0-abcdef123456");
+  const versionStore = join(versionRoot, ".eve/.workflow-data");
+  mkdirSync(store, { recursive: true });
+  mkdirSync(join(versionRoot, ".eve"), { recursive: true });
+  writeFileSync(join(store, "old.json"), "old\n");
+  symlinkSync(store, versionStore);
+
+  const quarantined = quarantineUpdateState(
+    versionRoot,
+    join(home, "data"),
+    () => undefined,
+    "managed-stamp",
+  );
+
+  assert.equal(quarantined.length, 1);
+  assert.equal(existsSync(versionStore), true);
+  writeFileSync(join(versionStore, "new.json"), "new\n");
+  assert.equal(readFileSync(join(store, "new.json"), "utf8"), "new\n");
+});
+
+test("failed rollback recovery reports every retained trash path", () => {
+  const notices: string[] = [];
+  const retained = [
+    { path: "/srv/iva/store", trash: "/srv/iva/store.trash-first" },
+    { path: "/srv/iva/rollup", trash: "/srv/iva/rollup.trash-second" },
+  ];
+
+  assert.throws(() =>
+    restoreUpdateStateOrNotify(
+      retained,
+      (message) => notices.push(message),
+      "recovery after rollback failed",
+    ),
+  );
+  assert.deepEqual(notices, [
+    "recovery after rollback failed; state is in /srv/iva/store.trash-first, /srv/iva/rollup.trash-second; manual help is needed",
+  ]);
 });
 
 function fakeRuntime({
