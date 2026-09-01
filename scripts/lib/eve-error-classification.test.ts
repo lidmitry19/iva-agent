@@ -32,8 +32,11 @@ assert.ok(isErrorClassifierModule(errorModule));
 test("deterministic AI SDK prompt and tool errors terminate the Eve session", () => {
   for (const name of [
     "AI_InvalidPromptError",
+    "AI_InvalidArgumentError",
+    "AI_TypeValidationError",
     "AI_NoSuchToolError",
     "AI_InvalidToolInputError",
+    "AI_UnsupportedFunctionalityError",
   ]) {
     const error = Object.assign(new Error("deterministic request error"), {
       name,
@@ -52,4 +55,12 @@ test("deterministic classification follows nested causes", () => {
     ),
     "terminal",
   );
+});
+
+test("retryable errors with deterministic-name prefixes remain retryable", () => {
+  const error = Object.assign(new Error("prompt timed out"), {
+    name: "AI_InvalidPromptTimeoutError",
+    isRetryable: true,
+  });
+  assert.equal(errorModule.classifyModelCallError(error), "retry");
 });

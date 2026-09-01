@@ -131,11 +131,44 @@ export async function resolveTarget(
     // Offline, or a remote that refuses the fetch.
   }
   if (!sha) sha = await requireGit(gitAt, repo, ["rev-parse", "HEAD"]);
+  await assertTargetKeepsLocalHistory(repo, sha);
   const version = packageVersion(
     await requireGit(gitAt, repo, ["show", `${sha}:package.json`]),
   );
   if (!version) throw new Error(`no package version at ${sha}`);
   return { sha, version };
+}
+
+/**
+ * A configured upstream may be the official repository while HEAD contains the
+ * owner's integration commits. Never replace that history with one side of a
+ * divergence: the official release must first be merged into the integration
+ * branch, where conflicts can be reviewed and tested.
+ */
+export async function assertTargetKeepsLocalHistory(
+  repo: string,
+  target: string,
+  gitImpl = gitAt,
+): Promise<void> {
+  const targetContainsHead = await gitImpl(repo, [
+    "merge-base",
+    "--is-ancestor",
+    "HEAD",
+    target,
+  ]);
+  if (targetContainsHead.code === 0) return;
+
+  const headContainsTarget = await gitImpl(repo, [
+    "merge-base",
+    "--is-ancestor",
+    target,
+    "HEAD",
+  ]);
+  if (headContainsTarget.code === 0) return;
+
+  throw new Error(
+    "official update diverges from the custom integration branch; merge the official release into the custom branch before updating",
+  );
 }
 
 /**

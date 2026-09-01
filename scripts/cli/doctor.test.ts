@@ -100,6 +100,75 @@ async function doctorOutput(root: string): Promise<{
   return { events, summaryLogs };
 }
 
+async function bridgeBacklogEvents(
+  root: string,
+  {
+    now,
+    queue,
+    queueRaw,
+    statuses = [],
+  }: {
+    now: number;
+    queue?: unknown;
+    queueRaw?: string;
+    statuses?: Array<{
+      chatKey: string;
+      status: { status?: string; updatedAt?: number };
+    }>;
+  },
+): Promise<Array<[string, string]>> {
+  const data = join(root, "data");
+  const units = join(root, "units");
+  mkdirSync(data, { recursive: true });
+  mkdirSync(units, { recursive: true });
+  writeFileSync(join(units, "iva.service"), "[Service]\n");
+  if (queueRaw !== undefined) {
+    writeFileSync(join(data, "telegram-queue.json"), queueRaw);
+  } else if (queue !== undefined) {
+    writeFileSync(join(data, "telegram-queue.json"), JSON.stringify(queue));
+  }
+  const events: Array<[string, string]> = [];
+  const systemd = createSystemdControl({
+    run: (args) => {
+      if (args[0] === "is-enabled") return { code: 0, out: "enabled" };
+      if (args[0] === "is-active") return { code: 0, out: "active" };
+      return { code: 1, out: "" };
+    },
+  });
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    UNIT_DIR: units,
+    SERVICES: [],
+    TIMERS: [],
+    C: NO_COLOR,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    dataDirAbs: () => data,
+    hasSystemd: () => true,
+    systemd,
+    cap: (command) =>
+      command === "ss"
+        ? {
+            code: 0,
+            out: "LISTEN 0 511 127.0.0.1:8723 0.0.0.0:*",
+            err: "",
+          }
+        : { code: 1, out: "", err: "" },
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    now: () => now,
+    telegramInboxFile: join(data, "telegram-inbox.json"),
+    telegramQueueFile: join(data, "telegram-queue.json"),
+    listChatStatusesImpl: () => statuses,
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+  return events.filter(([, message]) => message.startsWith("bridge backlog:"));
+}
+
 test("non-systemd doctor preserves exact counter and exit semantics", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "present=true\n");
@@ -138,6 +207,129 @@ test("non-systemd doctor preserves exact counter and exit semantics", async (t) 
     ["Summary: 5 ok · 0 warn · 0 fixed · 0 fail"],
   ]);
   assert.deepEqual(exitCodes, [0]);
+});
+
+test("doctor warns about an old Telegram bridge backlog item", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+
+  assert.deepEqual(
+    await bridgeBacklogEvents(root, {
+      now: 1_000_000,
+      queue: {
+        version: 1,
+        queues: {
+          "1:": [
+            {
+              version: 1,
+              updateId: 212,
+              enqueuedAt: 340_000,
+              update: { update_id: 212 },
+            },
+          ],
+        },
+      },
+    }),
+    [
+      [
+        "warn",
+        "bridge backlog: oldest item 11m old — check: journalctl --user -u iva-telegram-poll; use /stop or iva restart",
+      ],
+    ],
+  );
+});
+
+test("doctor reports a clear bridge backlog when queue files are missing", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+
+  assert.deepEqual(await bridgeBacklogEvents(root, { now: 1_000_000 }), [
+    ["ok", "bridge backlog: clear"],
+  ]);
+});
+
+test("doctor warns when a Telegram bridge queue file is corrupt", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const queueFile = join(root, "data", "telegram-queue.json");
+  const events = await bridgeBacklogEvents(root, {
+    now: 1_000_000,
+    queueRaw: "{not json",
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.[0], "warn");
+  assert.ok(events[0]?.[1].startsWith("bridge backlog:"));
+  assert.ok(events[0]?.[1].includes(`${queueFile} unreadable`));
+  assert.equal(
+    events.some(([, message]) => message === "bridge backlog: clear"),
+    false,
+  );
+});
+
+test("doctor treats a running chat without updatedAt as stuck", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+
+  assert.deepEqual(
+    await bridgeBacklogEvents(root, {
+      now: 1_000_000,
+      statuses: [{ chatKey: "1:", status: { status: "running" } }],
+    }),
+    [
+      [
+        "warn",
+        "bridge backlog: 1 stuck chat(s) — check: journalctl --user -u iva-telegram-poll; use /stop or iva restart",
+      ],
+    ],
+  );
+});
+
+test("doctor keeps workflow counts when one run file is unreadable", async (t) => {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "present=true\n");
+  const store = join(root, ".eve", ".workflow-data");
+  mkdirSync(join(store, "runs"), { recursive: true });
+  mkdirSync(join(store, "hooks"), { recursive: true });
+  writeFileSync(join(store, "runs/running.json"), '{"status":"running"}');
+  writeFileSync(join(store, "runs/waiting.json"), '{"status":"waiting"}');
+  writeFileSync(join(store, "runs/damaged.json"), "{not json");
+  writeFileSync(join(store, "hooks/reminder.json"), "{}");
+  const events: Array<[string, string]> = [];
+  const systemd = createSystemdControl({
+    run: () => ({ code: 1, out: "" }),
+  });
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    UNIT_DIR: join(root, "units"),
+    SERVICES: [],
+    TIMERS: [],
+    C: NO_COLOR,
+    ok: (message) => events.push(["ok", message]),
+    warn: (message) => events.push(["warn", message]),
+    bad: (message) => events.push(["bad", message]),
+    readEnv: completeEnv,
+    dataDirAbs: () => join(root, "data"),
+    hasSystemd: () => true,
+    systemd,
+    cap: () => ({ code: 1, out: "", err: "" }),
+  };
+
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.19.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+
+  assert.deepEqual(
+    events.filter(([, message]) => message.startsWith("workflow store")),
+    [
+      [
+        "ok",
+        "workflow store: 2 runs (running 1, waiting 1); 1 hook files, 1 unreadable",
+      ],
+    ],
+  );
 });
 
 test("doctor accepts a custom embedding endpoint for hybrid memory search", async (t) => {

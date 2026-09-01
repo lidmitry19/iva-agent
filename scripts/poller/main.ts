@@ -7,8 +7,12 @@ import {
   migrateQueueFile,
   parseTelegramUpdates,
 } from "../lib/telegram-queue.ts";
+import { alertOnce, alertResolved } from "../lib/notice-policy.ts";
+import { notificationChat } from "../lib/notification-chat.ts";
+import { tr } from "#lib/i18n.ts";
 import {
   ACCEPTANCE_ROUTE,
+  DATA_DIR,
   ROUTE,
   SECRET,
   TOKEN,
@@ -34,6 +38,18 @@ import * as updateFlow from "./update-flow.ts";
 import * as control from "./control.ts";
 import * as wizards from "./wizards.ts";
 
+/** Sleep/alert policy for consecutive getUpdates Conflict responses. Pure, no I/O. */
+export function conflictBackoff(consecutiveConflicts: number): {
+  sleepMs: number;
+  shouldAlert: boolean;
+} {
+  const sleepMs = Math.min(
+    60_000,
+    3_000 * 2 ** Math.max(0, consecutiveConflicts - 1),
+  );
+  return { sleepMs, shouldAlert: consecutiveConflicts >= 10 };
+}
+
 type ErrorLike = { message?: unknown };
 type TelegramResponse = {
   ok?: unknown;
@@ -52,7 +68,7 @@ export const completeScopedResetState = queue.completeScopedResetState;
 export const persistPrivateResetIntent = queue.persistPrivateResetIntent;
 export const loadPrivateResetIntents = queue.loadPrivateResetIntents;
 export const clearPrivateResetIntent = queue.clearPrivateResetIntent;
-export const releaseScopedContinuation = queue.releaseScopedContinuation;
+export const releaseScopedSession = queue.releaseScopedSession;
 export const performScopedReset = queue.performScopedReset;
 export { reconcileScopedResetIntents, reapStaleRuns };
 export { routeMessageUpdate, drainReadyQueueHeads };
@@ -154,6 +170,7 @@ export async function main({
     log("starting offset:", offset);
   }
 
+  let consecutiveConflicts = 0;
   for (;;) {
     assertTelegramProcessLease(processLease);
     // One head per idle chat/topic per pass. While any queue remains, use a short
@@ -181,6 +198,7 @@ export async function main({
       )) as TelegramResponse;
     } catch (error) {
       log("getUpdates network:", errorMessage(error));
+      consecutiveConflicts = 0;
       await sleep(3000);
       continue;
     }
@@ -188,10 +206,42 @@ export async function main({
       log("getUpdates:", data.description);
       // 409/conflict — a webhook is left somewhere; remove it and try again.
       if (/409|conflict|webhook/i.test(String(data.description || ""))) {
+        consecutiveConflicts += 1;
+        const { sleepMs, shouldAlert } = conflictBackoff(consecutiveConflicts);
         await deleteWebhookOrThrow(false);
+        if (shouldAlert) {
+          try {
+            await alertOnce(
+              DATA_DIR,
+              "getupdates-conflict",
+              "telegram getUpdates conflict",
+              async () => {
+                const chat = notificationChat();
+                if (!chat) return false;
+                const res = (await tg("sendMessage", {
+                  chat_id: chat,
+                  text: tr(
+                    "Receiving messages has stopped: another bot instance is holding this token. Stop the other instance.",
+                    "Приём сообщений остановлен: другой инстанс бота держит этот токен — останови его.",
+                  ),
+                })) as TelegramResponse;
+                return Boolean(res.ok);
+              },
+            );
+          } catch (error) {
+            log("getUpdates conflict alert:", errorMessage(error));
+          }
+        }
+        await sleep(sleepMs);
+        continue;
       }
+      consecutiveConflicts = 0;
       await sleep(3000);
       continue;
+    }
+    if (consecutiveConflicts > 0) {
+      consecutiveConflicts = 0;
+      alertResolved(DATA_DIR, "getupdates-conflict");
     }
     const updates = parseTelegramUpdates(data.result);
     if (updates === null) {

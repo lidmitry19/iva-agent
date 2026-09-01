@@ -24,6 +24,13 @@ import { routeMessageUpdate, type RouteMessageResult } from "./routing.ts";
 
 export const TELEGRAM_INBOX_FILE = join(DATA_DIR, "telegram-inbox.json");
 
+type InboxPromotionBackoff = {
+  failures: number;
+  nextAttemptAt: number;
+};
+
+const inboxPromotionBackoff = new Map<string, InboxPromotionBackoff>();
+
 export type InboxCollectorOptions = {
   quietMs?: unknown;
   mediaQuietMs?: unknown;
@@ -212,6 +219,7 @@ export async function promoteReadyInbox({
   routeImpl = routeMessageUpdate,
   acknowledgeImpl = (key: string, updateId: number) =>
     acknowledgeQueueHead(TELEGRAM_INBOX_FILE, key, updateId, { strict: true }),
+  backoff = inboxPromotionBackoff,
 }: {
   now?: () => number;
   collectorOptions?: InboxCollectorOptions;
@@ -220,13 +228,16 @@ export async function promoteReadyInbox({
   >;
   routeImpl?: (update: TelegramQueueUpdate) => Promise<RouteMessageResult>;
   acknowledgeImpl?: (key: string, updateId: number) => Promise<unknown>;
+  backoff?: Map<string, InboxPromotionBackoff>;
 } = {}): Promise<number> {
   const snapshot = await loadImpl();
   for (const key of queueKeys(snapshot)) {
+    const attemptAt = now();
+    if (attemptAt < (backoff.get(key)?.nextAttemptAt ?? 0)) continue;
     const batch = selectReadyInboxBatch(
       key,
       snapshot.queues[key],
-      now(),
+      attemptAt,
       collectorOptions,
     );
     if (!batch) continue;
@@ -238,11 +249,24 @@ export async function promoteReadyInbox({
       routed !== "delivered" &&
       routed !== "terminal-drop"
     ) {
+      const failures = (backoff.get(key)?.failures ?? 0) + 1;
+      backoff.set(key, {
+        failures,
+        nextAttemptAt: now() + Math.min(15_000 * 2 ** (failures - 1), 300_000),
+      });
       continue;
     }
+    backoff.delete(key);
     for (const updateId of batch.updateIds) {
       await acknowledgeImpl(key, updateId);
     }
   }
-  return queueCount(await loadImpl());
+  const remaining = await loadImpl();
+  return queueKeys(remaining).reduce(
+    (count, key) =>
+      now() < (backoff.get(key)?.nextAttemptAt ?? 0)
+        ? count
+        : count + queueCount(remaining, key),
+    0,
+  );
 }

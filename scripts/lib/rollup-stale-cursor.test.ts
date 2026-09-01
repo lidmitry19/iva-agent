@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registration promises. */
-// eve 0.30.8: result() читает поток с сохранённого streamIndex и останавливается на
+// eve 0.47.3: result() читает поток с курсора экземпляра и останавливается на
 // первой границе хода, не сверяя её с только что отправленным сообщением (vercel/eve#2461).
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import {
   drainStreamBefore,
   drainStreamToTail,
   isOwnTurnResult,
+  parsePersistedRollupSession,
   sentNotBeforeIso,
 } from "./rollup-stale-cursor.ts";
 
@@ -66,7 +67,7 @@ function isTurnBoundary(event: StreamEvent): boolean {
   );
 }
 
-// Модель result() eve 0.30.8: collectTurnEvents с сохранённого курсора до первой границы.
+// Модель result() eve 0.47.3: collect Turn events с курсора до первой границы.
 function resultFromCursor(
   stream: readonly StreamEvent[],
   streamIndex: number,
@@ -172,6 +173,45 @@ const TONIGHT_PROMPT =
 const OLD_REPORT = "Обработан день 2026-08-18";
 const TONIGHT_REPORT = "Обработан день 2026-08-23";
 
+test("the persisted Rollup session is exactly sessionId plus createdAt", () => {
+  assert.deepEqual(
+    parsePersistedRollupSession({
+      sessionId: "wrun_01M1BRB1YVQXJEQR806RPZYTC4",
+      createdAt: 1_788_100_000_000,
+    }),
+    {
+      sessionId: "wrun_01M1BRB1YVQXJEQR806RPZYTC4",
+      createdAt: 1_788_100_000_000,
+    },
+  );
+  for (const value of [
+    {
+      state: {
+        ["continuationToken"]: "legacy",
+        sessionId: "wrun_legacy",
+        streamIndex: 27,
+      },
+      createdAt: 1_788_100_000_000,
+    },
+    { sessionId: "", createdAt: 1 },
+    { sessionId: " wrun_space ", createdAt: 1 },
+    { sessionId: "wrun_bad_time", createdAt: "now" },
+    { sessionId: "wrun_extra", createdAt: 1, streamIndex: 2 },
+  ]) {
+    assert.equal(parsePersistedRollupSession(value), null);
+  }
+});
+
+test("property: persisted Rollup session parsing never crashes on junk", () => {
+  fc.assert(
+    fc.property(fc.anything(), (value) => {
+      const parsed = parsePersistedRollupSession(value);
+      assert.ok(parsed === null || Object.keys(parsed).length === 2);
+    }),
+    { seed: 24_611, numRuns: 200 },
+  );
+});
+
 test("origin/main delivers a lagged-cursor result from a previous night", () => {
   const stream = [
     ...turn(OLD_PROMPT, OLD_REPORT, "2026-08-19T04:01:00.000Z"),
@@ -272,7 +312,7 @@ test("drainStreamToTail advances a lagged cursor to the tail before send", async
   );
 });
 
-test("drainStreamToTail swallows a stream error so send can still proceed", async () => {
+test("drainStreamToTail reports a stream error without throwing itself", async () => {
   const session = {
     stream(options?: {
       follow: false;
@@ -286,6 +326,33 @@ test("drainStreamToTail swallows a stream error so send can still proceed", asyn
   const errors: string[] = [];
   await drainStreamToTail(session, (error) => errors.push(error.message));
   assert.deepEqual(errors, ["stream unavailable"]);
+});
+
+test("drainStreamBefore refuses the action when the stream drain fails", async () => {
+  const streamError = new Error("stream unavailable before send");
+  const session = {
+    stream(): AsyncIterable<never> {
+      throw streamError;
+    },
+  };
+  let actionCalls = 0;
+  const reported: Error[] = [];
+
+  await assert.rejects(
+    () =>
+      drainStreamBefore(
+        asClientStream(session),
+        () => {
+          actionCalls++;
+          return Promise.resolve();
+        },
+        (error) => reported.push(error),
+      ),
+    (error) => error === streamError,
+  );
+
+  assert.equal(actionCalls, 0);
+  assert.deepEqual(reported, [streamError]);
 });
 
 test("drainStreamToTail finishes when both next and return hang past the timeout", async () => {
@@ -460,13 +527,24 @@ test("rollup.ts uses the shared pre-send drain and refuses a foreign result", ()
   assert.match(ROLLUP_SRC, /sentNotBeforeIso\(/);
   assert.match(
     ROLLUP_SRC,
-    /const send = async \(\) => \{\s+const sentNotBefore = sentNotBeforeIso\(\);\s+return \{\s+response: await session\.send\(prompt\),\s+sentNotBefore,/,
+    /result: await tokenBudget\.send\(session, prompt, \{\s+onAccepted:/,
   );
+  assert.match(
+    ROLLUP_SRC,
+    /tokenBudget\.create\(\s+client\.sessions,\s+\{ message: prompt \},/,
+  );
+  assert.match(ROLLUP_SRC, /client\.sessions\.attach\(saved\.sessionId\)/);
+  assert.match(ROLLUP_SRC, /JSON\.stringify\(\{ sessionId, createdAt \}\)/);
+  const removedLegacyClient = ["legacy", "ClientSession"].join("");
+  const removedSingularSession = ["client", "session("].join(".");
+  assert.equal(ROLLUP_SRC.includes(removedLegacyClient), false);
+  assert.equal(ROLLUP_SRC.includes(removedSingularSession), false);
+  assert.doesNotMatch(ROLLUP_SRC, /attach\(saved\.sessionId,\s*\{/);
   assert.doesNotMatch(ROLLUP_SRC, /Date\.now\(\) - 60_000/);
   assert.doesNotMatch(ROLLUP_SRC, /drainBeforeSend/);
   const ownAt = ROLLUP_SRC.indexOf("isOwnTurnResult(");
   const saveAt = ROLLUP_SRC.indexOf(
-    "saveSession(session.state, sessionCreatedAt);",
+    "saveSession(activeSession.state.sessionId, sessionCreatedAt);",
   );
   assert.ok(
     ownAt > 0 && ownAt < saveAt,

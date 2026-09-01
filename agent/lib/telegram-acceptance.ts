@@ -2,11 +2,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import type {
+  TelegramChannelState,
   TelegramContext,
   TelegramInboundResultOrPromise,
   TelegramMessage,
 } from "eve/channels/telegram";
-import type { RouteHandlerArgs } from "eve/channels";
+import { parseTelegramUpdate } from "eve/channels/telegram";
+import type { ChannelSource, RouteHandlerArgs, TurnPolicy } from "eve/channels";
 import {
   acquireLock,
   loadJsonStrict,
@@ -17,11 +19,12 @@ import { dataDir } from "./data-dir.ts";
 import { chatKeyOf } from "./run-status.ts";
 import { traceInboundOutcome } from "./trace.ts";
 import { TELEGRAM_QUEUE_RECEIPT_FIELD } from "./telegram-parts.ts";
+import { readSettings } from "./settings.ts";
 
 export const TELEGRAM_ACCEPTANCE_ROUTE = "/eve/v1/telegram/accepted";
 export const TELEGRAM_ACCEPTANCE_KIND_HEADER = "x-iva-telegram-acceptance";
-// Ответ на сообщение бота, чья сессия уже закрыта: eve не находит её по continuation-токену
-// и падает навсегда. Bridge узнаёт этот класс по заголовку и хоронит апдейт вместо ретрая.
+// Ответ на сообщение закрытой сессии нельзя доставить как input response.
+// Bridge узнаёт этот класс по заголовку и хоронит апдейт вместо ретрая.
 export const TELEGRAM_CLOSED_SESSION_KIND = "closed-session";
 
 type ReceiptContext = { receipt: string | null; handled: boolean };
@@ -31,6 +34,15 @@ type AcceptedWebhookHandler<TState> = (
   request: Request,
   args: RouteHandlerArgs<TState>,
 ) => Promise<Response>;
+type TelegramReroute = {
+  message: string;
+  state: TelegramChannelState;
+};
+type RequestMetadata = {
+  receipt: string | null;
+  reroute: TelegramReroute | null;
+  updateId: number | null;
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -45,35 +57,35 @@ function validReceipt(value: unknown): value is string {
   return typeof value === "string" && RECEIPT_PATTERN.test(value);
 }
 
-// Единственный признак класса, который отдаёт eve: текст ошибки из createSendFn
-// (dist/src/channel/send.js). Он бросается ровно тогда, когда inputResponses некуда
-// доставить, — остальные сбои send остаются транзиентными и ретраятся как раньше.
-const CLOSED_SESSION_PATTERN =
-  /target session was not found via continuation token/iu;
-
-function isClosedSessionError(error: unknown): boolean {
-  return error instanceof Error && CLOSED_SESSION_PATTERN.test(error.message);
+export function telegramTurnPolicy(
+  settings: Record<string, unknown> = readSettings(),
+): TurnPolicy {
+  return settings.turnPolicy === "steer" ? "steer" : "queue";
 }
 
-// Сессии закрываются штатно: ротация, ночной сброс, /new, рестарт при апдейте. Reply на
-// старое сообщение бота eve превращает в inputResponses, и такой ход не начнётся уже
-// никогда. Тот же текст без inputResponses — обычный новый ход: цитата теряет контекст
-// своей сессии, зато пользователь получает ответ.
-function turnWithoutInputResponses(
-  input: unknown,
-): Record<string, unknown> | null {
-  if (!isRecord(input)) return null;
-  if (!Array.isArray(input.inputResponses) || input.inputResponses.length === 0)
-    return null;
-  const message = input.message;
-  const hasMessage =
-    typeof message === "string"
-      ? message.trim().length > 0
-      : Array.isArray(message) && message.length > 0;
-  if (!hasMessage) return null;
-  const newTurn = { ...input };
-  delete newTurn.inputResponses;
-  return newTurn;
+function telegramReroute(body: unknown): TelegramReroute | null {
+  const update = parseTelegramUpdate(body);
+  if (update?.kind !== "message") return null;
+  const message = update.message;
+  if (message.replyToMessage?.from?.isBot !== true) return null;
+  const text = message.text || message.caption;
+  if (text.trim().length === 0 && message.attachments.length === 0) return null;
+  const privateChat = message.chat.type === "private";
+  return {
+    message: text,
+    state: {
+      botUsername: null,
+      chatId: message.chat.id,
+      chatType: message.chat.type,
+      conversationId: privateChat ? null : message.replyToMessage.messageId,
+      hitlCallbacks: {},
+      messageThreadId: message.messageThreadId ?? null,
+      nextHitlCallbackId: 0,
+      pendingAuthMessageIds: {},
+      pendingFreeformReplies: {},
+      triggeringUserId: message.from?.id ?? null,
+    },
+  };
 }
 
 function hasValidWebhookSecret(request: Request): boolean {
@@ -163,9 +175,7 @@ export function wrapTelegramQueueOnMessage(
   };
 }
 
-async function metadataFromRequest(
-  request: Request,
-): Promise<{ receipt: string | null; updateId: number | null }> {
+async function metadataFromRequest(request: Request): Promise<RequestMetadata> {
   try {
     const body: unknown = await request.clone().json();
     const receipt =
@@ -174,6 +184,7 @@ async function metadataFromRequest(
         : undefined;
     return {
       receipt: validReceipt(receipt) ? receipt : null,
+      reroute: telegramReroute(body),
       updateId:
         isRecord(body) &&
         typeof body.update_id === "number" &&
@@ -183,7 +194,7 @@ async function metadataFromRequest(
           : null,
     };
   } catch {
-    return { receipt: null, updateId: null };
+    return { receipt: null, reroute: null, updateId: null };
   }
 }
 
@@ -280,7 +291,7 @@ export async function handleAcceptedTelegramWebhook<TState>(
   args: RouteHandlerArgs<TState>,
   options: AcceptedWebhookOptions = {},
 ): Promise<Response> {
-  const { receipt, updateId } = await metadataFromRequest(request);
+  const { receipt, reroute, updateId } = await metadataFromRequest(request);
   const authenticated = hasValidWebhookSecret(request);
   const botId = configuredBotId();
   const completedFile =
@@ -303,42 +314,62 @@ export async function handleAcceptedTelegramWebhook<TState>(
     let closedSession = false;
     const updateLabel = updateId === null ? "unknown" : String(updateId);
 
-    const wrappedArgs: RouteHandlerArgs<TState> = {
-      ...args,
-      send: async (...sendArgs: Parameters<typeof args.send>) => {
-        try {
-          const session = await args.send(...sendArgs);
-          accepted = true;
-          return session;
-        } catch (error) {
-          if (!isClosedSessionError(error)) throw error;
-          const [input, ...rest] = sendArgs;
-          const newTurn = turnWithoutInputResponses(input);
-          if (newTurn === null) {
-            closedSession = true;
-            throw error;
-          }
-          console.error(
-            `[telegram] reply to a closed session; delivering as a new message (update ${updateLabel})`,
-          );
-          try {
-            const session = await args.send(newTurn, ...rest);
+    const wrappedFrom: RouteHandlerArgs<TState>["from"] = (address) => {
+      const source = args.from(address);
+      const send: ChannelSource<TState>["send"] = async (message, options) => {
+        const active = await source.send(message, {
+          ...options,
+          turnPolicy: telegramTurnPolicy(),
+        });
+        accepted = true;
+        return active;
+      };
+      const respond: ChannelSource<TState>["respond"] = async (
+        inputResponses,
+        options,
+      ) => {
+        const active = await args.resolveSession(address);
+        if (active !== undefined) {
+          const result = await active.respond(inputResponses, {
+            auth: options.auth,
+            ...(options.context === undefined
+              ? {}
+              : { context: options.context }),
+            ...(options.outputSchema === undefined
+              ? {}
+              : { outputSchema: options.outputSchema }),
+          });
+          if (result.status === "accepted") {
             accepted = true;
-            return session;
-          } catch (rerouteError) {
-            // Новый ход упал сам по себе — это уже не про закрытую сессию, а про
-            // недоступную eve. Терять сообщение владельца нельзя (ADR-0002): ответ
-            // остаётся транзиентным 503, мост сохраняет апдейт и повторит его.
-            // Терминальным остаётся только тот же класс закрытой сессии.
-            closedSession = isClosedSessionError(rerouteError);
-            console.error(
-              `[telegram] new message for a closed session was not accepted (update ${updateLabel}):`,
-              rerouteError,
-            );
-            throw error;
+            return args.attachSession(result.sessionId);
           }
         }
-      },
+
+        if (reroute === null) {
+          closedSession = true;
+          throw new Error("Telegram response targeted an inactive session");
+        }
+        console.error(
+          `[telegram] reply to a closed session; delivering as a new message (update ${updateLabel})`,
+        );
+        return send(reroute.message, {
+          ...options,
+          state: reroute.state as TState,
+        } as Parameters<ChannelSource<TState>["send"]>[1]);
+      };
+      return {
+        cancel: source.cancel.bind(source),
+        clear: source.clear.bind(source),
+        compact: source.compact.bind(source),
+        reset: source.reset.bind(source),
+        respond,
+        send,
+      };
+    };
+
+    const wrappedArgs: RouteHandlerArgs<TState> = {
+      ...args,
+      from: wrappedFrom,
       waitUntil: (task: Promise<unknown>) => {
         background.push(Promise.resolve(task));
       },
@@ -367,9 +398,6 @@ export async function handleAcceptedTelegramWebhook<TState>(
         },
       });
     }
-    // Терминальный класс: сессия под цитатой закрыта, а новым ходом это сообщение
-    // доставить не удалось. Ретрай бессмыслен и вешал бы мост (issue #203), поэтому
-    // ответ отличается от транзиентного 503 — мост хоронит апдейт по этому заголовку.
     if (closedSession) {
       return new Response("Telegram reply targeted a closed session", {
         status: 409,

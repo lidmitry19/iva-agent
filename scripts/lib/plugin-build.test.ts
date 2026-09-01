@@ -174,7 +174,7 @@ test("the mount eve reads names the plugin package and reads its config at load"
   // того же имени по относительному спецификатору.
   assert.match(
     source,
-    /^import extension from "\.\.\/\.\.\/plugins\/my-tool\/sh\.iva";$/mu,
+    /^import extension from "\.\.\/\.\.\/plugins\/my-tool\/sh\.iva\/\.";$/mu,
   );
   assert.match(
     source,

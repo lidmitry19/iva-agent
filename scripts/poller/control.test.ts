@@ -11,7 +11,7 @@ type CaptureState = { flow: unknown; awaitText?: unknown };
 type CancelCall = {
   url: string;
   secret: string;
-  continuationToken: string;
+  sessionId: string;
   turnId?: string;
 };
 type ControlUpdate = Record<string, unknown>;
@@ -78,8 +78,6 @@ const chat = { id: 7, type: "private" };
 function runningTurn(overrides: Record<string, unknown> = {}) {
   status.setChatStatus("7:", {
     status: "running",
-    // Namespaced-токен пишут версии до фикса #110 — наружу обязан уйти channel-local.
-    continuationToken: "telegram:7::",
     sessionId: "session-1",
     turnId: "turn-1",
     ...overrides,
@@ -215,8 +213,7 @@ test("the ⏹ Stop button cancels through the channel route, never through Eve",
     {
       url: CANCEL_ROUTE,
       secret: "test-secret",
-      // Токен нормализован: reset/cancel-роуты клеят имя канала сами (#110).
-      continuationToken: "7::",
+      sessionId: "session-1",
       turnId: "turn-1",
     },
   ]);
@@ -235,7 +232,7 @@ test("/stop takes the same door and stays silent while the status message speaks
     {
       url: CANCEL_ROUTE,
       secret: "test-secret",
-      continuationToken: "7::",
+      sessionId: "session-2",
       turnId: "turn-2",
     },
   ]);
@@ -259,11 +256,9 @@ test("Stop on an idle chat explains itself and never calls cancel", async () => 
   assert.deepEqual(replies, [[7, "Сейчас ничего не выполняется."]]);
 });
 
-test("a running turn without a continuation token is not cancellable", async () => {
-  // Раннее статус-сообщение: ход уже помечен running, но turn.started ещё не записал токен.
+test("an early running status without a session is not cancellable", async () => {
   status.setChatStatus("7:", {
     status: "running",
-    continuationToken: null,
     sessionId: null,
     turnId: null,
     ingressId: "ingress-1",

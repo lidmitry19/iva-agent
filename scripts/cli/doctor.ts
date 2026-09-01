@@ -1,5 +1,11 @@
 import { existsSync, readFileSync, readdirSync, statfsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+// CLI обязан грузиться без authored tree и без "#lib"-маппинга
+// (scripts/cli/entrypoints.test.ts), поэтому run-status и telegram-queue
+// подгружаются динамически в самой проверке, а здесь — только типы.
+import type { listChatStatuses } from "../../agent/lib/run-status.ts";
+import type { TelegramQueueDocument } from "../lib/telegram-queue.ts";
 import { pluginDirectory, pluginMount } from "../lib/plugin-build.ts";
 import { tryLoadPluginCore } from "../lib/plugin-core.ts";
 import { leftoverPluginDirs, pluginReadProblem } from "./plugin-cli-context.ts";
@@ -40,6 +46,9 @@ type DoctorDependencies = {
   readonly exit?: (code: number) => unknown;
   readonly log?: (...args: unknown[]) => void;
   readonly nodeVersion?: string;
+  readonly telegramInboxFile?: string;
+  readonly telegramQueueFile?: string;
+  readonly listChatStatusesImpl?: typeof listChatStatuses;
 };
 
 type RollupEntry = {
@@ -51,6 +60,60 @@ type RollupStatus = Record<string, RollupEntry | null | undefined>;
 
 /** Сколько ждём `/health` прокси: он на loopback, и медленный ответ — уже симптом. */
 const HEALTH_TIMEOUT_MS = 1500;
+const WORKFLOW_RUNNING_LIMIT = 5;
+
+type WorkflowStoreReport = {
+  readonly runs: Readonly<Record<string, number>>;
+  readonly hookFiles: number;
+  readonly unreadable: number;
+};
+
+function workflowStoreReport(root: string): WorkflowStoreReport {
+  const store = join(root, ".eve", ".workflow-data");
+  const entries = (directory: string) => {
+    try {
+      return readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  };
+  const runs: Record<string, number> = {};
+  let unreadable = 0;
+  for (const entry of entries(join(store, "runs"))) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const file = join(store, "runs", entry.name);
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+      const status = (parsed as { status?: unknown } | null)?.status;
+      if (typeof status !== "string" || status.length === 0) {
+        unreadable++;
+        continue;
+      }
+      runs[status] = (runs[status] ?? 0) + 1;
+    } catch {
+      unreadable++;
+    }
+  }
+  const hookFiles = entries(join(store, "hooks")).filter(
+    (entry) => entry.isFile() && entry.name.endsWith(".json"),
+  ).length;
+  return { runs, hookFiles, unreadable };
+}
+
+function formatWorkflowStore(report: WorkflowStoreReport): string {
+  const statuses = Object.entries(report.runs).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const total = statuses.reduce((count, [, value]) => count + value, 0);
+  const details =
+    statuses.length === 0
+      ? ""
+      : ` (${statuses.map(([status, count]) => `${status} ${count}`).join(", ")})`;
+  const unreadable =
+    report.unreadable > 0 ? `, ${report.unreadable} unreadable` : "";
+  return `${total} runs${details}; ${report.hookFiles} hook files${unreadable}`;
+}
 
 /** Free bytes in the short units used by the installation report. */
 function formatFreeSpace(bytes: number): string {
@@ -98,6 +161,7 @@ export function createDoctorCommand(
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
   const nodeVersion = dependencies.nodeVersion ?? process.versions.node;
+  const listStatusesOverride = dependencies.listChatStatusesImpl;
 
   return async function cmdDoctor(): Promise<void> {
     let okN = 0;
@@ -110,6 +174,12 @@ export function createDoctorCommand(
     // Одна выкладка данных на весь прогон: каталог не меняется под ногами, а
     // каждый лишний вызов — это ещё одно чтение .env ради того же ответа.
     const dataDirectory = dataDirAbs(env);
+    const telegramInboxFile =
+      dependencies.telegramInboxFile ??
+      join(dataDirectory, "telegram-inbox.json");
+    const telegramQueueFile =
+      dependencies.telegramQueueFile ??
+      join(dataDirectory, "telegram-queue.json");
 
     // 1. Node ≥24
     const major = parseInt(nodeVersion.split(".")[0], 10);
@@ -265,6 +335,26 @@ export function createDoctorCommand(
         "systemd unavailable (not Linux) — skipping service and timer checks",
       );
       return finish();
+    }
+
+    try {
+      const workflow = workflowStoreReport(ROOT);
+      const running = workflow.runs.running ?? 0;
+      const report = `workflow store: ${formatWorkflowStore(workflow)}`;
+      if (running > WORKFLOW_RUNNING_LIMIT) {
+        warn(
+          `${report} — running count ${running} exceeds ${WORKFLOW_RUNNING_LIMIT}`,
+        );
+        warnN++;
+      } else {
+        ok(report);
+        okN++;
+      }
+    } catch (error) {
+      warn(
+        `workflow store unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      warnN++;
     }
 
     // 4. Units installed
@@ -485,7 +575,9 @@ export function createDoctorCommand(
         continue;
       }
       const artifactError =
-        record.state === "success" ? verifyNightArtifacts(record.artifacts) : null;
+        record.state === "success"
+          ? verifyNightArtifacts(record.artifacts)
+          : null;
       if (record.state === "success" && !artifactError) {
         ok(
           `night health ${job}: success (${night?.runId}, ${targetDate}${record.mode ? `, ${record.mode}` : ""})`,
@@ -512,12 +604,123 @@ export function createDoctorCommand(
         ok("Bitrix unit uses the package CLI entrypoint");
         okN++;
       } else {
-        bad("Bitrix unit has no valid package CLI entrypoint — run: iva doctor");
+        bad(
+          "Bitrix unit has no valid package CLI entrypoint — run: iva doctor",
+        );
         badN++;
       }
     } catch {
       warn("Bitrix unit is not installed");
       warnN++;
+    }
+
+    // The queue loader normally repairs pending/corrupt files. Doctor only observes them,
+    // so its injected file operations suppress recovery and quarantine writes.
+    let queueModule: typeof import("../lib/telegram-queue.ts") | null = null;
+    try {
+      queueModule = await import("../lib/telegram-queue.ts");
+    } catch {
+      // Без "#lib"-маппинга (урезанная установка) модуль очередей недоступен —
+      // проверка затора моста в этой среде честно пропускается.
+    }
+    const bridgeDocuments: TelegramQueueDocument[] = [];
+    let bridgeUnreadable = false;
+    if (queueModule !== null) {
+      const { loadQueueFile, TELEGRAM_QUEUE_ACK_PENDING_SUFFIX } = queueModule;
+      const loadBridgeQueue = async (file: string) => {
+        const raw = await readFile(file, "utf8");
+        if (raw.length === 0) return null;
+        return (
+          await loadQueueFile(file, {
+            strict: true,
+            readFileImpl: async (candidate, encoding) => {
+              if (candidate.endsWith(TELEGRAM_QUEUE_ACK_PENDING_SUFFIX)) {
+                throw Object.assign(
+                  new Error("pending recovery is read-only"),
+                  { code: "ENOENT" },
+                );
+              }
+              if (candidate === file) return raw;
+              return readFile(candidate, encoding);
+            },
+            renameImpl: () => Promise.resolve(),
+          })
+        ).document;
+      };
+      for (const file of [telegramInboxFile, telegramQueueFile]) {
+        try {
+          const document = await loadBridgeQueue(file);
+          if (document) bridgeDocuments.push(document);
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException | null | undefined)?.code ===
+            "ENOENT"
+          ) {
+            continue;
+          }
+          warn(
+            `bridge backlog: ${file} unreadable — check: journalctl --user -u iva-telegram-poll`,
+          );
+          warnN++;
+          bridgeUnreadable = true;
+        }
+      }
+    }
+    let statuses: ReturnType<typeof listChatStatuses> = [];
+    let staleRunMs: number | null = null;
+    try {
+      const runStatus = await import("../../agent/lib/run-status.ts");
+      statuses = (listStatusesOverride ?? runStatus.listChatStatuses)();
+      staleRunMs = runStatus.RUN_STALE_MS;
+    } catch {
+      // Authored tree или run-status каталог недоступны (CLI обязан грузиться
+      // и без них) — протухшие чаты в этой среде проверить нечем.
+    }
+    const checkedAt = now();
+    const stuckChats =
+      staleRunMs === null
+        ? 0
+        : statuses.filter(
+            ({ status }) =>
+              status.status === "running" &&
+              (typeof status.updatedAt !== "number" ||
+                checkedAt - status.updatedAt > staleRunMs),
+          ).length;
+    let itemCount = 0;
+    let oldestEnqueuedAt: number | null = null;
+    for (const document of bridgeDocuments) {
+      if (queueModule === null) break;
+      for (const key of queueModule.queueKeys(document)) {
+        for (const item of document.queues[key]) {
+          itemCount++;
+          if (
+            typeof item.enqueuedAt === "number" &&
+            Number.isFinite(item.enqueuedAt) &&
+            (oldestEnqueuedAt === null || item.enqueuedAt < oldestEnqueuedAt)
+          ) {
+            oldestEnqueuedAt = item.enqueuedAt;
+          }
+        }
+      }
+    }
+    const oldestAgeMs =
+      itemCount > 0 && oldestEnqueuedAt !== null
+        ? checkedAt - oldestEnqueuedAt
+        : 0;
+    if (stuckChats > 0 || oldestAgeMs > 600_000) {
+      const details = [
+        ...(stuckChats > 0 ? [`${stuckChats} stuck chat(s)`] : []),
+        ...(oldestAgeMs > 600_000
+          ? [`oldest item ${Math.round(oldestAgeMs / 60_000)}m old`]
+          : []),
+      ].join(", ");
+      warn(
+        `bridge backlog: ${details} — check: journalctl --user -u iva-telegram-poll; use /stop or iva restart`,
+      );
+      warnN++;
+    } else if (!bridgeUnreadable) {
+      ok("bridge backlog: clear");
+      okN++;
     }
 
     // 6. Vault + git origin (report only — we don't initiate git operations)

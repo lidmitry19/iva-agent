@@ -18,6 +18,12 @@ function boot(t: { after(fn: () => void): void }): string[] {
   return lines;
 }
 
+test("eve keeps the startup hook active without recording payloads", () => {
+  assert.equal(typeof instrumentation.setup, "function");
+  assert.equal(instrumentation.recordInputs, false);
+  assert.equal(instrumentation.recordOutputs, false);
+});
+
 test("a start that is an update's health probe migrates nothing", (t) => {
   process.env[PROBE_FLAG] = "1";
   process.env.ASSISTANT_TIMEZONE = "Asia/Tashkent";

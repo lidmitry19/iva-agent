@@ -40,6 +40,10 @@ export function dispatchCli(
     help();
     return exit(commandName ? 1 : 0);
   }
+  if (rest.includes("--help") || rest.includes("-h")) {
+    help();
+    return exit(0);
+  }
   return Promise.resolve(command(rest)).catch((error: unknown) => {
     const message =
       (error as { readonly message?: string } | null | undefined)?.message ||

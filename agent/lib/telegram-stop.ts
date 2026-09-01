@@ -14,7 +14,6 @@ import { requestTelegramCancel } from "./telegram-cancel-client.ts";
 import { localCancelUrl } from "./telegram-cancel-route.ts";
 import { allowedTelegramUsers } from "./telegram-allowlist.ts";
 import { chatKeyOf, getChatStatus, isRunning } from "./run-status.ts";
-import { toChannelLocalToken } from "./telegram-continuation-token.ts";
 import { tr } from "./i18n.ts";
 import { isPrivateTelegramChat } from "./telegram-private-chat.ts";
 import { traceStop } from "./trace.ts";
@@ -23,7 +22,7 @@ export type StopOutcome = "requested" | "idle" | "failed";
 export type StopCancelRequest = {
   url: string;
   secret: string;
-  continuationToken: string;
+  sessionId: string;
   turnId?: string;
 };
 export type StopCallbackQuery = {
@@ -85,11 +84,11 @@ export async function requestTurnCancel(
   if (chatKey === null || chatKey.length === 0 || !runningImpl(chatKey))
     return finish("idle", chatKey ? getStatusImpl(chatKey) : null);
   const status = getStatusImpl(chatKey);
-  const storedToken = status?.continuationToken;
+  const sessionId = status?.sessionId;
   if (
     status?.status !== "running" ||
-    typeof storedToken !== "string" ||
-    storedToken.length === 0
+    typeof sessionId !== "string" ||
+    sessionId.length === 0
   ) {
     return finish("idle", status);
   }
@@ -103,8 +102,7 @@ export async function requestTurnCancel(
     await cancelImpl({
       url,
       secret,
-      // Статусы, записанные до фикса #110, хранят токен с именем канала впереди.
-      continuationToken: toChannelLocalToken(storedToken),
+      sessionId,
       // Гард от запоздалого нажатия: несовпавший turnId eve глотает как no-op.
       ...(typeof turnId === "string" && turnId.length > 0 ? { turnId } : {}),
     });

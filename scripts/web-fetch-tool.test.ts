@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { webFetch } from "eve/tools/web_fetch";
 
 // Тул зовёт штатный web_fetch eve, а тот — глобальный fetch (с собственным
 // dispatcher-ом undici). Поэтому сеть подменяется globalThis.fetch на время
@@ -62,6 +63,19 @@ async function withFetch<T>(
   }
 }
 
+async function withFrameworkExecute<T>(
+  impl: typeof webFetch.execute,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const original = webFetch.execute.bind(webFetch);
+  webFetch.execute = impl;
+  try {
+    return await fn();
+  } finally {
+    webFetch.execute = original;
+  }
+}
+
 // console.error гейта — часть контракта (одна запись на вызов), но в выводе
 // тестов это шум; собираем строки и проверяем их явно.
 async function withCapturedErrors<T>(
@@ -111,6 +125,19 @@ test("обычная страница доезжает целиком и без 
   assert.match(value.content ?? "", /Курс валют/u);
   assert.match(value.content ?? "", /12 500 сум/u);
   assert.equal(value.truncated, false);
+  assert.deepEqual(logs, []);
+});
+
+test("текст ошибки фреймворка на успешной странице остаётся контентом", async () => {
+  const { value, logs } = await fetchPage(
+    new Response("Request failed with status code: 503", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    }),
+  );
+
+  assert.equal(value.error, undefined);
+  assert.equal(value.content, "Request failed with status code: 503");
   assert.deepEqual(logs, []);
 });
 
@@ -223,6 +250,29 @@ test("HTTP-ошибка провайдера превращается в error �
   const { value } = await fetchPage(new Response("nope", { status: 500 }));
 
   assert.match(value.error ?? "", /status code: 500/u);
+});
+
+test("результат фреймворка без числового status возвращается как error", async () => {
+  const { value } = await withCapturedErrors(async () =>
+    withFrameworkExecute(
+      (() =>
+        Promise.resolve({
+          content: "успешная 500-страница",
+          contentType: "text/html",
+          status: undefined,
+          truncated: false,
+          url: "https://example.com/broken",
+        })) as unknown as typeof webFetch.execute,
+      async () =>
+        (await webFetchTool.execute(
+          { url: "https://example.com/broken" },
+          context(),
+        )) as FetchResult,
+    ),
+  );
+
+  assert.match(value.error ?? "", /no numeric status/u);
+  assert.equal(value.content, undefined);
 });
 
 test("таймаут вызова возвращается ошибкой", async () => {

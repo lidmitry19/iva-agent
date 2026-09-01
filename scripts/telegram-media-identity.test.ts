@@ -11,6 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import type { ChannelSource, RouteHandlerArgs, Session } from "eve/channels";
+import type { TelegramChannelState } from "eve/channels/telegram";
 import { addTelegramQueueReceipt } from "../agent/lib/telegram-acceptance.ts";
 
 const root = mkdtempSync(join(tmpdir(), "iva-media-identity-test-"));
@@ -32,7 +34,7 @@ let visionText = "derived once";
 let visionStatus = 200;
 let transcriptText = "transcribed once";
 let transcriptStatus = 200;
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init) => {
   const url = input instanceof Request ? input.url : String(input);
   if (url.endsWith("/getFile")) {
     return Response.json({
@@ -45,6 +47,21 @@ globalThis.fetch = async (input) => {
     return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
   }
   if (url.endsWith("/chat/completions")) {
+    const requestBody =
+      typeof init?.body === "string"
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : {};
+    if (JSON.stringify(requestBody).includes("What colour is this image?")) {
+      return Response.json({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: "blue", role: "assistant" },
+          },
+        ],
+        usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
+      });
+    }
     counts.vision++;
     if (visionStatus !== 200)
       return new Response("provider unavailable", { status: visionStatus });
@@ -69,28 +86,15 @@ const channel = (
     telegramTestModule
   )) as typeof import("../agent/channels/telegram.ts")
 ).default;
-type AcceptedRoute = {
-  transport: string;
-  handler: (
-    request: Request,
-    args: {
-      send: () => Promise<{ id: string }>;
-      resolveActiveSession: () => Promise<undefined>;
-      cancel: () => Promise<{ status: string }>;
-      reset: () => Promise<{ status: string }>;
-      getSession: () => never;
-      receive: () => Promise<never>;
-      params: Record<string, string>;
-      waitUntil: () => void;
-      requestIp: string;
-    },
-  ) => Promise<Response>;
-};
-const route = channel.routes.find(
-  (candidate: { path: string }) =>
-    candidate.path === "/eve/v1/telegram/accepted",
-) as unknown as AcceptedRoute | undefined;
-assert.ok(route && route.transport !== "websocket");
+const route = (() => {
+  const candidate = channel.routes.find(
+    (current) => current.path === "/eve/v1/telegram/accepted",
+  );
+  if (!candidate || candidate.transport === "websocket") {
+    throw new Error("Telegram channel did not expose its accepted route");
+  }
+  return candidate;
+})();
 
 after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -130,8 +134,57 @@ type TestUpdate =
   ReturnType<typeof mediaUpdate> | ReturnType<typeof voiceUpdate>;
 type MediaCache = Record<string, { transcript?: string; vision?: string }>;
 
+const unusedRouteOperation = () => {
+  throw new Error("not used by the Telegram media path");
+};
+
+function fakeSession(id: string): Session {
+  return {
+    id,
+    send: unusedRouteOperation,
+    respond: unusedRouteOperation,
+    cancel: unusedRouteOperation,
+    compact: unusedRouteOperation,
+    clear: unusedRouteOperation,
+    reset: unusedRouteOperation,
+    getEventStream: unusedRouteOperation,
+    getStreamTailIndex: unusedRouteOperation,
+  };
+}
+
 async function deliver(update: TestUpdate) {
-  const response = await route!.handler(
+  const session = fakeSession(`session-${update.update_id}`);
+  const source: ChannelSource<TelegramChannelState> = {
+    send: async (message, options) => {
+      void message;
+      void options;
+      counts.turns++;
+      return session;
+    },
+    respond: async (inputResponses, options) => {
+      void inputResponses;
+      void options;
+      counts.turns++;
+      return session;
+    },
+    cancel: unusedRouteOperation,
+    compact: unusedRouteOperation,
+    clear: unusedRouteOperation,
+    reset: unusedRouteOperation,
+  };
+  const routeArgs: RouteHandlerArgs<TelegramChannelState> = {
+    attachSession: () => session,
+    from: (address) => {
+      void address;
+      return source;
+    },
+    resolveSession: async () => session,
+    to: unusedRouteOperation,
+    params: {},
+    waitUntil: () => {},
+    requestIp: "127.0.0.1",
+  };
+  const response = await route.handler(
     new Request("http://iva.test/eve/v1/telegram/accepted", {
       method: "POST",
       headers: {
@@ -140,24 +193,7 @@ async function deliver(update: TestUpdate) {
       },
       body: JSON.stringify(addTelegramQueueReceipt(update)),
     }),
-    {
-      send: async () => {
-        counts.turns++;
-        return { id: `session-${update.update_id}` };
-      },
-      resolveActiveSession: async () => undefined,
-      cancel: async () => ({ status: "no_active_turn" }),
-      reset: async () => ({ status: "no_active_session" }),
-      getSession: () => {
-        throw new Error("not used");
-      },
-      receive: async () => {
-        throw new Error("not used");
-      },
-      params: {},
-      waitUntil: () => {},
-      requestIp: "127.0.0.1",
-    },
+    routeArgs,
   );
   assert.equal(response.status, 204);
   return response.headers.get("x-iva-telegram-acceptance");

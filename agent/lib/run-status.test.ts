@@ -54,6 +54,30 @@ test("legacy whole-map is read and each touched key migrates independently", () 
   assert.equal(status.getChatStatus("legacy-a:")?.sessionId, undefined);
 });
 
+test("the first normal rewrite removes the retired routing field", () => {
+  const legacy = join(dataDir, "run-status.json");
+  const key = "legacy-routing:";
+  writeFileSync(
+    legacy,
+    JSON.stringify({
+      [key]: {
+        status: "running",
+        sessionId: "session-current",
+        [status.RETIRED_SESSION_ROUTING_FIELD]: "retired-value",
+      },
+    }),
+  );
+
+  const rewritten = status.setChatStatus(key, { status: "idle" });
+
+  assert.equal(rewritten[status.RETIRED_SESSION_ROUTING_FIELD], undefined);
+  assert.equal(
+    status.getChatStatus(key)?.[status.RETIRED_SESSION_ROUTING_FIELD],
+    undefined,
+  );
+  assert.equal(rewritten.sessionId, "session-current");
+});
+
 test("distinct chats survive bounded concurrent writers", async () => {
   const workers = 8;
   const keysPerWorker = 100;

@@ -18,6 +18,7 @@ import {
   publishTelegramTurnStarted,
   type TurnHeartbeat,
 } from "./telegram-turn-start.ts";
+import { RETIRED_SESSION_ROUTING_FIELD } from "./run-status.ts";
 
 // Старт хода — единственное место, где ключ апдейта сшивается с turnId (ADR-0010).
 // Каталог данных временный: писатель журнала резолвит его на каждой записи.
@@ -70,6 +71,7 @@ function statusStore(initial: Status = {}, now: () => number = Date.now) {
       generation: previousGeneration + 1,
       updatedAt: now(),
     };
+    delete value[RETIRED_SESSION_ROUTING_FIELD];
     for (const key of Object.keys(value))
       if (value[key] === null) delete value[key];
     return value;
@@ -115,7 +117,6 @@ void test("a trusted dispatch creates one status before a fake 20-second pre-tur
 
   const adopted = await publishTelegramTurnStarted({
     chatKey: "1:",
-    continuationToken: "1::",
     sessionId: "session-1",
     turnId: "turn-1",
     now: () => nowMs,
@@ -156,7 +157,6 @@ void test("working-status failure never blocks turn adoption", async () => {
   });
   const adopted = await publishTelegramTurnStarted({
     chatKey: "1:",
-    continuationToken: "1::",
     sessionId: "session-1",
     turnId: "turn-1",
     getStatusImpl: store.get,
@@ -198,7 +198,6 @@ void test("a reset racing a late early-status response cannot revive the old ses
   await publishing;
   const adopted = await publishTelegramTurnStarted({
     chatKey: "1:",
-    continuationToken: "1::",
     sessionId: "session-old",
     turnId: "turn-old",
     getStatusImpl: store.get,
@@ -563,7 +562,6 @@ void test("a queued reply's turn starting on an idle chat sends its own stoppabl
 
   const started = await publishTelegramTurnStarted({
     chatKey: "1:",
-    continuationToken: "1::",
     sessionId: "session-B",
     turnId: "turn-B",
     now: () => 20_000,
@@ -596,7 +594,6 @@ void test("an indicator whose send raced the turn's own finish is removed, not l
 
   const starting = publishTelegramTurnStarted({
     chatKey: "1:",
-    continuationToken: "1::",
     sessionId: "session-C",
     turnId: "turn-C",
     getStatusImpl: store.get,
@@ -621,15 +618,14 @@ void test("an indicator whose send raced the turn's own finish is removed, not l
   assert.equal(store.get().statusMessageId, undefined);
 });
 
-void test("a namespaced token from Eve is stored channel-local (#110)", async () => {
-  // Реальное значение с прода: обработчики событий eve отдают токен с именем канала
-  // впереди. Если сохранить его как есть, /new сбрасывает "telegram:telegram:…" —
-  // владельца нет, ответ no_active_session, история продолжается.
-  const claimed = statusStore({ status: "idle" });
+void test("turn start retires a legacy routing field on both claim paths", async () => {
+  const claimed = statusStore({
+    status: "idle",
+    [RETIRED_SESSION_ROUTING_FIELD]: "legacy",
+  });
   assert.equal(
     await publishTelegramTurnStarted({
       chatKey: "7091451031:",
-      continuationToken: "telegram:7091451031::",
       sessionId: "session-1",
       turnId: "turn-1",
       getStatusImpl: claimed.get,
@@ -637,10 +633,13 @@ void test("a namespaced token from Eve is stored channel-local (#110)", async ()
     }),
     true,
   );
-  assert.equal(claimed.get().continuationToken, "7091451031::");
+  assert.equal(claimed.get()[RETIRED_SESSION_ROUTING_FIELD], undefined);
+  assert.equal(claimed.get().sessionId, "session-1");
 
-  // Второй путь записи — усыновление хода, начатого ранним статусом моста.
-  const adopted = statusStore({ status: "idle" });
+  const adopted = statusStore({
+    status: "idle",
+    [RETIRED_SESSION_ROUTING_FIELD]: "legacy",
+  });
   await publishTelegramEarlyStatus({
     chatKey: "-1001:77",
     ingressId: "ingress-1",
@@ -651,7 +650,6 @@ void test("a namespaced token from Eve is stored channel-local (#110)", async ()
   assert.equal(
     await publishTelegramTurnStarted({
       chatKey: "-1001:77",
-      continuationToken: "telegram:-1001:77:42",
       sessionId: "session-2",
       turnId: "turn-2",
       getStatusImpl: adopted.get,
@@ -659,7 +657,8 @@ void test("a namespaced token from Eve is stored channel-local (#110)", async ()
     }),
     true,
   );
-  assert.equal(adopted.get().continuationToken, "-1001:77:42");
+  assert.equal(adopted.get()[RETIRED_SESSION_ROUTING_FIELD], undefined);
+  assert.equal(adopted.get().sessionId, "session-2");
 });
 
 void test("a live turn's heartbeat moves updatedAt and is throttled between events", () => {
@@ -779,7 +778,6 @@ void test("Trace: старт хода связывает ключ апдейта
 
   await publishTelegramTurnStarted({
     chatKey,
-    continuationToken: "telegram:931::",
     sessionId: "wrun_31",
     turnId: "turn_2",
     getStatusImpl: status.get,
@@ -812,7 +810,6 @@ void test("Trace: старт хода снимает состав памяти, 
 
   await publishTelegramTurnStarted({
     chatKey: "941:",
-    continuationToken: "telegram:941::",
     sessionId: "wrun_41",
     turnId: "turn_5",
     getStatusImpl: status.get,

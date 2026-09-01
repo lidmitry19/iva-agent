@@ -1,6 +1,6 @@
 {
   "name": "iva",
-  "version": "0.3.34",
+  "version": "0.4.0",
   "type": "module",
   "bin": {
     "iva": "bin/iva.mjs"
@@ -34,7 +34,7 @@
     "test:coverage": "node --test --test-concurrency=4 --experimental-test-coverage --test-coverage-include=\"agent/**/*.ts\" --test-coverage-include=\"scripts/**/*.ts\" --test-coverage-exclude=\"**/*.test.ts\" --test-coverage-exclude=\"scripts/fixtures/**/*.ts\" --test-coverage-lines=75 --test-coverage-branches=77 --test-coverage-functions=71 \"agent/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "test:security": "node --test agent/lib/eve-auth.test.ts scripts/lib/assistant-auth.test.ts scripts/lib/listener-security.test.ts scripts/lib/security-migration.test.ts",
     "test:update-ui": "node --test scripts/lib/update-ui.test.ts scripts/lib/update-check.test.ts",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package --error-on-fail"
   },
   "dependencies": {
     "@ai-sdk/openai": "4.0.15",
@@ -45,7 +45,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@vercel/connect": "0.2.2",
     "ai": "7.0.39",
-    "eve": "0.30.8",
+    "eve": "0.47.3",
     "just-bash": "^3.0.0",
     "zod": "4.4.3"
   },
