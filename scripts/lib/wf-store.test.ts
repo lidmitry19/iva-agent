@@ -14,11 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  conversationStateTargets,
   quarantineDir,
   quarantinePath,
   queuedInputTargets,
   resetStateTargets,
+  sessionStateTargets,
 } from "./wf-store.ts";
 
 void test("quarantineDir переименовывает стор в *.trash-<штамп> с содержимым", () => {
@@ -128,11 +128,9 @@ void test("одинаковый operation stamp не перезаписывае�
 void test("global reset plan includes workflow and all Telegram control-state targets", () => {
   const root = "/srv/iva";
   const data = "/var/lib/iva";
-  assert.deepEqual(conversationStateTargets(root, data), [
+  assert.deepEqual(sessionStateTargets(root, data), [
     "/srv/iva/.eve/.workflow-data",
     "/srv/iva/.workflow-data",
-    "/var/lib/iva/run-status.d",
-    "/var/lib/iva/run-status.json",
   ]);
   assert.deepEqual(queuedInputTargets(data), [
     "/var/lib/iva/telegram-queue.json",

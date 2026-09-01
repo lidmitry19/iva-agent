@@ -1,6 +1,6 @@
 // Карантин вместо необратимого rm для reset-состояния: rename в соседний
 // *.trash-<штамп> (атомарно в пределах одной ФС) с ротацией старых карантинов.
-// Даёт откат после случайного reset: припаркованные диалоги возвращаются обратным
+// Даёт откат после случайного reset: припаркованные сессии возвращаются обратным
 // переименованием, пока карантин не вытеснен ротацией.
 import {
   chmodSync,
@@ -60,11 +60,8 @@ export function quarantineDir(dir: string, stamp?: string): string | null {
   return quarantinePath(dir, stamp);
 }
 
-/** State that an update retires so every conversation starts with fresh context. */
-export function conversationStateTargets(
-  root: string,
-  dataDir: string,
-): string[] {
+/** Session state that an update retires before the new version starts. */
+export function sessionStateTargets(root: string, dataDir: string): string[] {
   let rollupSessions: string[];
   try {
     rollupSessions = readdirSync(dataDir)
@@ -78,8 +75,6 @@ export function conversationStateTargets(
   return [
     join(root, ".eve", ".workflow-data"),
     join(root, ".workflow-data"),
-    join(dataDir, "run-status.d"),
-    join(dataDir, "run-status.json"),
     ...rollupSessions,
   ];
 }
@@ -92,7 +87,9 @@ export function queuedInputTargets(dataDir: string): string[] {
 // Полный reset должен атомарно вывести из обращения workflow, status и очередь.
 export function resetStateTargets(root: string, dataDir: string): string[] {
   return [
-    ...conversationStateTargets(root, dataDir),
+    ...sessionStateTargets(root, dataDir),
+    join(dataDir, "run-status.d"),
+    join(dataDir, "run-status.json"),
     ...queuedInputTargets(dataDir),
   ];
 }
