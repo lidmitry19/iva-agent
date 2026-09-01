@@ -180,14 +180,57 @@ void test("a refused Reminder send reports the Telegram error and exits one", as
 });
 
 void test("a session reset failure does not fail a delivered Reminder", async () => {
-  const remind = remindCommand("ok");
-  remind.failClose(new Error("reset unavailable"));
+  const sent: SendCall[] = [];
+  const resetReasons: string[] = [];
+  const messages: string[] = [];
+  const base = createCliRuntime(ROOT);
+  const cmdRemind = createRemindCommand(
+    {
+      ...base,
+      ok: (message) => messages.push(message),
+    },
+    {
+      createClient: () =>
+        Promise.resolve({
+          sessions: {
+            create: () =>
+              Promise.resolve({
+                response: {
+                  result: () =>
+                    Promise.resolve({
+                      status: "waiting",
+                      message: "Короткое напоминание",
+                    }),
+                },
+                session: {
+                  send: () => Promise.resolve(),
+                  reset: ({ reason }) => {
+                    resetReasons.push(reason);
+                    return Promise.reject(new Error("reset unavailable"));
+                  },
+                },
+              }),
+          },
+        }),
+      readEnv: () =>
+        Promise.resolve({
+          TELEGRAM_BOT_TOKEN: "bot-token",
+          TELEGRAM_DIGEST_CHAT_ID: "555",
+        }),
+      send: (bot, chat, md, options) => {
+        sent.push([bot, chat, md, options]);
+        return Promise.resolve({ ok: true, fellBack: false, error: "" });
+      },
+    },
+  );
 
-  await remind.cmdRemind(["Проверить", "задачу"]);
+  await cmdRemind(["Проверить", "задачу"]);
 
-  assert.equal(remind.sent[0][2], "Короткое напоминание");
-  assert.deepEqual(remind.closed, ["closed"]);
-  assert.deepEqual(remind.messages, ["Reminder sent to Telegram"]);
+  assert.deepEqual(resetReasons, ["Reminder finished"]);
+  assert.deepEqual(sent, [
+    ["bot-token", "555", "Короткое напоминание", { retryTransient: true }],
+  ]);
+  assert.deepEqual(messages, ["Reminder sent to Telegram"]);
 });
 
 void test("a missing token or chat fails before the agent turn", async () => {
