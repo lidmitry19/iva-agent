@@ -51,6 +51,10 @@ From Telegram, `/new` resets only the current chat or forum topic. `/restart` re
 
 After upgrading a legacy group with no recorded Eve token, send `/new` as a reply to Iva's latest message once. Future resets use the exact token stored by the new channel events.
 
+### Bot silent or stuck after an update
+
+An update now resets every open conversation before services restart. Each chat starts with fresh context; Vault and long-term History stay intact. Telegram messages queued while services were stopped are also preserved.
+
 ### Long or formatted message gets no reply
 
 Symptoms: short messages are answered, a long one (over 4096 characters) or one written in the Telegram editor is ignored, and `/restart` changes nothing.
