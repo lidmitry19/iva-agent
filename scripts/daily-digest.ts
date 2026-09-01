@@ -51,11 +51,14 @@ async function main(bot: string, chat: string): Promise<number> {
       trace: { session: response.sessionId, source: "digest" },
     });
     if (r.fellBack) {
-      const feedback = await session.send(
-        `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +
-          "format more simply next time: **bold**, `code`, lists, no raw HTML.",
-      );
-      await feedback.result();
+      try {
+        await session.send(
+          `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +
+            "format more simply next time: **bold**, `code`, lists, no raw HTML.",
+        );
+      } catch (error) {
+        console.error("digest: format feedback failed:", error);
+      }
     }
     if (!r.ok) {
       console.error("digest: Telegram send failed:", r.error);
