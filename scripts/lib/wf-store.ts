@@ -1,14 +1,19 @@
 // Карантин вместо необратимого rm для reset-состояния: rename в соседний
 // *.trash-<штамп> (атомарно в пределах одной ФС) с ротацией старых карантинов.
-// Даёт откат после случайного reset: припаркованные диалоги возвращаются обратным
+// Даёт откат после случайного reset: припаркованные сессии возвращаются обратным
 // переименованием, пока карантин не вытеснен ротацией.
 import {
   chmodSync,
+  closeSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { throughLink } from "./version-layout.ts";
@@ -60,14 +65,101 @@ export function quarantineDir(dir: string, stamp?: string): string | null {
   return quarantinePath(dir, stamp);
 }
 
-// Полный reset должен атомарно вывести из обращения и workflow, и Telegram control state.
-export function resetStateTargets(root: string, dataDir: string): string[] {
+/** Session state that an update retires before the new version starts. */
+export function sessionStateTargets(root: string, dataDir: string): string[] {
+  let rollupSessions: string[];
+  try {
+    rollupSessions = readdirSync(dataDir)
+      .filter((name) => /^rollup-session-.+\.json$/u.test(name))
+      .sort()
+      .map((name) => join(dataDir, name));
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) throw error;
+    rollupSessions = [];
+  }
   return [
     join(root, ".eve", ".workflow-data"),
     join(root, ".workflow-data"),
+    ...rollupSessions,
+  ];
+}
+
+function writeRunStatusAtomicSync(path: string, value: unknown): void {
+  const parent = dirname(path);
+  let temporaryPath = "";
+  let fileDescriptor: number | undefined;
+
+  for (let collision = 0; fileDescriptor === undefined; collision++) {
+    temporaryPath = join(
+      parent,
+      `.${basename(path)}.tmp-${process.pid}-${Date.now()}-${collision}`,
+    );
+    try {
+      fileDescriptor = openSync(temporaryPath, "wx", 0o600);
+    } catch (error) {
+      if (hasErrorCode(error, "EEXIST")) continue;
+      throw error;
+    }
+  }
+
+  try {
+    fchmodSync(fileDescriptor, 0o600);
+    writeFileSync(fileDescriptor, JSON.stringify(value), "utf8");
+    closeSync(fileDescriptor);
+    fileDescriptor = undefined;
+    renameSync(temporaryPath, path);
+    temporaryPath = "";
+  } finally {
+    if (fileDescriptor !== undefined) closeSync(fileDescriptor);
+    if (temporaryPath) rmSync(temporaryPath, { force: true });
+  }
+}
+
+/** Make every saved chat immediately reapable after an update clears sessions. */
+export function rewriteRunStatusesForUpdate(dataDir: string): void {
+  const dir = join(dataDir, "run-status.d");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const file = join(dir, name);
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      )
+        continue;
+      writeRunStatusAtomicSync(file, {
+        ...parsed,
+        status: "running",
+        updatedAt: 0,
+      });
+    } catch {
+      // One damaged chat record must not block the update or its healthy neighbors.
+    }
+  }
+}
+
+/** Inbound Telegram input belongs to reset, never to an update. */
+export function queuedInputTargets(dataDir: string): string[] {
+  return [join(dataDir, "telegram-queue.json")];
+}
+
+// Полный reset должен атомарно вывести из обращения workflow, status и очередь.
+export function resetStateTargets(root: string, dataDir: string): string[] {
+  return [
+    ...sessionStateTargets(root, dataDir),
     join(dataDir, "run-status.d"),
     join(dataDir, "run-status.json"),
-    join(dataDir, "telegram-queue.json"),
+    ...queuedInputTargets(dataDir),
   ];
 }
 

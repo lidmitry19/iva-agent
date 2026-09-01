@@ -1,15 +1,14 @@
 // Статус-сообщение хода: «Работаю…» с кнопкой [⏹ Стоп] и его уборка в терминале.
 // Это UI самого канала, не текст модели, поэтому мимо Outbox.
 //
-// turn.started шлёт статус и пишет running+continuationToken+turnId в run-status.
-// Нажатие кнопки (и /stop) ловит мост: он берёт из статуса токен и зовёт cancel-роут
+// turn.started шлёт статус и пишет running+sessionId+turnId в run-status.
+// Нажатие кнопки (и /stop) ловит Bridge: он берёт sessionId и зовёт cancel-роут
 // канала, а terminal-событие приводит статус в порядок: обычный финал удаляет
 // сообщение, отмена переписывает его на «Остановлено».
 //
 // Про eve модуль не знает: канал передаёт хендл Bot API структурно.
 import { tr } from "./i18n.ts";
 import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
-import { toChannelLocalToken } from "./telegram-continuation-token.ts";
 import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
 // В callback_data кладём только константу: лимит 64 байта не вмещает sessionId,
@@ -121,7 +120,6 @@ export async function enableWorkingStatusStop(
 // или переписать на «Остановлено» (отмена). Сбои уборки не критичны — глотаем.
 export async function finishTelegramStatus(
   channel: {
-    continuationToken: string;
     telegram: TelegramStatusHandle;
   },
   sessionId: string,
@@ -132,45 +130,46 @@ export async function finishTelegramStatus(
   const st = getChatStatus(key);
   // Compare and update happen under one per-chat lock. A reset can remove
   // sessionId after this read; a late terminal event then becomes a no-op.
-  if (
-    !setChatStatusIf(
-      key,
-      { sessionId },
-      {
-        status: "idle",
-        continuationToken: toChannelLocalToken(channel.continuationToken),
-        sessionId: null,
-        turnId: null,
-        statusMessageId: null,
-        ingressId: null,
-        ingressAt: null,
-        statusAt: null,
-        turnAt: null,
-        firstOutputAt: null,
-        latencyLogged: null,
-        ...(mode === "cancelled" ? { wasCancelled: true } : {}),
-      },
-    )
-  ) {
-    return false;
-  }
-  const msgId = st?.statusMessageId;
-  if (typeof msgId !== "number") return true;
-  try {
-    if (mode === "cancelled") {
-      await tg.request("editMessageText", {
-        chat_id: tg.chatId,
-        message_id: msgId,
-        text: stoppedText(),
-      });
-    } else {
-      await tg.request("deleteMessage", {
-        chat_id: tg.chatId,
-        message_id: msgId,
-      });
+  const casOk = setChatStatusIf(
+    key,
+    { sessionId },
+    {
+      status: "idle",
+      sessionId: null,
+      turnId: null,
+      statusMessageId: null,
+      ingressId: null,
+      ingressAt: null,
+      statusAt: null,
+      turnAt: null,
+      firstOutputAt: null,
+      latencyLogged: null,
+      ...(mode === "cancelled" ? { wasCancelled: true } : {}),
+    },
+  );
+  // Only touch Telegram when the pre-CAS snapshot was OUR session. A late
+  // terminal event from an old finished session must not delete another
+  // live session's Working… message in the same chat.
+  if (st?.sessionId === sessionId) {
+    const msgId = st.statusMessageId;
+    if (typeof msgId === "number") {
+      try {
+        if (mode === "cancelled") {
+          await tg.request("editMessageText", {
+            chat_id: tg.chatId,
+            message_id: msgId,
+            text: stoppedText(),
+          });
+        } else {
+          await tg.request("deleteMessage", {
+            chat_id: tg.chatId,
+            message_id: msgId,
+          });
+        }
+      } catch {
+        /* статус-сообщение не убралось — не критично */
+      }
     }
-  } catch {
-    /* статус-сообщение не убралось — не критично */
   }
-  return true;
+  return Boolean(casOk);
 }

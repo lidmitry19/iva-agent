@@ -108,7 +108,7 @@ export const compatibleThinkingEffort: CompatibleEffort | undefined =
 // Кастомный fetch: перед КАЖДЫМ запросом подставляет свежий Bearer + ChatGPT-Account-ID
 // (getAccessToken рефрешит истёкший токен) и форсит store:false — бэкенд подписки stateless,
 // историю eve шлёт целиком каждый ход. Тело патчим здесь же (точка правки, если бэкенд строже).
-const codexFetch: typeof fetch = async (input, init) => {
+export const codexFetch: typeof fetch = async (input, init) => {
   const headers = new Headers(init?.headers);
   for (const [k, v] of Object.entries(await codexAuthHeaders()))
     headers.set(k, v);
@@ -122,6 +122,9 @@ const codexFetch: typeof fetch = async (input, init) => {
       if (!isRecord(j)) throw new TypeError("Responses body is not an object");
       j.store = false;
       delete j.previous_response_id;
+      // eve 0.47+ инжектит это поле для моделей openai/*, приватный бэкенд подписки его не понимает
+      // и отвечает 400.
+      delete j.safety_identifier;
       // store:false → бэкенд ничего не персистит, поэтому любой server-side id в input — это эхо
       // прошлого ответа, которого на сервере уже нет: item_reference (ссылка без контента) и даже
       // echoed id у инлайн-item ловят "Item '<id>' not found. Items are not persisted...".

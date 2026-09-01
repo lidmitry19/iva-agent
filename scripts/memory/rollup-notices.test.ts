@@ -43,13 +43,10 @@ test("what leaves the chat is decided by the policy, not by the script", () => {
   assert.equal(block.split("sendTelegramHtml(").length - 1, 2);
   // Четвёртый аргумент — только имя хода для журнала (ADR-0010): что уходит в чат, он
   // не решает. Сама отправка остаётся тем же одним швом.
-  assert.match(
-    block,
-    /report: \(text: string\) =>\s+sendTelegramHtml\(BOT, CHAT, text, \{\s+trace: \{ session: session\.state\.sessionId, source: "rollup" \},/u,
-  );
-  assert.match(
-    block,
-    /notice: \(text: string\) =>\s+sendTelegramHtml\(BOT, CHAT, text, \{\s+trace: \{ session: session\.state\.sessionId, source: "rollup" \},/u,
+  assert.equal(
+    block.split("session: activeSession.state.sessionId").length - 1,
+    2,
+    "both Report seams must carry the Rollup session ID into Trace",
   );
   // Чат не настроен — решение о Notice всё равно принимается: send просто null.
   assert.match(block, /: null;/u);

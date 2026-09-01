@@ -1,0 +1,461 @@
+/* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registration promises. */
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer, type IncomingMessage, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import test from "node:test";
+
+const ROOT = resolve(import.meta.dirname, "../..");
+const ROLLUP = join(ROOT, "scripts/memory/rollup.ts");
+const SESSION_NAME = "rollup-session-monthly.json";
+
+interface RecordedRequest {
+  readonly body: unknown;
+  readonly method: string;
+  readonly pathname: string;
+  readonly search: string;
+}
+
+interface RollupRun {
+  readonly code: number | null;
+  readonly stderr: string;
+  readonly stdout: string;
+}
+
+type FakeMode =
+  | "own"
+  | "foreign"
+  | "foreign-cancel-confirmed"
+  | "send-disconnect"
+  | "session-not-active";
+
+function event(type: string, data?: Record<string, unknown>): object {
+  return {
+    ...(data ? { data } : {}),
+    meta: { at: new Date().toISOString(), id: crypto.randomUUID() },
+    type,
+  };
+}
+
+function turn(message: string): object[] {
+  return [
+    event("message.received", { message }),
+    event("message.completed", {
+      finishReason: "stop",
+      message: "fake monthly report",
+    }),
+    event("session.waiting"),
+  ];
+}
+
+async function readJson(request: IncomingMessage): Promise<unknown> {
+  request.setEncoding("utf8");
+  let body = "";
+  for await (const chunk of request) {
+    assert.ok(typeof chunk === "string");
+    body += chunk;
+  }
+  return body === "" ? undefined : JSON.parse(body);
+}
+
+function sendJson(
+  response: import("node:http").ServerResponse,
+  value: unknown,
+): void {
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+class FakeEve {
+  readonly requests: RecordedRequest[] = [];
+  readonly server: Server;
+  mode: FakeMode = "own";
+  #nextSession = 1;
+  #events = new Map<string, object[]>();
+
+  constructor() {
+    this.server = createServer((request, response) => {
+      void this.#handle(request, response).catch((error: unknown) => {
+        response.writeHead(500, { "content-type": "text/plain" });
+        response.end(error instanceof Error ? error.message : String(error));
+      });
+    });
+  }
+
+  async start(): Promise<string> {
+    await new Promise<void>((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = this.server.address() as AddressInfo;
+    return `http://127.0.0.1:${address.port}`;
+  }
+
+  async stop(): Promise<void> {
+    this.server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      this.server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+
+  async #handle(
+    request: IncomingMessage,
+    response: import("node:http").ServerResponse,
+  ): Promise<void> {
+    const url = new URL(request.url ?? "/", "http://fake-eve.invalid");
+    const method = request.method ?? "GET";
+    const body = method === "POST" ? await readJson(request) : undefined;
+    this.requests.push({
+      body,
+      method,
+      pathname: url.pathname,
+      search: url.search,
+    });
+
+    if (method === "POST" && url.pathname === "/eve/v1/session") {
+      const sessionId = `wrun_fake_${this.#nextSession++}`;
+      const message = this.#message(body);
+      this.#events.set(sessionId, turn(message));
+      sendJson(response, { sessionId });
+      return;
+    }
+
+    const cancel = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/cancel$/u);
+    if (method === "POST" && cancel) {
+      sendJson(
+        response,
+        this.mode === "foreign-cancel-confirmed"
+          ? { ok: true, status: "no_active_turn" }
+          : {
+              ok: true,
+              sessionId: decodeURIComponent(cancel[1] ?? ""),
+              status: "accepted",
+            },
+      );
+      return;
+    }
+
+    const stream = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/stream$/u);
+    if (method === "GET" && stream) {
+      const sessionId = decodeURIComponent(stream[1] ?? "");
+      const events = this.#events.get(sessionId) ?? [];
+      const startIndex = Number(url.searchParams.get("startIndex") ?? "0");
+      response.writeHead(200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "x-eve-stream-tail-index": String(events.length - 1),
+      });
+      for (const item of events.slice(startIndex)) {
+        response.write(`${JSON.stringify(item)}\n`);
+      }
+      response.end();
+      return;
+    }
+
+    const send = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)$/u);
+    if (method === "POST" && send) {
+      const sessionId = decodeURIComponent(send[1] ?? "");
+      const message = this.#message(body);
+      if (this.mode === "session-not-active") {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            code: "session_not_active",
+            error: "session is not active",
+          }),
+        );
+        return;
+      }
+      this.#events.set(sessionId, [
+        ...(this.#events.get(sessionId) ?? []),
+        ...turn(
+          this.mode === "foreign" || this.mode === "foreign-cancel-confirmed"
+            ? "foreign rollup prompt"
+            : message,
+        ),
+      ]);
+      if (this.mode === "send-disconnect") {
+        request.socket.destroy();
+        return;
+      }
+      sendJson(response, { sessionId });
+      return;
+    }
+
+    response.writeHead(404, { "content-type": "text/plain" });
+    response.end("not found");
+  }
+
+  #message(body: unknown): string {
+    assert.ok(body && typeof body === "object" && !Array.isArray(body));
+    assert.deepEqual(Object.keys(body), ["message"]);
+    const message = (body as { message?: unknown }).message;
+    assert.ok(typeof message === "string");
+    return message;
+  }
+}
+
+function makeRunDirectory(): {
+  readonly data: string;
+  readonly root: string;
+  readonly vault: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), "iva-rollup-client-"));
+  const data = join(root, "data");
+  const vault = join(root, "vault");
+  mkdirSync(data);
+  mkdirSync(vault);
+  return { data, root, vault };
+}
+
+async function runRollup(
+  host: string,
+  paths: { readonly data: string; readonly vault: string },
+): Promise<RollupRun> {
+  return await new Promise<RollupRun>((resolveRun, rejectRun) => {
+    const child = spawn(process.execPath, [ROLLUP, "monthly"], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        ASSISTANT_BEARER: "",
+        ASSISTANT_DATA_DIR: paths.data,
+        ASSISTANT_HOST: host,
+        ASSISTANT_TIMEZONE: "UTC",
+        ASSISTANT_VAULT_DIR: paths.vault,
+        ROLLUP_TURN_TIMEOUT_MS: "1000",
+        TELEGRAM_ALLOWED_USER_IDS: "",
+        TELEGRAM_BOT_TOKEN: "",
+        TELEGRAM_DIGEST_CHAT_ID: "",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    let stdout = "";
+    child.stderr.setEncoding("utf8");
+    child.stdout.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectRun(new Error("rollup subprocess did not exit within 5 seconds"));
+    }, 5000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      rejectRun(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolveRun({ code, stderr, stdout });
+    });
+  });
+}
+
+test("production rollup creates for legacy state, then attaches, drains, and sends", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({
+      createdAt: Date.now(),
+      state: { sessionId: "wrun_legacy", streamIndex: 19 },
+    }),
+  );
+
+  const first = await runRollup(host, paths);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(fake.requests[0]?.method, "POST");
+  assert.equal(fake.requests[0]?.pathname, "/eve/v1/session");
+  assert.equal(
+    typeof (fake.requests[0]?.body as { message?: unknown }).message,
+    "string",
+    "create receives create({ message }) as a string on the public wire",
+  );
+  const saved = JSON.parse(readFileSync(sessionFile, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.deepEqual(Object.keys(saved).sort(), ["createdAt", "sessionId"]);
+  assert.equal(saved.sessionId, "wrun_fake_1");
+  assert.equal(typeof saved.createdAt, "number");
+
+  const beforeSecond = fake.requests.length;
+  const second = await runRollup(host, paths);
+  assert.equal(second.code, 0, second.stderr);
+  const resumed = fake.requests.slice(beforeSecond);
+  assert.deepEqual(
+    resumed.slice(0, 2).map(({ method, pathname }) => ({ method, pathname })),
+    [
+      { method: "GET", pathname: "/eve/v1/session/wrun_fake_1/stream" },
+      { method: "POST", pathname: "/eve/v1/session/wrun_fake_1" },
+    ],
+    "attach performs a bounded drain before positional send(message)",
+  );
+  assert.match(
+    resumed[0]?.search ?? "",
+    /(?:^|[?&])includeTailIndex=1(?:&|$)/u,
+  );
+  assert.equal(
+    typeof (resumed[1]?.body as { message?: unknown }).message,
+    "string",
+    "send(message) must not nest the prompt in another message object",
+  );
+  assert.equal(
+    resumed.some(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session",
+    ),
+    false,
+  );
+  assert.deepEqual(JSON.parse(readFileSync(sessionFile, "utf8")), saved);
+});
+
+test("production rollup keeps the session when a foreign result cannot be cancelled", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "foreign";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(existsSync(sessionFile), true);
+  assert.match(run.stderr, /stale stream cursor/u);
+  assert.match(
+    readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
+    /"reason":"stale-result-cancel-unconfirmed"/u,
+  );
+});
+
+test("production rollup drops the session after confirmed cancellation of a foreign result", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "foreign-cancel-confirmed";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(existsSync(sessionFile), false);
+  assert.match(run.stderr, /cancellation confirmed/u);
+  assert.match(
+    readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
+    /"reason":"stale-result"/u,
+  );
+});
+
+test("a send disconnect after server acceptance blocks a fresh retry without confirmed cancellation", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "send-disconnect";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  writeFileSync(
+    join(paths.data, SESSION_NAME),
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.notEqual(run.code, 0);
+  assert.match(run.stderr, /refusing fresh retry/u);
+  assert.equal(
+    fake.requests.filter(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session/wrun_existing",
+    ).length,
+    1,
+    "the server received the ambiguous send before dropping its response",
+  );
+  assert.equal(
+    fake.requests.some(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session",
+    ),
+    false,
+    "an unconfirmed cancellation must not create a second writer",
+  );
+  assert.equal(
+    fake.requests.some(
+      ({ method, pathname }) =>
+        method === "POST" &&
+        pathname === "/eve/v1/session/wrun_existing/cancel",
+    ),
+    true,
+  );
+  assert.match(
+    readFileSync(join(paths.data, "rollup-abandoned.jsonl"), "utf8"),
+    /"reason":"cancel-unconfirmed"/u,
+  );
+});
+
+test("a structured 409 session_not_active permits one fresh retry", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "session-not-active";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const sessionFile = join(paths.data, SESSION_NAME);
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({ sessionId: "wrun_existing", createdAt: Date.now() }),
+  );
+
+  const run = await runRollup(host, paths);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(
+    fake.requests.filter(
+      ({ method, pathname }) =>
+        method === "POST" && pathname === "/eve/v1/session",
+    ).length,
+    1,
+  );
+  assert.equal(
+    fake.requests.some(({ pathname }) => pathname.endsWith("/cancel")),
+    false,
+  );
+  assert.equal(
+    (JSON.parse(readFileSync(sessionFile, "utf8")) as { sessionId: string })
+      .sessionId,
+    "wrun_fake_1",
+  );
+});

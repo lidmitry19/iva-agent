@@ -2,9 +2,13 @@
 // приходят инъекцией (readImage), поэтому тест идёт без файловой системы и без сети.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeAuth, type CodexAuth } from "./lib/codex-auth.ts";
 
 process.env.MODEL_PROVIDER = "ollama";
-const { attachImagesMiddleware, attachVaultImages } =
+const { attachImagesMiddleware, attachVaultImages, codexFetch } =
   await import("./provider.ts");
 const { MAX_ATTACHED_IMAGES, MAX_IMAGE_BYTES } =
   await import("./lib/attachment-ref.ts");
@@ -255,4 +259,61 @@ await test("промпт без ссылок уходит нетронутым �
   });
 
   assert.equal(result, params);
+});
+
+await test("codexFetch вырезает safety_identifier из тела /responses", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-codex-fetch-"));
+  const prevDataDir = process.env.ASSISTANT_DATA_DIR;
+  process.env.ASSISTANT_DATA_DIR = dir;
+  t.after(() => {
+    if (prevDataDir === undefined) delete process.env.ASSISTANT_DATA_DIR;
+    else process.env.ASSISTANT_DATA_DIR = prevDataDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const b64url = (value: object): string =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const access_token = [
+    b64url({ alg: "none" }),
+    b64url({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+    "signature",
+  ].join(".");
+  const auth: CodexAuth = {
+    id_token: "id-token",
+    access_token,
+    refresh_token: "refresh-token",
+    accountId: "acc_test",
+    planType: "pro",
+  };
+  writeAuth(auth, dir);
+
+  const originalFetch = globalThis.fetch;
+  let capturedBody: string | undefined;
+  globalThis.fetch = (_input, init) => {
+    capturedBody = typeof init?.body === "string" ? init.body : undefined;
+    return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await codexFetch(
+    new Request("https://chatgpt.com/backend-api/codex/responses", {
+      method: "POST",
+    }),
+    {
+      body: JSON.stringify({
+        store: true,
+        previous_response_id: "resp_123",
+        safety_identifier: "user-abc",
+        input: [],
+      }),
+    },
+  );
+
+  assert.ok(capturedBody !== undefined);
+  const body = JSON.parse(capturedBody) as Record<string, unknown>;
+  assert.equal("safety_identifier" in body, false);
+  assert.equal("previous_response_id" in body, false);
+  assert.equal(body.store, false);
 });

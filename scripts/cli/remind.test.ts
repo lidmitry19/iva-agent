@@ -35,9 +35,11 @@ function remindCommand(
   const sent: SendCall[] = [];
   const prompts: string[] = [];
   const feedback: string[] = [];
+  const closed: string[] = [];
   const read: string[] = [];
   const messages: string[] = [];
   let feedbackError: Error | undefined;
+  let closeError: Error | undefined;
   const base = createCliRuntime(ROOT);
   const dependencies: RemindDependencies = {
     readEnv: (path) => {
@@ -48,24 +50,30 @@ function remindCommand(
       sent.push([bot, chat, md, options]);
       return Promise.resolve(sendResult);
     },
-    runAgentTurn: (prompt): Promise<ReminderTurn> => {
+    runAgentTurn: async (prompt): Promise<ReminderTurn> => {
       prompts.push(prompt);
       if (agentOutcome === "throw")
         return Promise.reject(new Error("eve unavailable"));
-      if (agentOutcome === "timeout") return new Promise(() => {});
-      if (agentOutcome === "failed")
-        return Promise.resolve({ status: "failed", message: "ignore me" });
-      if (agentOutcome === "empty")
-        return Promise.resolve({ status: "waiting", message: "" });
-      return Promise.resolve({
-        status: "waiting",
-        message: "Короткое напоминание",
-        feedback: (message) => {
-          if (feedbackError) return Promise.reject(feedbackError);
-          feedback.push(message);
-          return Promise.resolve();
-        },
-      });
+      try {
+        if (agentOutcome === "timeout") await new Promise(() => {});
+        if (agentOutcome === "failed")
+          return { status: "failed", message: "ignore me" };
+        if (agentOutcome === "empty") return { status: "waiting", message: "" };
+        return {
+          status: "waiting",
+          message: "Короткое напоминание",
+          feedback: (message) => {
+            if (feedbackError) return Promise.reject(feedbackError);
+            feedback.push(message);
+            return Promise.resolve();
+          },
+        };
+      } finally {
+        closed.push("closed");
+        if (closeError) {
+          // Mirrors production cleanup: a failed reset never changes the turn.
+        }
+      }
     },
     timeoutMs: 1,
   };
@@ -80,9 +88,13 @@ function remindCommand(
   );
   return {
     cmdRemind,
+    closed,
     envPath: base.ENV_PATH,
     failFeedback: (error: Error) => {
       feedbackError = error;
+    },
+    failClose: (error: Error) => {
+      closeError = error;
     },
     feedback,
     messages,
@@ -164,6 +176,61 @@ void test("a refused Reminder send reports the Telegram error and exits one", as
     "exit:1",
   ]);
   assert.equal(remind.sent.length, 1);
+  assert.deepEqual(remind.closed, ["closed"]);
+});
+
+void test("a session reset failure does not fail a delivered Reminder", async () => {
+  const sent: SendCall[] = [];
+  const resetReasons: string[] = [];
+  const messages: string[] = [];
+  const base = createCliRuntime(ROOT);
+  const cmdRemind = createRemindCommand(
+    {
+      ...base,
+      ok: (message) => messages.push(message),
+    },
+    {
+      createClient: () =>
+        Promise.resolve({
+          sessions: {
+            create: () =>
+              Promise.resolve({
+                response: {
+                  result: () =>
+                    Promise.resolve({
+                      status: "waiting",
+                      message: "Короткое напоминание",
+                    }),
+                },
+                session: {
+                  send: () => Promise.resolve(),
+                  reset: ({ reason }) => {
+                    resetReasons.push(reason);
+                    return Promise.reject(new Error("reset unavailable"));
+                  },
+                },
+              }),
+          },
+        }),
+      readEnv: () =>
+        Promise.resolve({
+          TELEGRAM_BOT_TOKEN: "bot-token",
+          TELEGRAM_DIGEST_CHAT_ID: "555",
+        }),
+      send: (bot, chat, md, options) => {
+        sent.push([bot, chat, md, options]);
+        return Promise.resolve({ ok: true, fellBack: false, error: "" });
+      },
+    },
+  );
+
+  await cmdRemind(["Проверить", "задачу"]);
+
+  assert.deepEqual(resetReasons, ["Reminder finished"]);
+  assert.deepEqual(sent, [
+    ["bot-token", "555", "Короткое напоминание", { retryTransient: true }],
+  ]);
+  assert.deepEqual(messages, ["Reminder sent to Telegram"]);
 });
 
 void test("a missing token or chat fails before the agent turn", async () => {

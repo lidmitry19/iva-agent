@@ -1,5 +1,5 @@
 import { botCommands, helpText, startText, tr } from "#lib/i18n.ts";
-import { continuationTokenForControl } from "../lib/telegram-reset.ts";
+import { resetTargetForControl } from "../lib/telegram-reset.ts";
 import { TELEGRAM_STOP_CALLBACK } from "#lib/telegram-status-message.ts";
 import {
   requestTurnCancel,
@@ -81,7 +81,7 @@ type StatusImpl = (chatKey: string) => Record<string, unknown> | null;
 type CancelImpl = (input: {
   url: string;
   secret: string;
-  continuationToken: string;
+  sessionId: string;
   turnId?: string;
 }) => Promise<unknown>;
 // Точки ввода-вывода handleControl, которые подменяются в тестах: ответ в чат,
@@ -555,8 +555,8 @@ async function handleControl(
   // /new retires only this exact Telegram session. /restart does the same first,
   // then restarts the agent process; histories and queues of other chats survive.
   const key = chatKey(update);
-  const continuationToken = key
-    ? continuationTokenForControl(
+  const resetTarget = key
+    ? resetTargetForControl(
         update,
         getChatStatus(key),
         BOT_USER_ID ?? undefined,
@@ -564,7 +564,7 @@ async function handleControl(
     : null;
   const resetCopy = resetMessageCopy(cmd, await readEnvFresh(ENV_PATH));
   const status = await replyTo(chatId, resetCopy.pending);
-  if (!continuationToken || !key) {
+  if (!resetTarget || !key) {
     if (status) {
       await editMessage(
         chatId,
@@ -580,7 +580,7 @@ async function handleControl(
 
   const clearsPrivateQueue = msg?.chat?.type === "private";
   try {
-    await performScopedReset(key, continuationToken, {
+    await performScopedReset(key, resetTarget, {
       // Group/forum queues are keyed only by chat/topic while Eve sessions also
       // include conversationId. Clearing the shared queue here would lose
       // messages belonging to other group conversation anchors.

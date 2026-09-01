@@ -1187,7 +1187,8 @@ test("every pre-snapshot command fault leaves the live tree untouched", async (t
       const before = prepareProtectedTree(fixture.local);
       const { calls, tx } = d10Transaction(
         fixture,
-        `if ${condition}; then\n` +
+        `if ${condition} && [ ! -e "$calls.injected" ]; then\n` +
+          '  : > "$calls.injected"\n' +
           "  printf '%s\\n' 'injected pre-snapshot failure' >&2\n" +
           "  exit 72\n" +
           "fi\n",
@@ -1203,6 +1204,15 @@ test("every pre-snapshot command fault leaves the live tree untouched", async (t
       assert.doesNotMatch(
         readFileSync(calls, "utf8"),
         /reset --hard|rebase --abort|stash apply/u,
+      );
+      assert.equal(
+        git(
+          fixture.local,
+          "for-each-ref",
+          "--format=%(refname)",
+          "refs/iva/update-recovery",
+        ),
+        "",
       );
     });
   }
@@ -1935,10 +1945,10 @@ test("stash conflict report can still roll back user files byte-for-byte", async
     readFileSync(join(local, ".output", "server"), "utf8"),
     "old build",
   );
-  assert.notEqual(
+  assert.equal(
     git(local, "stash", "list"),
     "",
-    "protective stash is retained after rollback",
+    "protective stash is removed after rollback",
   );
   assert.equal(existsSync(join(local, ".output.iva-backup")), false);
   assert.doesNotMatch(

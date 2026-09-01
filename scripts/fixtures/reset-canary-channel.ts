@@ -1,14 +1,10 @@
 // Канал-фикстура для replica-смоука (scripts/replica-smoke.ts): prepareReplica копирует
 // этот файл в одноразовое приложение как agent/channels/reset-canary.ts. Он существует
-// только ради канарейки issue #110 и нужен потому, что прод-путь /new проверить иначе
-// нечем: реальный telegram-канал ходит в api.telegram.org (базу API eve переопределить
-// не даёт), а клиент eve прислать свой continuationToken не может — POST /eve/v1/session
-// чеканит новый токен сам, а POST /eve/v1/session/:sessionId шлёт intent "resume".
+// только ради канарейки session reset. Реальный telegram-канал ходит в
+// api.telegram.org, поэтому replica-smoke использует детерминированный адрес фикстуры.
 //
-// Мост в Telegram зовёт send() БЕЗ intent (то есть "resume-or-start") с токеном, который
-// пересобирает детерминированно из chat_id, и reset() с тем же токеном на своём канале.
-// Роуты ниже повторяют ровно эту пару вызовов, поэтому смоук может прийти после reset
-// тем же токеном — как придёт мост — и убедиться, что история не воскресла.
+// Роуты повторяют пару from(address).send/reset. Смоук приходит после reset
+// по тому же адресу и проверяет, что история не воскресла.
 import { defineChannel, POST } from "eve/channels";
 import { extractBearerToken } from "eve/channels/auth";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -24,61 +20,53 @@ function authorized(request: Request): boolean {
   return extractBearerToken(request.headers.get("authorization")) === expected;
 }
 
-async function readToken(
+async function readAddress(
   request: Request,
-): Promise<{ token: string; message?: string } | Response> {
+): Promise<{ address: string; message?: string } | Response> {
   let body: unknown;
   try {
     body = await request.json();
   } catch {
     return new Response("invalid JSON", { status: 400 });
   }
-  const parsed = body as { token?: unknown; message?: unknown } | null;
-  const token = parsed?.token;
-  if (typeof token !== "string" || token.length === 0)
-    return new Response("token is required", { status: 400 });
+  const parsed = body as { address?: unknown; message?: unknown } | null;
+  const address = parsed?.address;
+  if (typeof address !== "string" || address.length === 0)
+    return new Response("address is required", { status: 400 });
   const message = parsed?.message;
   if (message !== undefined && typeof message !== "string")
     return new Response("message must be a string", { status: 400 });
-  return message === undefined ? { token } : { token, message };
+  return message === undefined ? { address } : { address, message };
 }
 
 export default defineChannel({
   routes: [
-    POST("/replica/canary/send", async (request, { send }) => {
+    POST("/replica/canary/send", async (request, { from }) => {
       if (!authorized(request))
         return new Response("unauthorized", { status: 401 });
-      const parsed = await readToken(request);
+      const parsed = await readAddress(request);
       if (parsed instanceof Response) return parsed;
       if (parsed.message === undefined)
         return new Response("message is required", { status: 400 });
-      // Ни intent, ни sessionId: ровно тот вызов, который делает telegram-канал.
-      const session = await send(parsed.message, {
+      const session = await from(parsed.address).send(parsed.message, {
         auth: null,
-        continuationToken: parsed.token,
       });
       return Response.json({ sessionId: session.id });
     }),
-    POST(
-      "/replica/canary/reset",
-      async (request, { reset, resolveActiveSession }) => {
-        if (!authorized(request))
-          return new Response("unauthorized", { status: 401 });
-        const parsed = await readToken(request);
-        if (parsed instanceof Response) return parsed;
-        const result = await reset({
-          continuationToken: parsed.token,
-          reason: "replica smoke canary",
-        });
-        const active = await resolveActiveSession({
-          continuationToken: parsed.token,
-        });
-        return Response.json({
-          ...result,
-          activeSessionAfterReset: active?.sessionId ?? null,
-        });
-      },
-    ),
+    POST("/replica/canary/reset", async (request, { from, resolveSession }) => {
+      if (!authorized(request))
+        return new Response("unauthorized", { status: 401 });
+      const parsed = await readAddress(request);
+      if (parsed instanceof Response) return parsed;
+      const result = await from(parsed.address).reset({
+        reason: "replica reset canary",
+      });
+      const active = await resolveSession(parsed.address);
+      return Response.json({
+        ...result,
+        activeSessionAfterReset: active?.id ?? null,
+      });
+    }),
   ],
   events: {
     // Доставки наружу у канала нет: финальные реплики пишутся в лог, который читает смоук.

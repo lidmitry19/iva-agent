@@ -115,7 +115,7 @@ await test("обычный финал гасит статус и убирает 
     statusMessageId: 500,
   });
   const { calls, tg } = handle();
-  const channel = { continuationToken: "telegram:77", telegram: tg };
+  const channel = { telegram: tg };
 
   assert.equal(
     await status.finishTelegramStatus(channel, "s-1", "completed"),
@@ -145,11 +145,7 @@ await test("отмена переписывает статус и оставля
   const { calls, tg } = handle();
 
   assert.equal(
-    await status.finishTelegramStatus(
-      { continuationToken: "telegram:77", telegram: tg },
-      "s-2",
-      "cancelled",
-    ),
+    await status.finishTelegramStatus({ telegram: tg }, "s-2", "cancelled"),
     true,
   );
   assert.equal(calls[0].method, "editMessageText");
@@ -170,12 +166,58 @@ await test("сбой Bot API на уборке не рушит терминал 
   };
 
   assert.equal(
-    await status.finishTelegramStatus(
-      { continuationToken: "telegram:77", telegram: failing },
-      "s-3",
-      "failed",
-    ),
+    await status.finishTelegramStatus({ telegram: failing }, "s-3", "failed"),
     true,
   );
+  assert.equal(runStatus.getChatStatus(key)?.status, "idle");
+});
+
+await test("чужая живая сессия не трогается поздним финишем", async () => {
+  // Regression anchor from code review: a late terminal must not delete another
+  // session's status message. Not a full discriminator of the current impl.
+  const key = runStatus.chatKeyOf("77", undefined);
+  // Живая чужая сессия — поздний terminal от старой сессии должен быть no-op.
+  runStatus.setChatStatus(key, {
+    status: "running",
+    sessionId: "s-live",
+    statusMessageId: 777,
+  });
+  const { calls, tg } = handle();
+
+  assert.equal(
+    await status.finishTelegramStatus(
+      { telegram: tg },
+      "s-old-finished",
+      "completed",
+    ),
+    false,
+  );
+  assert.equal(calls.length, 0);
+  const live = runStatus.getChatStatus(key);
+  assert.equal(live?.status, "running");
+  assert.equal(live?.sessionId, "s-live");
+  assert.equal(live?.statusMessageId, 777);
+});
+
+await test("своя сессия гасит статус-сообщение", async () => {
+  // Regression anchor from code review: a late terminal must not delete another
+  // session's status message. Not a full discriminator of the current impl.
+  const key = runStatus.chatKeyOf("77", undefined);
+  runStatus.setChatStatus(key, {
+    status: "running",
+    sessionId: "s-own",
+    statusMessageId: 801,
+  });
+  const { calls, tg } = handle();
+
+  assert.equal(
+    await status.finishTelegramStatus({ telegram: tg }, "s-own", "completed"),
+    true,
+  );
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["deleteMessage"],
+  );
+  assert.equal(calls[0].body.message_id, 801);
   assert.equal(runStatus.getChatStatus(key)?.status, "idle");
 });

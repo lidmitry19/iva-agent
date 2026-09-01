@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { ClientError } from "eve/client";
 import {
   cancelTurnAndConfirmQuietly,
   canRetryFresh,
   cancelTurnQuietly,
   DEFAULT_TURN_TIMEOUT_MS,
+  isSessionNotActiveError,
   RollupTurnTimeoutError,
   resolveTurnTimeoutMs,
   withTurnTimeout,
@@ -23,56 +25,41 @@ interface RetryPolicyOptions {
   readonly cancel: () => Promise<{ status?: string }>;
 }
 
-function hasTimeoutCode(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ROLLUP_TURN_TIMEOUT"
+void test("fresh retry requires session_not_active or confirmed cancellation", () => {
+  assert.equal(
+    canRetryFresh({
+      cancelConfirmed: false,
+      sessionNotActive: false,
+    }),
+    false,
   );
-}
+  assert.equal(
+    canRetryFresh({
+      cancelConfirmed: true,
+      sessionNotActive: false,
+    }),
+    true,
+  );
+  assert.equal(
+    canRetryFresh({
+      cancelConfirmed: false,
+      sessionNotActive: true,
+    }),
+    true,
+  );
+});
 
-void test("fresh retry requires an explicitly rejected send or confirmed cancellation", () => {
+void test("only a structured 409 session_not_active proves send rejection", () => {
   assert.equal(
-    canRetryFresh({
-      accepted: false,
-      sendRejected: false,
-      cancelConfirmed: false,
-    }),
+    isSessionNotActiveError({ status: 409, code: "session_not_active" }),
+    true,
+  );
+  assert.equal(
+    isSessionNotActiveError({ status: 500, code: "session_not_active" }),
     false,
   );
-  assert.equal(
-    canRetryFresh({
-      accepted: false,
-      sendRejected: false,
-      cancelConfirmed: true,
-    }),
-    true,
-  );
-  assert.equal(
-    canRetryFresh({
-      accepted: false,
-      sendRejected: true,
-      cancelConfirmed: false,
-    }),
-    true,
-  );
-  assert.equal(
-    canRetryFresh({
-      accepted: true,
-      sendRejected: false,
-      cancelConfirmed: false,
-    }),
-    false,
-  );
-  assert.equal(
-    canRetryFresh({
-      accepted: true,
-      sendRejected: false,
-      cancelConfirmed: true,
-    }),
-    true,
-  );
+  assert.equal(isSessionNotActiveError({ status: 409, code: "other" }), false);
+  assert.equal(isSessionNotActiveError(new Error("session_not_active")), false);
 });
 
 async function countSendsThroughRetryPolicy({
@@ -80,8 +67,7 @@ async function countSendsThroughRetryPolicy({
   cancel,
 }: RetryPolicyOptions): Promise<number> {
   let sends = 0;
-  let accepted = false;
-  let sendRejected = false;
+  let sessionNotActive = false;
   let acceptedTurnResult: Promise<TestTurnResult> | undefined;
   try {
     await withTurnTimeout(
@@ -92,25 +78,22 @@ async function countSendsThroughRetryPolicy({
             sends += 1;
           });
         } catch (error) {
-          sendRejected = true;
+          sessionNotActive = isSessionNotActiveError(error);
           throw error;
         }
-        accepted = true;
         acceptedTurnResult = response.result();
         return await acceptedTurnResult;
       },
       { timeoutMs: 20, label: "main-turn" },
     );
-  } catch (error) {
+  } catch {
     // Это точная модель catch-флоу rollup.ts, а не выполнение самого rollup.ts.
-    const hung = hasTimeoutCode(error);
-    const cancelConfirmed =
-      accepted || hung
-        ? await cancelTurnAndConfirmQuietly({ cancel }, acceptedTurnResult, {
-            timeoutMs: 20,
-          })
-        : false;
-    if (canRetryFresh({ accepted, sendRejected, cancelConfirmed })) sends += 1;
+    const cancelConfirmed = !sessionNotActive
+      ? await cancelTurnAndConfirmQuietly({ cancel }, acceptedTurnResult, {
+          timeoutMs: 20,
+        })
+      : false;
+    if (canRetryFresh({ sessionNotActive, cancelConfirmed })) sends += 1;
   }
   return sends;
 }
@@ -190,16 +173,35 @@ void test("a hung send gets one fresh retry when cancel reports no active turn",
   assert.equal(sends, 2);
 });
 
-void test("a rejected send gets exactly one fresh retry", async () => {
+void test("a disconnected send does not retry without confirmed cancellation", async () => {
+  let cancels = 0;
   const sends = await countSendsThroughRetryPolicy({
     firstSend: (recordSend) => {
       recordSend();
-      return Promise.reject(new Error("session gone"));
+      return Promise.reject(new TypeError("fetch failed"));
+    },
+    cancel: () => {
+      cancels += 1;
+      return Promise.resolve({ status: "accepted" });
+    },
+  });
+  assert.equal(sends, 1);
+  assert.equal(cancels, 1);
+});
+
+void test("a structured session_not_active rejection gets one fresh retry", async () => {
+  const sends = await countSendsThroughRetryPolicy({
+    firstSend: (recordSend) => {
+      recordSend();
+      return Promise.reject(
+        new ClientError(
+          409,
+          JSON.stringify({ code: "session_not_active", error: "inactive" }),
+        ),
+      );
     },
     cancel: () =>
-      Promise.reject(
-        new Error("cancel must not be called for an unaccepted turn"),
-      ),
+      Promise.reject(new Error("inactive sessions do not need cancellation")),
   });
   assert.equal(sends, 2);
 });

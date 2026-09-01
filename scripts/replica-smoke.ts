@@ -23,7 +23,13 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { startMockOpenAiServer } from "./lib/mock-openai-server.ts";
 import { RUNTIME_SOURCE_TREES } from "./lib/custom-layer.ts";
-import type { ClientSession, MessageResult } from "eve/client";
+import type {
+  Client,
+  ClientSession,
+  ClientSessionState,
+  MessageResponse,
+  MessageResult,
+} from "eve/client";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const MARKER = "CEDAR-4729";
@@ -194,21 +200,15 @@ async function waitForHealth(port: number, child: EveProcess): Promise<void> {
   );
 }
 
-async function turn(
-  session: ClientSession,
-  prompt: string,
+async function turnResult(
+  response: MessageResponse,
   timeoutMs = TURN_TIMEOUT_MS,
 ): Promise<string> {
   let timer: NodeJS.Timeout | undefined;
   let result: MessageResult;
   try {
     result = await Promise.race([
-      session.send(prompt).then((r) => {
-        note(
-          `[smoke] send accepted (session ${session.state?.sessionId ?? "new"})`,
-        );
-        return r.result();
-      }),
+      response.result(),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           reject,
@@ -227,6 +227,38 @@ async function turn(
     );
   }
   return result.message.trim();
+}
+
+async function firstTurn(
+  client: Client,
+  prompt: string,
+  ownedSessions: Set<ClientSession>,
+): Promise<{ session: ClientSession; message: string }> {
+  const { session, response } = await client.sessions.create({
+    message: prompt,
+  });
+  ownedSessions.add(session);
+  note(`[smoke] send accepted (session ${session.state.sessionId})`);
+  return { session, message: await turnResult(response) };
+}
+
+async function turn(
+  session: ClientSession,
+  prompt: string,
+  timeoutMs = TURN_TIMEOUT_MS,
+): Promise<string> {
+  const response = await session.send(prompt);
+  note(`[smoke] send accepted (session ${session.state.sessionId})`);
+  return turnResult(response, timeoutMs);
+}
+
+function resumeSession(
+  client: Client,
+  state: ClientSessionState,
+): ClientSession {
+  return client.sessions.attach(state.sessionId, {
+    streamIndex: state.streamIndex,
+  });
 }
 
 async function prepareReplica(sandbox: string): Promise<string> {
@@ -359,6 +391,8 @@ async function forgeEveStepVersion(app: string): Promise<number> {
 async function main(): Promise<void> {
   const sandbox = await mkdtemp(join(tmpdir(), "iva-replica-"));
   const mock = await startMockOpenAiServer();
+  const ownedSessions = new Set<ClientSession>();
+  const resetErrors: unknown[] = [];
   let eve: EveProcess | null = null;
   try {
     const app = await prepareReplica(sandbox);
@@ -403,8 +437,13 @@ async function main(): Promise<void> {
     });
 
     setPhase("first-reply");
-    const session = client.session();
-    const first = await turn(session, "Reply with a status word.");
+    const created = await firstTurn(
+      client,
+      "Reply with a status word.",
+      ownedSessions,
+    );
+    const session = created.session;
+    const first = created.message;
     if (first !== "REPLICA_OK")
       throw new Error(`unexpected first reply: ${JSON.stringify(first)}`);
 
@@ -414,27 +453,25 @@ async function main(): Promise<void> {
       throw new Error(`unexpected seed reply: ${JSON.stringify(remembered)}`);
     const savedState = session.state;
 
-    // Канарейка reset (issue #110): /new обязан реально чистить контекст на том токене,
-    // который придёт от Telegram. Мост других токенов не присылает — он пересобирает свой
-    // детерминированно из chat_id, — поэтому проверка идёт по пути канала: send() без
-    // intent (то есть resume-or-start) и reset() на том же канале, ровно как в
-    // agent/channels/telegram.ts. Маркер сеется ДО рестарта: тогда положительный контроль
+    // Канарейка reset: /new обязан реально чистить контекст по адресу Telegram.
+    // Проверка идёт через from(address).send/reset, как telegram-канал.
+    // Маркер сеется ДО рестарта: тогда положительный контроль
     // ниже заодно жёстко проверяет, что durable-стейт .eve/.workflow-data пережил рестарт,
     // — по пути канала, в отличие от мягкого клиентского резюма.
     setPhase("canary-seed");
     const canaryLog = join(app, "data", CANARY_REPLY_LOG);
-    const canaryToken = `replica-canary:${randomBytes(6).toString("hex")}`;
+    const canaryAddress = `replica-canary:${randomBytes(6).toString("hex")}`;
     const canaryHttp = { port, bearer };
     const recall =
       "What code did I ask you to remember? Reply with the code only.";
     let canaryLine = 0;
     const canaryTurn = async (
-      token: string,
+      address: string,
       message: string,
     ): Promise<{ sessionId: string; reply: string }> => {
       const from = canaryLine;
       const accepted = await canaryPost(canaryHttp, CANARY_SEND_ROUTE, {
-        token,
+        address,
         message,
       });
       const sessionId = accepted.sessionId;
@@ -448,7 +485,7 @@ async function main(): Promise<void> {
     };
 
     const seed = await canaryTurn(
-      canaryToken,
+      canaryAddress,
       `Remember this code: ${RESET_MARKER}`,
     );
     if (seed.reply !== "REMEMBERED")
@@ -462,53 +499,50 @@ async function main(): Promise<void> {
     await waitForHealth(port, eve);
 
     setPhase("post-restart");
-    const fresh = await turn(client.session(), "Reply with a status word.");
-    if (fresh !== "REPLICA_OK")
-      throw new Error(
-        `unexpected post-restart reply: ${JSON.stringify(fresh)}`,
-      );
-
-    // Строгий резюм припаркованной сессии через рестарт: на eve 0.27.13 сервер принимает
-    // continue-POST (200), но молча теряет сообщение — re-enqueued run не просыпается,
-    // в .workflow-data не появляется ни одного нового события (session-resume wedge).
-    // До фикса ассерт мягкий: падение резюма роняет смоук только под
-    // REPLICA_STRICT_RESUME=1 — этим же флагом баг и воспроизводится.
-    setPhase("resume");
-    const strictResume = process.env.REPLICA_STRICT_RESUME === "1";
+    const freshTurn = await firstTurn(
+      client,
+      "Reply with a status word.",
+      ownedSessions,
+    );
     try {
-      const resumed = client.session(savedState);
-      const echo = await turn(
-        resumed,
-        "What code did I ask you to remember? Reply with the code only.",
-        strictResume ? TURN_TIMEOUT_MS : 45_000,
-      );
-      if (echo !== MARKER)
-        throw new Error(`resume lost the marker: got ${JSON.stringify(echo)}`);
-      console.log("replica smoke: session resume across restart OK");
-    } catch (err) {
-      if (strictResume) throw err;
-      console.warn(
-        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- preserve the original template coercion.
-        `replica smoke: KNOWN ISSUE — session resume across restart failed (${errorDetail(err)})`,
-      );
+      if (freshTurn.message !== "REPLICA_OK")
+        throw new Error(
+          `unexpected post-restart reply: ${JSON.stringify(freshTurn.message)}`,
+        );
+    } finally {
+      await freshTurn.session.reset({ reason: "Replica smoke turn finished" });
+      ownedSessions.delete(freshTurn.session);
     }
 
-    // Положительный контроль канарейки: тот же токен обязан вернуться в СВОЮ сессию,
+    // Строгий резюм по сохранённым sessionId + streamIndex обязан пережить рестарт.
+    setPhase("resume");
+    const resumed = resumeSession(client, savedState);
+    const echo = await turn(
+      resumed,
+      "What code did I ask you to remember? Reply with the code only.",
+    );
+    if (echo !== MARKER)
+      throw new Error(`resume lost the marker: got ${JSON.stringify(echo)}`);
+    await session.reset({ reason: "Replica smoke resume finished" });
+    ownedSessions.delete(session);
+    console.log("replica smoke: session resume across restart OK");
+
+    // Положительный контроль канарейки: тот же адрес обязан вернуть СВОЮ сессию,
     // пережившую рестарт, и увидеть её историю. Без этого шага проверка после reset
     // ничего не доказывает — пустой ответ вернула бы и любая посторонняя сессия.
     setPhase("reset-canary");
-    const before = await canaryTurn(canaryToken, recall);
+    const before = await canaryTurn(canaryAddress, recall);
     if (before.sessionId !== seed.sessionId)
       throw new Error(
-        `canary token did not resume its own session: ${before.sessionId} != ${seed.sessionId}`,
+        `canary address did not resume its own session: ${before.sessionId} != ${seed.sessionId}`,
       );
     if (before.reply !== RESET_MARKER)
       throw new Error(
-        `canary token could not reach its history before reset: ${JSON.stringify(before.reply)}`,
+        `canary address could not reach its history before reset: ${JSON.stringify(before.reply)}`,
       );
 
     const resetResult = await canaryPost(canaryHttp, CANARY_RESET_ROUTE, {
-      token: canaryToken,
+      address: canaryAddress,
     });
     if (resetResult.status !== "reset")
       throw new Error(
@@ -516,20 +550,20 @@ async function main(): Promise<void> {
       );
     if (resetResult.activeSessionAfterReset !== null)
       throw new Error(
-        `reset left the token owned: ${JSON.stringify(resetResult)}`,
+        `reset left the address owned: ${JSON.stringify(resetResult)}`,
       );
 
-    const after = await canaryTurn(canaryToken, recall);
+    const after = await canaryTurn(canaryAddress, recall);
     if (after.sessionId === seed.sessionId)
       throw new Error(
-        `reset did not retire the session: the token still resumes ${after.sessionId}`,
+        `reset did not retire the session: the address still resumes ${after.sessionId}`,
       );
     if (after.reply.includes(RESET_MARKER))
       throw new Error(
         `reset did not clear the context: history survived (${JSON.stringify(after.reply)})`,
       );
     console.log(
-      `replica smoke: reset clears the context on the same token OK (before: ${before.reply}, after: ${after.reply})`,
+      `replica smoke: reset clears the context on the same address OK (before: ${before.reply}, after: ${after.reply})`,
     );
 
     // Канарейка апгрейда. Каталог .eve/.workflow-data — installation-level состояние
@@ -538,7 +572,7 @@ async function main(): Promise<void> {
     // что смена версии гарантированно рушит replay припаркованного run.
     //
     // Исход апгрейда 0.29.5 → 0.30.8 подтверждён прогоном и прибит здесь намертво:
-    // старый continuation-токен НЕ воскрешает свою сессию — на нём заводится свежая,
+    // старый адрес НЕ воскрешает свою сессию — на нём заводится свежая,
     // её история пуста (маркера нет), и ничего из старой истории не протекает. Любой
     // другой исход — регрессия, а не «тоже нормально».
     //
@@ -554,9 +588,9 @@ async function main(): Promise<void> {
     //
     // Ниже канарейка reset, потому что подмена версии убивает все припаркованные сессии.
     setPhase("upgrade-canary");
-    const upgradeToken = `replica-upgrade:${randomBytes(6).toString("hex")}`;
+    const upgradeAddress = `replica-upgrade:${randomBytes(6).toString("hex")}`;
     const upgradeSeed = await canaryTurn(
-      upgradeToken,
+      upgradeAddress,
       `Remember this code: ${UPGRADE_MARKER}`,
     );
     if (upgradeSeed.reply !== "REMEMBERED")
@@ -574,10 +608,10 @@ async function main(): Promise<void> {
     eve = startEve({ app, env, port });
     await waitForHealth(port, eve);
 
-    const upgraded = await canaryTurn(upgradeToken, recall);
+    const upgraded = await canaryTurn(upgradeAddress, recall);
     if (upgraded.sessionId === upgradeSeed.sessionId)
       throw new Error(
-        `token still resumes its pre-upgrade session after the version change: ${upgraded.sessionId}`,
+        `address still resumes its pre-upgrade session after the version change: ${upgraded.sessionId}`,
       );
     if (upgraded.reply.includes(UPGRADE_MARKER))
       throw new Error(
@@ -588,7 +622,7 @@ async function main(): Promise<void> {
         `fresh post-upgrade session did not start empty: ${JSON.stringify(upgraded.reply)}`,
       );
     console.log(
-      `replica smoke: eve version change starts a fresh session on the same token, with no history carried over OK (reply: ${upgraded.reply})`,
+      `replica smoke: eve version change starts a fresh session on the same address, with no history carried over OK (reply: ${upgraded.reply})`,
     );
 
     if (mock.requests.length < 3)
@@ -608,12 +642,23 @@ async function main(): Promise<void> {
     for (const line of logs.slice(-120)) console.error(line);
     process.exitCode = 1;
   } finally {
+    const resetResults = await Promise.allSettled(
+      [...ownedSessions].map((session) =>
+        session.reset({ reason: "Replica smoke stopped" }),
+      ),
+    );
     await stopEve(eve);
     await mock.close();
     if (process.env.REPLICA_KEEP === "1")
       console.error(`sandbox kept: ${sandbox}`);
     else await rm(sandbox, { recursive: true, force: true });
+    for (const result of resetResults) {
+      if (result.status === "rejected")
+        resetErrors.push(result.reason as unknown);
+    }
   }
+  if (resetErrors.length > 0)
+    throw new AggregateError(resetErrors, "replica smoke session reset failed");
 }
 
 await main();

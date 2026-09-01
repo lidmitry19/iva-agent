@@ -1,5 +1,5 @@
 import { verifyTelegramRequest } from "eve/channels/telegram";
-import type { CancelFn } from "eve/channels";
+import type { AttachSessionFn } from "eve/channels";
 import { cancelEveTurn } from "./eve-cancel.ts";
 
 export const TELEGRAM_CANCEL_ROUTE = "/eve/v1/telegram/cancel";
@@ -19,8 +19,8 @@ export function localCancelUrl(env: NodeJS.ProcessEnv = process.env): string {
 
 /**
  * Authenticated Telegram-owned turn cancellation endpoint — путь кнопки ⏹ Стоп
- * и команды /stop. `cancel` — route helper, который eve привязывает к этому
- * authored-каналу, поэтому сырой токен резолвится в пространстве "telegram".
+ * и команды /stop. `attachSession` pins the request to the exact session that
+ * wrote the current run status.
  *
  * Отмена живёт в роуте, а не в обработчике callback_query: публичный cancel eve
  * отдаётся только через RouteHandlerArgs. Мост зовёт роут напрямую, тем же
@@ -28,7 +28,7 @@ export function localCancelUrl(env: NodeJS.ProcessEnv = process.env): string {
  */
 export async function handleTelegramCancelRequest(
   req: Request,
-  cancel: CancelFn,
+  attachSession: AttachSessionFn,
   secretToken?: string,
 ): Promise<Response> {
   let raw;
@@ -41,15 +41,15 @@ export async function handleTelegramCancelRequest(
   let body;
   try {
     body = JSON.parse(raw) as {
-      continuationToken?: unknown;
+      sessionId?: unknown;
       turnId?: unknown;
     } | null;
   } catch {
     return new Response("invalid JSON", { status: 400 });
   }
-  const continuationToken = body?.continuationToken;
-  if (typeof continuationToken !== "string" || continuationToken.length === 0) {
-    return new Response("continuationToken is required", { status: 400 });
+  const sessionId = body?.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return new Response("sessionId is required", { status: 400 });
   }
   const turnId = body?.turnId;
   if (
@@ -59,6 +59,6 @@ export async function handleTelegramCancelRequest(
     return new Response("turnId must be a non-empty string", { status: 400 });
   }
 
-  const result = await cancelEveTurn(cancel, { continuationToken, turnId });
+  const result = await cancelEveTurn(attachSession, { sessionId, turnId });
   return Response.json({ ok: true, ...result });
 }

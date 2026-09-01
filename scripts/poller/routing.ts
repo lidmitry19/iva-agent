@@ -21,7 +21,10 @@ import {
   setChatStatusIf,
 } from "#lib/run-status.ts";
 import { tr } from "#lib/i18n.ts";
-import { TELEGRAM_CLOSED_SESSION_KIND } from "#lib/telegram-acceptance.ts";
+import {
+  TELEGRAM_CLOSED_SESSION_KIND,
+  telegramTurnPolicy,
+} from "#lib/telegram-acceptance.ts";
 import {
   ACCEPTANCE_ROUTE,
   ALLOWED,
@@ -69,6 +72,8 @@ const errorMessage = (error: unknown) => (error as ErrorLike).message;
 const errorCode = (error: unknown) =>
   (error as ErrorLike | null | undefined)?.code;
 const pacedDelivery: DeliverImpl = pacedDeliver;
+// Приёмка падает часто при живой поломке — ждать неделю бессмысленно.
+const TELEGRAM_ACCEPTANCE_ALERT_REPEAT_MS = 10 * 60 * 1000;
 
 type DirectDeliveryOptions = {
   key?: string | null;
@@ -158,6 +163,7 @@ async function deliverDirectUpdate(
           );
           return true;
         },
+        TELEGRAM_ACCEPTANCE_ALERT_REPEAT_MS,
       );
     } catch (error) {
       logImpl(
@@ -171,6 +177,9 @@ async function deliverDirectUpdate(
     onAcceptanceFailure,
     timeoutMs: DIRECT_ACCEPTANCE_TIMEOUT_MS,
     retryAcceptanceTimeout: false,
+    // The durable inbox retries this path; inline retries only cover a brief startup race.
+    // Before issue #212, 30 attempts could block the single-threaded loop for minutes.
+    boundedAttempts: 3,
   });
   // Reply на сообщение бота, чья сессия закрыта: eve не смогла ни продолжить её, ни
   // начать новый ход. Апдейт умирает здесь — владелец снимет его с хранения, иначе
@@ -205,6 +214,7 @@ export async function routeMessageUpdate(
     chatKeyImpl = chatKey,
     loadQueueImpl = () => loadQueue({ strict: true }),
     runningImpl = isRunning,
+    turnPolicyImpl = telegramTurnPolicy,
     inFlight = queueInFlight,
     queueCountImpl = queueCount,
     replyToBotImpl = isReplyToBot,
@@ -229,6 +239,7 @@ export async function routeMessageUpdate(
     chatKeyImpl?: (update: TelegramQueueUpdate) => string | null;
     loadQueueImpl?: () => MaybePromise<TelegramQueueDocument>;
     runningImpl?: (key: string) => boolean;
+    turnPolicyImpl?: typeof telegramTurnPolicy;
     inFlight?: Map<string, QueuePhase>;
     queueCountImpl?: (queue: TelegramQueueDocument, key?: string) => number;
     replyToBotImpl?: (message: TelegramQueueMessage) => boolean;
@@ -266,10 +277,13 @@ export async function routeMessageUpdate(
   } = {},
 ): Promise<RouteMessageResult> {
   const key = chatKeyImpl(update);
+  const turnPolicy = turnPolicyImpl();
   if (update.message && key !== null && !replyToBotImpl(update.message)) {
     const queue = await loadQueueImpl();
     const mustQueue =
-      runningImpl(key) || inFlight.has(key) || queueCountImpl(queue, key) > 0;
+      inFlight.has(key) ||
+      (turnPolicy === "queue" &&
+        (runningImpl(key) || queueCountImpl(queue, key) > 0));
     if (mustQueue) {
       if (!shouldQueueImpl(update, { allowedUserIds, botUsername })) {
         return "dropped";

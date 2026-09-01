@@ -7,8 +7,10 @@ import {
   inputResponseSchema,
   type ClientSession,
   type InputRequest,
+  type InputResponse,
   type MessageResult,
   type SendTurnInput,
+  type SendTurnOptions,
 } from "eve/client";
 
 import {
@@ -232,8 +234,16 @@ function approvalRequest(id = "approval-1"): InputRequest {
   };
 }
 
+type RecordedInput =
+  | SendTurnInput["message"]
+  | (SendTurnInput & { readonly inputResponses?: never })
+  | {
+      readonly inputResponses: readonly InputResponse[];
+      readonly signal?: AbortSignal;
+    };
+
 class FakeSession {
-  readonly inputs: SendTurnInput[] = [];
+  readonly inputs: RecordedInput[] = [];
   resultCalls = 0;
   private readonly results: Array<
     MessageResult | Error | Promise<MessageResult>
@@ -243,12 +253,26 @@ class FakeSession {
     this.results = results;
   }
 
-  asClientSession(): Pick<ClientSession, "send"> {
-    return this as unknown as Pick<ClientSession, "send">;
+  asClientSession(): Pick<ClientSession, "send" | "respond"> {
+    return this as unknown as Pick<ClientSession, "send" | "respond">;
   }
 
-  send(input: SendTurnInput) {
-    this.inputs.push(input);
+  send(message: SendTurnInput["message"], options: SendTurnOptions = {}) {
+    this.inputs.push(
+      Object.keys(options).length > 0 ? { message, ...options } : message,
+    );
+    return this.nextResponse();
+  }
+
+  respond(
+    inputResponses: readonly InputResponse[],
+    options: SendTurnOptions = {},
+  ) {
+    this.inputs.push({ inputResponses, ...options });
+    return this.nextResponse();
+  }
+
+  private nextResponse() {
     assert.ok(this.results.length > 0, "fake session has a queued result");
     const next = this.results.shift();
     return Promise.resolve({
@@ -263,12 +287,19 @@ class FakeSession {
 }
 
 function assertInputResponse(
-  input: SendTurnInput,
+  input: RecordedInput,
   requestId: string,
   optionId: string,
 ): void {
   assert.equal(typeof input, "object");
-  if (typeof input !== "object") return;
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    Array.isArray(input) ||
+    !("inputResponses" in input)
+  ) {
+    return;
+  }
   assert.equal(Array.isArray(input.inputResponses), true);
   assert.equal(input.inputResponses?.length, 1);
   assert.equal(
@@ -731,8 +762,9 @@ test("initial send lifecycle hooks preserve timeout and retry accounting", async
   assert.equal(rejected, 0);
 
   const failed = {
+    respond: () => Promise.reject(new Error("respond rejected")),
     send: () => Promise.reject(new Error("send rejected")),
-  } as unknown as Pick<ClientSession, "send">;
+  } as unknown as Pick<ClientSession, "send" | "respond">;
   await assert.rejects(
     budget.send(failed, "fail", {
       onSendRejected: () => {
@@ -777,7 +809,12 @@ test("send-start hook runs synchronously before every send and preserves the ini
   assert.equal(session.inputs.length, 3);
   for (const followUp of session.inputs.slice(1)) {
     assert.notEqual(typeof followUp, "string");
-    if (typeof followUp !== "string") {
+    if (
+      typeof followUp === "object" &&
+      followUp !== null &&
+      !Array.isArray(followUp) &&
+      "signal" in followUp
+    ) {
       assert.equal(followUp.signal, controller.signal);
     }
   }
@@ -898,7 +935,12 @@ test("an abort while the first continuation is pending blocks the second continu
   );
   const firstFollowUp = session.inputs[1];
   assert.notEqual(typeof firstFollowUp, "string");
-  if (typeof firstFollowUp !== "string") {
+  if (
+    typeof firstFollowUp === "object" &&
+    firstFollowUp !== null &&
+    !Array.isArray(firstFollowUp) &&
+    "signal" in firstFollowUp
+  ) {
     assert.equal(firstFollowUp.signal, controller.signal);
   }
 });
