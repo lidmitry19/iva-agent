@@ -23,39 +23,56 @@ const client = new Client({
   ...(BEARER ? { auth: { bearer: () => Promise.resolve(BEARER) } } : {}),
 });
 
-// The same delivery rule the nightly rollup states, in the same words: this turn's result
-// is delivered by the code below, so a rich message here would be the second message.
-// The red line in agent/instructions.md exempts exactly these two scheduled turns.
-const { response, session } = await client.sessions.create({
-  message:
-    "Load the morning-digest skill and build the morning digest for my tasks. " +
-    `Return the digest ${writtenInLanguage(tr)}. ` +
-    "Return the digest as the final text of this turn. Do not send it anywhere yourself: " +
-    "no rich messages, no digest chat, no Telegram tools. " +
-    "Only the finished digest text, no preamble.",
-});
-const result = await response.result();
+async function main(bot: string, chat: string): Promise<number> {
+  // The same delivery rule the nightly rollup states, in the same words: this turn's result
+  // is delivered by the code below, so a rich message here would be the second message.
+  // The red line in agent/instructions.md exempts exactly these two scheduled turns.
+  const { response, session } = await client.sessions.create({
+    message:
+      "Load the morning-digest skill and build the morning digest for my tasks. " +
+      `Return the digest ${writtenInLanguage(tr)}. ` +
+      "Return the digest as the final text of this turn. Do not send it anywhere yourself: " +
+      "no rich messages, no digest chat, no Telegram tools. " +
+      "Only the finished digest text, no preamble.",
+  });
+  try {
+    const result = await response.result();
 
-// An interactive turn ends with status "waiting" (the session is ready for the next message),
-// so we key off the presence of text rather than the "completed" status.
-if (result.status === "failed" || !result.message) {
-  console.error("Agent did not return a digest:", result.status);
-  process.exit(1);
+    // An interactive turn ends with status "waiting" (the session is ready for the next message),
+    // so we key off the presence of text rather than the "completed" status.
+    if (result.status === "failed" || !result.message) {
+      console.error("Agent did not return a digest:", result.status);
+      return 1;
+    }
+
+    // The markdown → Telegram-HTML conversion + self-heal live in a shared helper.
+    // Ночной ход зовётся своим именем и сшивается по сессии: журнал хода (ADR-0010).
+    const r = await sendTelegramHtml(bot, chat, result.message, {
+      trace: { session: response.sessionId, source: "digest" },
+    });
+    if (r.fellBack) {
+      try {
+        await session.send(
+          `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +
+            "format more simply next time: **bold**, `code`, lists, no raw HTML.",
+        );
+      } catch (error) {
+        console.error("digest: format feedback failed:", error);
+      }
+    }
+    if (!r.ok) {
+      console.error("digest: Telegram send failed:", r.error);
+      return 1;
+    }
+    console.log("Digest sent to Telegram.");
+    return 0;
+  } finally {
+    try {
+      await session.reset({ reason: "Daily digest finished" });
+    } catch (error) {
+      console.error("digest: session reset failed:", error);
+    }
+  }
 }
 
-// The markdown → Telegram-HTML conversion + self-heal live in a shared helper.
-// Ночной ход зовётся своим именем и сшивается по сессии: журнал хода (ADR-0010).
-const r = await sendTelegramHtml(BOT, CHAT, result.message, {
-  trace: { session: response.sessionId, source: "digest" },
-});
-if (r.fellBack) {
-  await session.send(
-    `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +
-      "format more simply next time: **bold**, `code`, lists, no raw HTML.",
-  );
-}
-if (!r.ok) {
-  console.error("digest: Telegram send failed:", r.error);
-  process.exit(1);
-}
-console.log("Digest sent to Telegram.");
+process.exitCode = await main(BOT, CHAT);

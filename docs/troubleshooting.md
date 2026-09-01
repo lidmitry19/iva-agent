@@ -47,9 +47,13 @@ Cause: a wedged turn lives in `.workflow-data`, and eve re-enqueues it on every 
 iva reset   # stop services, quarantine workflow + Telegram busy/queue state, restart
 ```
 
-From Telegram, `/new` resets only the current chat or forum topic. `/restart` resets that same conversation and then restarts the agent process. Both are handled out-of-band and work while the agent is busy. Use server-side `iva reset` only when the entire workflow store is damaged.
+From Telegram, `/new` resets only the current chat or forum topic. `/restart` resets that same session and then restarts the agent process. Both are handled out-of-band and work while the agent is busy. Use server-side `iva reset` only when the entire workflow store is damaged.
 
 After upgrading a legacy group with no recorded Eve token, send `/new` as a reply to Iva's latest message once. Future resets use the exact token stored by the new channel events.
+
+### Bot silent or stuck after an update
+
+An update now resets every open session before services restart. Each chat starts with fresh context; Vault and long-term History stay intact. Telegram messages queued while services were stopped are also preserved.
 
 ### Long or formatted message gets no reply
 

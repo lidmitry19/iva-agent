@@ -232,10 +232,12 @@ async function turnResult(
 async function firstTurn(
   client: Client,
   prompt: string,
+  ownedSessions: Set<ClientSession>,
 ): Promise<{ session: ClientSession; message: string }> {
   const { session, response } = await client.sessions.create({
     message: prompt,
   });
+  ownedSessions.add(session);
   note(`[smoke] send accepted (session ${session.state.sessionId})`);
   return { session, message: await turnResult(response) };
 }
@@ -389,6 +391,8 @@ async function forgeEveStepVersion(app: string): Promise<number> {
 async function main(): Promise<void> {
   const sandbox = await mkdtemp(join(tmpdir(), "iva-replica-"));
   const mock = await startMockOpenAiServer();
+  const ownedSessions = new Set<ClientSession>();
+  const resetErrors: unknown[] = [];
   let eve: EveProcess | null = null;
   try {
     const app = await prepareReplica(sandbox);
@@ -433,7 +437,11 @@ async function main(): Promise<void> {
     });
 
     setPhase("first-reply");
-    const created = await firstTurn(client, "Reply with a status word.");
+    const created = await firstTurn(
+      client,
+      "Reply with a status word.",
+      ownedSessions,
+    );
     const session = created.session;
     const first = created.message;
     if (first !== "REPLICA_OK")
@@ -491,14 +499,20 @@ async function main(): Promise<void> {
     await waitForHealth(port, eve);
 
     setPhase("post-restart");
-    const { message: fresh } = await firstTurn(
+    const freshTurn = await firstTurn(
       client,
       "Reply with a status word.",
+      ownedSessions,
     );
-    if (fresh !== "REPLICA_OK")
-      throw new Error(
-        `unexpected post-restart reply: ${JSON.stringify(fresh)}`,
-      );
+    try {
+      if (freshTurn.message !== "REPLICA_OK")
+        throw new Error(
+          `unexpected post-restart reply: ${JSON.stringify(freshTurn.message)}`,
+        );
+    } finally {
+      await freshTurn.session.reset({ reason: "Replica smoke turn finished" });
+      ownedSessions.delete(freshTurn.session);
+    }
 
     // Строгий резюм по сохранённым sessionId + streamIndex обязан пережить рестарт.
     setPhase("resume");
@@ -509,6 +523,8 @@ async function main(): Promise<void> {
     );
     if (echo !== MARKER)
       throw new Error(`resume lost the marker: got ${JSON.stringify(echo)}`);
+    await session.reset({ reason: "Replica smoke resume finished" });
+    ownedSessions.delete(session);
     console.log("replica smoke: session resume across restart OK");
 
     // Положительный контроль канарейки: тот же адрес обязан вернуть СВОЮ сессию,
@@ -626,12 +642,23 @@ async function main(): Promise<void> {
     for (const line of logs.slice(-120)) console.error(line);
     process.exitCode = 1;
   } finally {
+    const resetResults = await Promise.allSettled(
+      [...ownedSessions].map((session) =>
+        session.reset({ reason: "Replica smoke stopped" }),
+      ),
+    );
     await stopEve(eve);
     await mock.close();
     if (process.env.REPLICA_KEEP === "1")
       console.error(`sandbox kept: ${sandbox}`);
     else await rm(sandbox, { recursive: true, force: true });
+    for (const result of resetResults) {
+      if (result.status === "rejected")
+        resetErrors.push(result.reason as unknown);
+    }
   }
+  if (resetErrors.length > 0)
+    throw new AggregateError(resetErrors, "replica smoke session reset failed");
 }
 
 await main();

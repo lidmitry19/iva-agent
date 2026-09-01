@@ -17,8 +17,26 @@ export type ReminderTurn = {
 
 type RunAgentTurn = (prompt: string) => Promise<ReminderTurn>;
 type Timeout = <T>(work: Promise<T>, timeoutMs: number) => Promise<T>;
+type ReminderClient = {
+  readonly sessions: {
+    create(input: { readonly message: string }): Promise<{
+      readonly response: {
+        result(): Promise<{
+          readonly status: string;
+          readonly message?: string;
+        }>;
+      };
+      readonly session: {
+        send(message: string): Promise<unknown>;
+        reset(options: { readonly reason: string }): Promise<unknown>;
+      };
+    }>;
+  };
+};
+type CreateClient = () => Promise<ReminderClient>;
 
 export type RemindDependencies = {
+  readonly createClient?: CreateClient;
   readonly readEnv?: typeof readEnvFresh;
   readonly send?: SendTelegramHtml;
   readonly runAgentTurn?: RunAgentTurn;
@@ -46,24 +64,44 @@ const deadline: Timeout = (work, timeoutMs) =>
     );
   });
 
-async function runAgentTurn(prompt: string): Promise<ReminderTurn> {
+async function defaultCreateClient(): Promise<ReminderClient> {
   const { Client } = await import("eve/client");
   const port = process.env.IVA_PORT ?? "8723";
   const host = process.env.ASSISTANT_HOST ?? `http://127.0.0.1:${port}`;
   const bearer = process.env.ASSISTANT_BEARER;
-  const client = new Client({
+  return new Client({
     host,
     ...(bearer ? { auth: { bearer: () => Promise.resolve(bearer) } } : {}),
   });
-  const { response, session } = await client.sessions.create({
-    message: prompt,
-  });
-  const result = await response.result();
-  return {
-    status: result.status,
-    ...(typeof result.message === "string" ? { message: result.message } : {}),
-    feedback: async (message) => session.send(message),
-  };
+}
+
+async function runAgentTurn(
+  prompt: string,
+  createClient: CreateClient = defaultCreateClient,
+): Promise<ReminderTurn> {
+  const client = await createClient();
+  let session:
+    Awaited<ReturnType<typeof client.sessions.create>>["session"] | undefined;
+  try {
+    const created = await client.sessions.create({ message: prompt });
+    session = created.session;
+    const result = await created.response.result();
+    return {
+      status: result.status,
+      ...(typeof result.message === "string"
+        ? { message: result.message }
+        : {}),
+      feedback: async (message) => session?.send(message),
+    };
+  } finally {
+    if (session) {
+      try {
+        await session.reset({ reason: "Reminder finished" });
+      } catch (error) {
+        console.error("remind: session reset failed:", error);
+      }
+    }
+  }
 }
 
 /** Create the remind command without reading .env or touching eve at import time. */
@@ -97,10 +135,13 @@ export function createRemindCommand(
         `Return the text ${writtenInLanguage(tr)}. ` +
         "Do not send anything yourself: no rich messages and no Telegram tools. " +
         "Only the finished reminder text, no preamble.";
-      const runner = dependencies.runAgentTurn ?? runAgentTurn;
+      const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const runner =
+        dependencies.runAgentTurn ??
+        ((prompt) => runAgentTurn(prompt, dependencies.createClient));
       turn = await (dependencies.timeout ?? deadline)(
         runner(prompt),
-        dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        timeoutMs,
       );
     } catch {
       turn = undefined;

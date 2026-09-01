@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   readdirSync,
+  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -19,7 +20,13 @@ import {
   isEntrypoint,
   refreshOwnedShim,
   SHIM_PATH,
+  throughLink,
 } from "./lib/version-layout.ts";
+import {
+  quarantinePath,
+  rewriteRunStatusesForUpdate,
+  sessionStateTargets,
+} from "./lib/wf-store.ts";
 import {
   adoptUpdateLock,
   layoutFor,
@@ -48,6 +55,70 @@ type WriterRuntime = Pick<
   CliRuntime,
   "BRAIN_TIMER" | "BRAIN_SERVICE" | "SERVICES" | "SVC_USERBOT" | "systemd"
 >;
+
+export type UpdateQuarantine = {
+  readonly path: string;
+  readonly trash: string;
+};
+
+/** Retire open session state as one reversible update step. */
+export function quarantineUpdateState(
+  root: string,
+  dataDir: string,
+  notify: Say,
+  stamp = new Date().toISOString().replace(/[:.]/gu, "-"),
+): UpdateQuarantine[] {
+  const quarantined: UpdateQuarantine[] = [];
+  try {
+    for (const target of sessionStateTargets(root, dataDir)) {
+      const path = throughLink(target);
+      const trash = quarantinePath(target, stamp);
+      if (trash) quarantined.push({ path, trash });
+    }
+    return quarantined;
+  } catch (error) {
+    try {
+      restoreUpdateStateOrNotify(
+        quarantined,
+        notify,
+        "update state quarantine and recovery both failed",
+      );
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        "update state quarantine and restoration both failed",
+        { cause: restoreError },
+      );
+    }
+    throw error;
+  }
+}
+
+/** Put quarantined state back before the previous version starts. */
+export function restoreUpdateState(
+  quarantined: readonly UpdateQuarantine[],
+): void {
+  for (const entry of [...quarantined].reverse()) {
+    rmSync(entry.path, { recursive: true, force: true });
+    renameSync(entry.trash, entry.path);
+  }
+}
+
+/** Restore update state and tell the owner where manual recovery data remains. */
+export function restoreUpdateStateOrNotify(
+  quarantined: readonly UpdateQuarantine[],
+  notify: Say,
+  failure: string,
+): void {
+  try {
+    restoreUpdateState(quarantined);
+  } catch (error) {
+    notify(
+      `${failure}; state is in ${quarantined.map(({ trash }) => trash).join(", ")}; manual help is needed`,
+    );
+    throw error;
+  }
+}
 
 export type OptionalWriterState = {
   readonly unit: string;
@@ -528,6 +599,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const notify: Say = (message) => console.log(`! ${message}`);
   let optionalWriterState: OptionalWriterState[] | undefined;
   let unitMigrationStarted = false;
+  let quarantinedState: UpdateQuarantine[] = [];
   let outcome: UpdateOutcome;
   try {
     outcome = await finishVersionUpdate({
@@ -543,21 +615,41 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { createCliRuntime } = await import("./cli/runtime.ts");
         // Before the first conversion there is no current symlink: the checkout
         // itself is the old writer root and must remain usable until activation.
-        const runtime = createCliRuntime(
-          existsSync(layout.current) ? layout.current : home,
-        );
+        const writerRoot = existsSync(layout.current) ? layout.current : home;
+        const runtime = createCliRuntime(writerRoot);
         optionalWriterState = captureOptionalWriterState(runtime);
         stopWriterUnits(runtime, optionalWriterState);
+        quarantinedState = quarantineUpdateState(
+          writerRoot,
+          layout.data,
+          notify,
+        );
+        rewriteRunStatusesForUpdate(layout.data);
         await Promise.resolve();
       },
       resumeOldWriters: async (root) => {
         const { createCliRuntime } = await import("./cli/runtime.ts");
         const runtime = createCliRuntime(root);
+        let stateReady = true;
         try {
+          if (quarantinedState.length > 0) {
+            stopWriterUnits(runtime, optionalWriterState);
+            try {
+              restoreUpdateStateOrNotify(
+                quarantinedState,
+                notify,
+                "recovery after rollback failed",
+              );
+              quarantinedState = [];
+            } catch (error) {
+              stateReady = false;
+              throw error;
+            }
+          }
           // Recovery before activation must not rewrite or retire old unit files.
           runtime.systemd.restart(runtime.SERVICES);
         } finally {
-          if (optionalWriterState)
+          if (stateReady && optionalWriterState)
             restoreWriterOwnership(runtime, optionalWriterState, {
               unitMigrationStarted,
               legacyMemoryOwnerProven: false,
