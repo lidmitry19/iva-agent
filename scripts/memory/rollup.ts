@@ -202,8 +202,8 @@ const client = new Client({
 // when one scheduled call ends: the next call resumes the same context. One persistent
 // session per period caps that at one running workflow. Rotation stays RARE because every
 // rotation retires that reusable context. Abandoned sessions are logged to
-// data/rollup-abandoned.jsonl; `iva reset` and updates clear them with the store. The fixed
-// session ID lives in data/ and update quarantine retires it with the matching workflow.
+// data/rollup-abandoned.jsonl and reset best-effort when abandoned. The fixed session ID
+// lives in data/ and update quarantine retires it with the matching workflow.
 const DATA_DIR = resolveDataDir(process.cwd());
 const SESSION_FILE = join(DATA_DIR, `rollup-session-${period}.json`);
 // 14 days, not 90. The session carries the whole history of previous rollups, and the
@@ -221,10 +221,10 @@ const SESSION_TTL_MS = 14 * 24 * 3600 * 1000;
 // one, which has nothing to miss and must hear nothing. Best-effort by design: ADR-0007.
 const RAN_BEFORE = rollupRanBefore(DATA_DIR, VAULT);
 
-function loadSession(): {
+async function loadSession(): Promise<{
   readonly sessionId: string;
   readonly createdAt: number;
-} | null {
+} | null> {
   try {
     const parsed: unknown = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
     // The eve <=0.30 file stored `{state:{...},createdAt}`. It is intentionally
@@ -233,6 +233,7 @@ function loadSession(): {
     if (!saved) return null;
     if (Date.now() - saved.createdAt > SESSION_TTL_MS) {
       logAbandoned(saved.sessionId, "ttl-rotation");
+      await resetAbandonedSession(saved.sessionId, "ttl-rotation");
       return null;
     }
     return saved;
@@ -264,6 +265,22 @@ function logAbandoned(sessionId: string, reason: string): void {
     );
   } catch {
     /* журнал не должен ронять ночь */
+  }
+}
+
+async function resetAbandonedSession(
+  sessionId: string,
+  reason: string,
+  attached?: ClientSession,
+): Promise<void> {
+  try {
+    const abandoned = attached ?? client.sessions.attach(sessionId);
+    await abandoned.reset({ reason: `Rollup abandoned: ${reason}` });
+  } catch (error) {
+    console.error(
+      `rollup ${period}: could not reset abandoned session ${sessionId} (${reason}):`,
+      error,
+    );
   }
 }
 
@@ -328,7 +345,9 @@ async function dropHungSession(
   label: string,
 ): Promise<void> {
   await cancelTurnQuietly(hungSession);
-  logAbandoned(hungSession.state.sessionId, `${label}-timeout`);
+  const reason = `${label}-timeout`;
+  logAbandoned(hungSession.state.sessionId, reason);
+  await resetAbandonedSession(hungSession.state.sessionId, reason, hungSession);
   try {
     rmSync(SESSION_FILE, { force: true });
   } catch {
@@ -351,7 +370,7 @@ const yesterday = shiftDate(today, -1);
 // Снимок CORE ДО хода: файл правит сама ночь, и пропажу секции видно только сравнением
 // с тем, что было. Читается всегда, даже если ночь CORE не откроет вовсе.
 const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
-const saved = loadSession();
+const saved = await loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.sessions.attach(saved.sessionId) : undefined;
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
@@ -395,12 +414,15 @@ try {
       `rollup ${period}: could not confirm cancellation of the unresolved turn — refusing fresh retry`,
     );
     logAbandoned(saved.sessionId, "cancel-unconfirmed");
+    await resetAbandonedSession(saved.sessionId, "cancel-unconfirmed", session);
     throw e;
   }
   console.error(
     `rollup ${period}: parked session ${hung ? "hung" : "unusable"} (${(e as Error).message}) — starting fresh`,
   );
-  logAbandoned(saved.sessionId, hung ? "resume-timeout" : "unusable-session");
+  const abandonReason = hung ? "resume-timeout" : "unusable-session";
+  logAbandoned(saved.sessionId, abandonReason);
+  await resetAbandonedSession(saved.sessionId, abandonReason, session);
   session = undefined;
   sessionCreatedAt = Date.now();
   // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
@@ -444,12 +466,22 @@ if (
       activeSession.state.sessionId,
       "stale-result-cancel-unconfirmed",
     );
+    await resetAbandonedSession(
+      activeSession.state.sessionId,
+      "stale-result-cancel-unconfirmed",
+      activeSession,
+    );
     process.exit(1);
   }
   console.error(
     `rollup ${period}: result does not match the prompt just sent (stale stream cursor); cancellation confirmed — dropping session`,
   );
   logAbandoned(activeSession.state.sessionId, "stale-result");
+  await resetAbandonedSession(
+    activeSession.state.sessionId,
+    "stale-result",
+    activeSession,
+  );
   try {
     rmSync(SESSION_FILE, { force: true });
   } catch {
