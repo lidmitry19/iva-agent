@@ -198,13 +198,12 @@ const client = new Client({
 });
 
 // Session REUSE, not a fresh session per night. eve backs every client session with a
-// workflowEntry run in .eve/.workflow-data that nothing ever closes (the client API has
-// no delete), so a fresh session per rollup leaked one forever-"running" run per night
-// and eve re-enqueued the whole pile on every start. One persistent session per period
-// caps that at one run. Rotation stays RARE for that reason: every rotation abandons one
-// run in the store (nothing can close it), so per-night rotation would just re-create the
-// leak. Abandoned sessions are logged to data/rollup-abandoned.jsonl for the record;
-// `iva reset` clears them together with the store. The fixed session ID lives in data/.
+// workflowEntry run in .eve/.workflow-data. Rollup deliberately does not reset its session
+// when one scheduled call ends: the next call resumes the same context. One persistent
+// session per period caps that at one running workflow. Rotation stays RARE because every
+// rotation retires that reusable context. Abandoned sessions are logged to
+// data/rollup-abandoned.jsonl; `iva reset` and updates clear them with the store. The fixed
+// session ID lives in data/ and update quarantine retires it with the matching workflow.
 const DATA_DIR = resolveDataDir(process.cwd());
 const SESSION_FILE = join(DATA_DIR, `rollup-session-${period}.json`);
 // 14 days, not 90. The session carries the whole history of previous rollups, and the
