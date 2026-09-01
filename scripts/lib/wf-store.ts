@@ -60,14 +60,40 @@ export function quarantineDir(dir: string, stamp?: string): string | null {
   return quarantinePath(dir, stamp);
 }
 
-// Полный reset должен атомарно вывести из обращения и workflow, и Telegram control state.
-export function resetStateTargets(root: string, dataDir: string): string[] {
+/** State that an update retires so every conversation starts with fresh context. */
+export function conversationStateTargets(
+  root: string,
+  dataDir: string,
+): string[] {
+  let rollupSessions: string[];
+  try {
+    rollupSessions = readdirSync(dataDir)
+      .filter((name) => /^rollup-session-.+\.json$/u.test(name))
+      .sort()
+      .map((name) => join(dataDir, name));
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) throw error;
+    rollupSessions = [];
+  }
   return [
     join(root, ".eve", ".workflow-data"),
     join(root, ".workflow-data"),
     join(dataDir, "run-status.d"),
     join(dataDir, "run-status.json"),
-    join(dataDir, "telegram-queue.json"),
+    ...rollupSessions,
+  ];
+}
+
+/** Inbound Telegram input belongs to reset, never to an update. */
+export function queuedInputTargets(dataDir: string): string[] {
+  return [join(dataDir, "telegram-queue.json")];
+}
+
+// Полный reset должен атомарно вывести из обращения workflow, status и очередь.
+export function resetStateTargets(root: string, dataDir: string): string[] {
+  return [
+    ...conversationStateTargets(root, dataDir),
+    ...queuedInputTargets(dataDir),
   ];
 }
 
