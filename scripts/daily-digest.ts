@@ -64,7 +64,11 @@ async function main(bot: string, chat: string): Promise<number> {
     console.log("Digest sent to Telegram.");
     return 0;
   } finally {
-    await session.reset({ reason: "Daily digest finished" });
+    try {
+      await session.reset({ reason: "Daily digest finished" });
+    } catch (error) {
+      console.error("digest: session reset failed:", error);
+    }
   }
 }
 

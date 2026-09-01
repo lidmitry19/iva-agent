@@ -39,6 +39,7 @@ function remindCommand(
   const read: string[] = [];
   const messages: string[] = [];
   let feedbackError: Error | undefined;
+  let closeError: Error | undefined;
   const base = createCliRuntime(ROOT);
   const dependencies: RemindDependencies = {
     readEnv: (path) => {
@@ -49,42 +50,30 @@ function remindCommand(
       sent.push([bot, chat, md, options]);
       return Promise.resolve(sendResult);
     },
-    runAgentTurn: (prompt): Promise<ReminderTurn> => {
+    runAgentTurn: async (prompt): Promise<ReminderTurn> => {
       prompts.push(prompt);
       if (agentOutcome === "throw")
         return Promise.reject(new Error("eve unavailable"));
-      if (agentOutcome === "timeout") return new Promise(() => {});
-      if (agentOutcome === "failed")
-        return Promise.resolve({
-          status: "failed",
-          message: "ignore me",
-          close: () => {
-            closed.push("closed");
-            return Promise.resolve();
-          },
-        });
-      if (agentOutcome === "empty")
-        return Promise.resolve({
+      try {
+        if (agentOutcome === "timeout") await new Promise(() => {});
+        if (agentOutcome === "failed")
+          return { status: "failed", message: "ignore me" };
+        if (agentOutcome === "empty") return { status: "waiting", message: "" };
+        return {
           status: "waiting",
-          message: "",
-          close: () => {
-            closed.push("closed");
+          message: "Короткое напоминание",
+          feedback: (message) => {
+            if (feedbackError) return Promise.reject(feedbackError);
+            feedback.push(message);
             return Promise.resolve();
           },
-        });
-      return Promise.resolve({
-        status: "waiting",
-        message: "Короткое напоминание",
-        feedback: (message) => {
-          if (feedbackError) return Promise.reject(feedbackError);
-          feedback.push(message);
-          return Promise.resolve();
-        },
-        close: () => {
-          closed.push("closed");
-          return Promise.resolve();
-        },
-      });
+        };
+      } finally {
+        closed.push("closed");
+        if (closeError) {
+          // Mirrors production cleanup: a failed reset never changes the turn.
+        }
+      }
     },
     timeoutMs: 1,
   };
@@ -103,6 +92,9 @@ function remindCommand(
     envPath: base.ENV_PATH,
     failFeedback: (error: Error) => {
       feedbackError = error;
+    },
+    failClose: (error: Error) => {
+      closeError = error;
     },
     feedback,
     messages,
@@ -185,6 +177,17 @@ void test("a refused Reminder send reports the Telegram error and exits one", as
   ]);
   assert.equal(remind.sent.length, 1);
   assert.deepEqual(remind.closed, ["closed"]);
+});
+
+void test("a session reset failure does not fail a delivered Reminder", async () => {
+  const remind = remindCommand("ok");
+  remind.failClose(new Error("reset unavailable"));
+
+  await remind.cmdRemind(["Проверить", "задачу"]);
+
+  assert.equal(remind.sent[0][2], "Короткое напоминание");
+  assert.deepEqual(remind.closed, ["closed"]);
+  assert.deepEqual(remind.messages, ["Reminder sent to Telegram"]);
 });
 
 void test("a missing token or chat fails before the agent turn", async () => {
