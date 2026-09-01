@@ -26,12 +26,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rewriteRunStatusesForUpdate } from "../agent/lib/run-status.ts";
 import {
   LEGACY_BRAIN_UNITS,
   LEGACY_MEMORY_UNITS,
 } from "./lib/legacy-memory-units.ts";
 import { layoutFor } from "./lib/version-store.ts";
+import { rewriteRunStatusesForUpdate } from "./lib/wf-store.ts";
 
 type WriterRuntime = Parameters<typeof stopWriterUnits>[0];
 const USERBOT = "iva-telegram-userbot.service";

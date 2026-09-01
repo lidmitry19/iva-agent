@@ -8,7 +8,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { rewriteRunStatusesForUpdate } from "../agent/lib/run-status.ts";
 import { CATALOG, catalogProvider } from "./lib/model-catalog.ts";
 import { notificationChat } from "./lib/notification-chat.ts";
 import {
@@ -23,7 +22,11 @@ import {
   SHIM_PATH,
   throughLink,
 } from "./lib/version-layout.ts";
-import { quarantinePath, sessionStateTargets } from "./lib/wf-store.ts";
+import {
+  quarantinePath,
+  rewriteRunStatusesForUpdate,
+  sessionStateTargets,
+} from "./lib/wf-store.ts";
 import {
   adoptUpdateLock,
   layoutFor,

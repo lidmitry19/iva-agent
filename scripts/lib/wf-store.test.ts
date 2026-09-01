@@ -18,6 +18,7 @@ import {
   quarantinePath,
   queuedInputTargets,
   resetStateTargets,
+  rewriteRunStatusesForUpdate,
   sessionStateTargets,
 } from "./wf-store.ts";
 
@@ -142,4 +143,47 @@ void test("global reset plan includes workflow and all Telegram control-state ta
     "/var/lib/iva/run-status.json",
     "/var/lib/iva/telegram-queue.json",
   ]);
+});
+
+void test("update rewrite expires valid chats and preserves cleanup fields", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wf-store-run-status-"));
+  const dir = join(dataDir, "run-status.d");
+  const file = join(dir, "chat.json");
+  const damagedFile = join(dir, "damaged.json");
+  mkdirSync(dir);
+  writeFileSync(
+    file,
+    JSON.stringify({
+      generation: 1,
+      status: "idle",
+      updatedAt: Date.now(),
+      sessionId: "session-to-reset",
+      statusMessageId: 4242,
+      custom: "preserved",
+    }),
+    { mode: 0o600 },
+  );
+  writeFileSync(damagedFile, "{not json", { mode: 0o600 });
+
+  rewriteRunStatusesForUpdate(dataDir);
+
+  const record = JSON.parse(readFileSync(file, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.deepEqual(record, {
+    generation: 1,
+    status: "running",
+    updatedAt: 0,
+    sessionId: "session-to-reset",
+    statusMessageId: 4242,
+    custom: "preserved",
+  });
+  assert.equal(
+    record.status === "running" &&
+      Date.now() - Number(record.updatedAt) < 60_000,
+    false,
+  );
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(readFileSync(damagedFile, "utf8"), "{not json");
 });

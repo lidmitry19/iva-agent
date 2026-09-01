@@ -78,31 +78,6 @@ test("the first normal rewrite removes the retired routing field", () => {
   assert.equal(rewritten.sessionId, "session-current");
 });
 
-test("update rewrite expires every valid chat and preserves session cleanup fields", () => {
-  const key = "update-rewrite:";
-  status.setChatStatus(key, {
-    status: "idle",
-    sessionId: "session-to-reset",
-    statusMessageId: 4242,
-    custom: "preserved",
-  });
-  const dir = join(dataDir, "run-status.d");
-  writeFileSync(join(dir, "damaged.json"), "{not json", { mode: 0o600 });
-
-  status.rewriteRunStatusesForUpdate(dataDir);
-
-  assert.equal(status.isRunning(key), false);
-  assert.deepEqual(status.getChatStatus(key), {
-    generation: 1,
-    status: "running",
-    updatedAt: 0,
-    sessionId: "session-to-reset",
-    statusMessageId: 4242,
-    custom: "preserved",
-  });
-  assert.equal(readFileSync(join(dir, "damaged.json"), "utf8"), "{not json");
-});
-
 test("distinct chats survive bounded concurrent writers", async () => {
   const workers = 8;
   const keysPerWorker = 100;
