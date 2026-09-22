@@ -86,6 +86,17 @@ function portMigrationMessage(migration: PortMigration): string {
   return `.env migrated → IVA_PORT=${migration.port}${moved}`;
 }
 
+// These units belonged to the short-lived read-only Bitrix integration and its
+// standalone night watchdog. Current releases use the local Bitrix gateway on
+// demand and the in-process jobs-watchdog schedule instead. Keep the migration
+// exact so a user-created Iva unit is never touched.
+const RETIRED_AUXILIARY_UNITS = [
+  "iva-bitrix-sync.service",
+  "iva-bitrix-sync.timer",
+  "iva-night-watchdog.service",
+  "iva-night-watchdog.timer",
+] as const;
+
 export function createCliSystemd(runtime: CliRuntime) {
   const {
     ROOT,
@@ -284,6 +295,7 @@ export function createCliSystemd(runtime: CliRuntime) {
     ];
     reloadUnits();
     if (!options.deferBrainMigration) removeLegacyBrainUnits(written);
+    removeRetiredAuxiliaryUnits();
     return written;
   }
 
@@ -339,6 +351,19 @@ export function createCliSystemd(runtime: CliRuntime) {
       reload: () => systemd.daemonReload(),
       reset: () => systemd.resetFailed(),
     };
+  }
+
+  // deploy/ no longer ships these files, so a normal unit refresh cannot
+  // overwrite or remove them. Retire exact names without restarting SERVICES.
+  function removeRetiredAuxiliaryUnits(): string[] {
+    const units = installedUnits(RETIRED_AUXILIARY_UNITS);
+    if (!units.length) return [];
+    try {
+      return cleanupSystemdUnits({ units, ...unitCleanupSteps() });
+    } catch (error) {
+      warn((error as { message: string }).message);
+      return units;
+    }
   }
 
   // The Brain rename: iva-memory-doctor.{service,timer} → iva-brain.{service,timer}. deploy/
