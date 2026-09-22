@@ -115,3 +115,35 @@ test("расписаний нет — «skipping legacy memory-timer cleanup», 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("retired Bitrix and night-watchdog units are removed by exact name", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-retired-aux-units-"));
+  try {
+    const project = join(dir, "iva");
+    const unitDir = join(dir, "home/.config/systemd/user");
+    mkdirSync(unitDir, { recursive: true });
+    mkdirSync(join(project, "deploy"), { recursive: true });
+    const obsolete = [
+      "iva-bitrix-sync.service",
+      "iva-bitrix-sync.timer",
+      "iva-night-watchdog.service",
+      "iva-night-watchdog.timer",
+    ];
+    for (const unit of obsolete) writeFileSync(join(unitDir, unit), "[Unit]\n");
+    writeFileSync(join(unitDir, "iva-owner-extra.timer"), "[Unit]\n");
+    const events: string[] = [];
+
+    services(project, unitDir, events).writeUnits();
+    for (const unit of obsolete)
+      assert.equal(existsSync(join(unitDir, unit)), false, unit);
+    assert.equal(existsSync(join(unitDir, "iva-owner-extra.timer")), true);
+    assert.deepEqual(events, [
+      "reload",
+      ...obsolete.map((unit) => `disable:${unit}`),
+      "reload",
+      "reset",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
