@@ -17,6 +17,9 @@ iva_guard_open_sudo_window
 
 The normal IVA service is installed from the reviewed checkout through the versioned installer entrypoint:
 
+The root helper must receive `LIVE_REPO` as an absolute, clean reviewed checkout.
+The production deployment root is a bare Git mirror and is not a valid value.
+
 ```sh
 "$LIVE_REPO/bin/iva.mjs" _install-units
 ExecStart=$NODE24_BIN_DIR/node --env-file=.env scripts/bitrix-sync.ts --daily

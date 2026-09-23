@@ -5,7 +5,11 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 077
 
-LIVE_REPO=/home/iva/iva
+# The IVA deployment root is a bare mirror on production.  The reviewed
+# worktree must therefore be selected explicitly by the trusted admin who
+# invokes this fixed helper; silently defaulting to the mirror makes every
+# install fail before the no-mutation preflight completes.
+LIVE_REPO=${LIVE_REPO:-}
 ROOT_DIR=/usr/local/lib/iva-bitrix-admin
 ROOT_COPY=/usr/local/lib/iva-bitrix-admin/install
 IVA_USER=iva
@@ -67,6 +71,8 @@ SELF_REAL=$(/usr/bin/readlink -f -- "$0")
 [[ -n ${SUDO_USER:-} && ${SUDO_USER} != root ]] || fail 'A non-root SUDO_USER is required.' 2
 [[ ${SUDO_UID:-} =~ ^[0-9]+$ && ${SUDO_UID} != 0 ]] || fail 'A non-root SUDO_UID is required.' 2
 [[ $(/usr/bin/id -u "$SUDO_USER") == "$SUDO_UID" ]] || fail 'SUDO_USER and SUDO_UID do not match.' 2
+[[ -n "$LIVE_REPO" && "$LIVE_REPO" == /* ]] ||
+  fail 'LIVE_REPO must be an absolute path to the reviewed checkout.' 2
 
 SUDO_CALLER=$SUDO_USER
 SUDO_CALLER_HOME=$(/usr/bin/getent passwd "$SUDO_CALLER" | /usr/bin/cut -d: -f6)
