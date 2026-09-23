@@ -894,7 +894,7 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
   ).replace(/\r\n/gu, "\n");
   const dropinPreflight = admin.indexOf("\nassert_no_gateway_dropins\n");
   const stage = admin.indexOf(
-    "STAGE_ROOT=$(/usr/bin/mktemp -d /run/iva-bitrix-admin-stage.XXXXXX)",
+    'STAGE_ROOT=$(/usr/bin/mktemp -d "$ROOT_DIR/stage.XXXXXX")',
   );
   const manifestWrite = admin.indexOf(
     'write_manifest > "$MANIFEST_FILE"',
@@ -961,6 +961,10 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
     /fixed admin helper directory must be root:root mode 700/u,
   );
   assert.match(admin, /root-only admin staging snapshot/u);
+  assert.match(
+    admin,
+    /\/usr\/local\/lib\/iva-bitrix-admin\/stage\.\*/u,
+  );
   assert.match(admin, /A non-root SUDO_USER is required/u);
   assert.match(admin, /\/usr\/sbin\/runuser -u "\$IVA_USER"/u);
   assert.match(admin, /run_git_as_iva\(\)/u);
