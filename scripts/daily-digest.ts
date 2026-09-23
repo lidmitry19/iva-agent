@@ -1,78 +1,34 @@
-// The opt-in in-process eve schedule in agent/schedules/digest.ts asks the agent for a
-// morning digest and sends it to Telegram. It is disabled by default in data/settings.json.
-//
-// Requires: a running agent (eve start) and the TELEGRAM_BOT_TOKEN, TELEGRAM_DIGEST_CHAT_ID variables.
-import { Client } from "eve/client";
-import { tr } from "#lib/i18n.ts";
-import { writtenInLanguage } from "./lib/notice-policy.ts";
+import { buildMorningDigest } from "../agent/lib/digest.ts";
+import { dataDir } from "../agent/lib/data-dir.ts";
+import { saveJsonAtomic } from "../agent/lib/json-store.ts";
 import { sendTelegramHtml } from "./lib/telegram-send.ts";
 
-const PORT = process.env.IVA_PORT ?? "8723";
-const HOST = process.env.ASSISTANT_HOST ?? `http://127.0.0.1:${PORT}`;
-const BOT = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT = process.env.TELEGRAM_DIGEST_CHAT_ID;
-const BEARER = process.env.ASSISTANT_BEARER; // needed if the eve channel in prod requires auth
+type DigestResult = Awaited<ReturnType<typeof buildMorningDigest>>;
+type DigestDependencies = {
+  build?: () => Promise<DigestResult>;
+  send?: typeof sendTelegramHtml;
+  save?: typeof saveJsonAtomic;
+  directory?: () => string;
+  now?: () => Date;
+};
 
-if (!BOT || !CHAT) {
-  console.error("TELEGRAM_BOT_TOKEN and TELEGRAM_DIGEST_CHAT_ID are required");
-  process.exit(1);
+export async function runDigest(
+  bot: string,
+  chat: string,
+  { build = buildMorningDigest, send = sendTelegramHtml, save = saveJsonAtomic, directory = dataDir, now = () => new Date() }: DigestDependencies = {},
+): Promise<number> {
+  const result = await build();
+  const status = (delivery: "pending" | "sent" | "failed") => ({ at: now().toISOString(), freshness: { verified: result.verified, excluded: result.excluded, unchecked: result.unchecked }, delivery });
+  await save(`${directory()}/digest-status.json`, status("pending"));
+  const sent = await send(bot, chat, result.message, { trace: { source: "digest" } });
+  await save(`${directory()}/digest-status.json`, status(sent.ok ? "sent" : "failed"));
+  if (!sent.ok) { console.error("digest: Telegram send failed:", sent.error); return 1; }
+  console.log("Digest sent to Telegram."); return 0;
 }
 
-const client = new Client({
-  host: HOST,
-  ...(BEARER ? { auth: { bearer: () => Promise.resolve(BEARER) } } : {}),
-});
-
-async function main(bot: string, chat: string): Promise<number> {
-  // The same delivery rule the nightly rollup states, in the same words: this turn's result
-  // is delivered by the code below, so a rich message here would be the second message.
-  // The red line in agent/instructions.md exempts exactly these two scheduled turns.
-  const { response, session } = await client.sessions.create({
-    message:
-      "Load the morning-digest skill and build the morning digest for my tasks. " +
-      `Return the digest ${writtenInLanguage(tr)}. ` +
-      "Return the digest as the final text of this turn. Do not send it anywhere yourself: " +
-      "no rich messages, no digest chat, no Telegram tools. " +
-      "Only the finished digest text, no preamble.",
-  });
-  try {
-    const result = await response.result();
-
-    // An interactive turn ends with status "waiting" (the session is ready for the next message),
-    // so we key off the presence of text rather than the "completed" status.
-    if (result.status === "failed" || !result.message) {
-      console.error("Agent did not return a digest:", result.status);
-      return 1;
-    }
-
-    // The markdown → Telegram-HTML conversion + self-heal live in a shared helper.
-    // Ночной ход зовётся своим именем и сшивается по сессии: журнал хода (ADR-0010).
-    const r = await sendTelegramHtml(bot, chat, result.message, {
-      trace: { session: response.sessionId, source: "digest" },
-    });
-    if (r.fellBack) {
-      try {
-        await session.send(
-          `The last digest failed Telegram parse_mode=HTML (${r.error}) and was sent as plain text — ` +
-            "format more simply next time: **bold**, `code`, lists, no raw HTML.",
-        );
-      } catch (error) {
-        console.error("digest: format feedback failed:", error);
-      }
-    }
-    if (!r.ok) {
-      console.error("digest: Telegram send failed:", r.error);
-      return 1;
-    }
-    console.log("Digest sent to Telegram.");
-    return 0;
-  } finally {
-    try {
-      await session.reset({ reason: "Daily digest finished" });
-    } catch (error) {
-      console.error("digest: session reset failed:", error);
-    }
-  }
+if (import.meta.main) {
+  const bot = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_DIGEST_CHAT_ID;
+  if (!bot || !chat) { console.error("TELEGRAM_BOT_TOKEN and TELEGRAM_DIGEST_CHAT_ID are required"); process.exitCode = 1; }
+  else process.exitCode = await runDigest(bot, chat);
 }
-
-process.exitCode = await main(BOT, CHAT);

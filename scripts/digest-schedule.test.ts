@@ -104,48 +104,15 @@ test("the digest keeps the cadence the schedule table declares", async () => {
 // Второй плановый отправитель обязан говорить модели ровно то же, что первый: результат хода
 // доставляет код. Проверка грепом — промпт исполняет модель, иначе его не проверить; зато
 // формулировка берётся из хвоста rollup, поэтому разъехаться они не могут.
-test("the digest prompt forbids self-delivery in the same words as the rollup", () => {
-  const clause =
-    "Do not send it anywhere yourself: no rich messages, no digest chat, no Telegram tools.";
-  assert.ok(
-    memoryReportTail((english) => english).includes(clause),
-    "the shared clause must be the one the rollup tail really carries",
-  );
-
+test("the digest is deterministic and does not create an agent turn", () => {
   const script = readFileSync(join(ROOT, "scripts/daily-digest.ts"), "utf8");
-  // Промпт склеен из строковых литералов, поэтому сравнивается склеенный вид.
-  const prompt = script.replace(/"\s*\+\s*\n?\s*"/gu, "");
-  assert.ok(
-    prompt.includes(clause),
-    "scripts/daily-digest.ts must carry the same no-self-delivery clause",
-  );
-  assert.match(prompt, /Return the digest as the final text of this turn\./u);
+  assert.match(script, /buildMorningDigest/u);
+  assert.doesNotMatch(script, new RegExp("eve/client|sessions\.create"));
 });
 
-// Язык — вторая половина той же жалобы: без явной фразы системный блок 05-language тянет
-// плановый ход на язык инструкции, и дайджест приходит по-английски на русской установке.
-// Формулировка у обоих ходов одна функция, поэтому разъехаться они не могут.
-test("the digest prompt names the language the same way the rollup does", () => {
-  assert.equal(
-    writtenInLanguage((english) => english),
-    "written in English",
-  );
-  assert.equal(
-    writtenInLanguage((_english, russian) => russian),
-    "written in Russian",
-  );
-  assert.ok(
-    memoryReportTail((english) => english).includes(
-      writtenInLanguage((english) => english),
-    ),
-    "the rollup tail must take the phrase from the shared function",
-  );
-
+test("the digest records freshness separately from delivery", () => {
   const script = readFileSync(join(ROOT, "scripts/daily-digest.ts"), "utf8");
-  assert.match(
-    script,
-    /\$\{writtenInLanguage\(tr\)\}/u,
-    "scripts/daily-digest.ts must name the language through the same function",
-  );
-  assert.match(script, /import \{ tr \} from "#lib\/i18n\.ts";/u);
+  assert.match(script, /digest-status.json/u);
+  assert.match(script, /freshness/u);
+  assert.match(script, /delivery/u);
 });

@@ -25,7 +25,7 @@ export default defineSchedule({
     waitUntil(
       runScheduledJob({
         name: "digest",
-        argv: ["scripts/daily-digest.ts"],
+        argv: ["--import", "./scripts/lib/ts-esm-hooks.ts", "scripts/daily-digest.ts"],
         root,
         nodeBin: process.execPath,
         statusPath,
