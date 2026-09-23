@@ -256,7 +256,7 @@ void test("no lockPath: the spawned command invokes nodeBin directly (digest cas
   let seen: Pick<SeenSpawn, "cmd" | "args"> | null = null;
   await runScheduledJob({
     name: "digest",
-    argv: ["scripts/daily-digest.ts"],
+    argv: ["--import", "./scripts/lib/ts-esm-hooks.ts", "scripts/daily-digest.ts"],
     root,
     nodeBin: process.execPath,
     statusPath,
@@ -270,6 +270,8 @@ void test("no lockPath: the spawned command invokes nodeBin directly (digest cas
   assert.equal(seen!.cmd, process.execPath);
   assert.deepEqual(seen!.args, [
     "--env-file-if-exists=.env",
+    "--import",
+    "./scripts/lib/ts-esm-hooks.ts",
     "scripts/daily-digest.ts",
   ]);
 });
