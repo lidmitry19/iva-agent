@@ -1,8 +1,37 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { GatewayError } from "../../services/bitrix-gateway/errors.mjs";
-import { createRequestHandler } from "../../services/bitrix-gateway/server.mjs";
+import {
+  createRequestHandler,
+  isMainInvocation,
+} from "../../services/bitrix-gateway/server.mjs";
 import { fakeWebhook } from "./helpers.mjs";
+
+test("server recognizes invocation through the installed current symlink", async (t) => {
+  const moduleUrl = new URL("../../services/bitrix-gateway/server.mjs", import.meta.url);
+  const root = await mkdtemp(join(tmpdir(), "iva-gateway-entry-"));
+  try {
+    const entry = join(root, "server.mjs");
+    try {
+      await symlink(fileURLToPath(moduleUrl), entry, "file");
+    } catch (error) {
+      if (process.platform === "win32" && error?.code === "EPERM") {
+        t.skip("Windows does not permit creating a file symlink");
+        return;
+      }
+      throw error;
+    }
+    assert.equal(isMainInvocation(moduleUrl.href, entry), true);
+    assert.equal(isMainInvocation(moduleUrl.href, fileURLToPath(moduleUrl)), true);
+    assert.equal(isMainInvocation(moduleUrl.href, join(root, "missing.mjs")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function invoke(handler, { method = "GET", url = "/" } = {}) {
   const response = {

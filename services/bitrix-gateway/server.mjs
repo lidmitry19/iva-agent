@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -255,10 +256,16 @@ async function main() {
   process.once("SIGINT", shutdown);
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+export function isMainInvocation(moduleUrl, argvPath) {
+  if (!argvPath) return false;
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(argvPath)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainInvocation(import.meta.url, process.argv[1])) {
   main().catch(() => {
     process.stderr.write("Bitrix gateway failed to start.\n");
     process.exitCode = 1;
