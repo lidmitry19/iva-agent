@@ -217,7 +217,7 @@ cleanup() {
 
   if [[ -n "$STAGE_ROOT" ]]; then
     case "$STAGE_ROOT" in
-      /run/iva-bitrix-admin-stage.*)
+      /usr/local/lib/iva-bitrix-admin/stage.*)
         /usr/bin/rm -rf --one-file-system -- "$STAGE_ROOT" || final_rc=121
         ;;
       *)
@@ -290,7 +290,9 @@ a9740208be8b846439674b3208db52c2f5107416cfd8eed8e6269b024730a55d  services/bitri
 MANIFEST
 }
 
-STAGE_ROOT=$(/usr/bin/mktemp -d /run/iva-bitrix-admin-stage.XXXXXX)
+# Stage beside the fixed helper: /run is mounted noexec on some VPS hosts.
+# ROOT_DIR was already verified as root-owned mode 0700 above.
+STAGE_ROOT=$(/usr/bin/mktemp -d "$ROOT_DIR/stage.XXXXXX")
 /usr/bin/chown root:root "$STAGE_ROOT"
 /usr/bin/chmod 0700 "$STAGE_ROOT"
 [[ -d "$STAGE_ROOT" && ! -L "$STAGE_ROOT" && $(/usr/bin/stat -c '%U:%G %a' "$STAGE_ROOT") == 'root:root 700' ]] ||
