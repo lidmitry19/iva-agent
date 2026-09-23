@@ -889,7 +889,9 @@ exit 42
 });
 
 test("admin installer uses a pinned root copy, guards IVA units, and invalidates the caller ticket", async () => {
-  const admin = await readFile(new URL("admin-install.sh", deployRoot), "utf8");
+  const admin = (
+    await readFile(new URL("admin-install.sh", deployRoot), "utf8")
+  ).replace(/\r\n/gu, "\n");
   const dropinPreflight = admin.indexOf("\nassert_no_gateway_dropins\n");
   const stage = admin.indexOf(
     "STAGE_ROOT=$(/usr/bin/mktemp -d /run/iva-bitrix-admin-stage.XXXXXX)",
@@ -933,6 +935,11 @@ test("admin installer uses a pinned root copy, guards IVA units, and invalidates
 
   assert.match(admin, /^#!\/usr\/bin\/bash$/mu);
   assert.match(admin, /^PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin$/mu);
+  assert.match(admin, /^LIVE_REPO=\$\{LIVE_REPO:-\}$/mu);
+  assert.match(
+    admin,
+    /LIVE_REPO must be an absolute path to the reviewed checkout/u,
+  );
   assert.match(
     admin,
     /\[\[ \$# -eq 1 && "\$EXPECTED_COMMIT" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u,
