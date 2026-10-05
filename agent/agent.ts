@@ -5,9 +5,11 @@ import { defineAgent, defineDynamic } from "eve";
 import {
   compatibleThinkingEffort,
   providerConfig as cfg,
-  withReasoningStripped,
+  withReplayableReasoning,
   makeTextModel,
 } from "./provider.js";
+import { stepUsageLabel } from "./lib/usage-tap.js";
+import { compactionThresholdPercent } from "./lib/compaction.js";
 import { chatModelSeesImages } from "./vision.js";
 
 export default defineAgent({
@@ -20,11 +22,13 @@ export default defineAgent({
   // каждом шаге, поэтому кэш промпта у провайдера не сбрасывается.
   model: defineDynamic({
     events: {
-      "step.started": (_event, ctx) => ({
-        model: withReasoningStripped(
+      "step.started": (event, ctx) => ({
+        model: withReplayableReasoning(
           makeTextModel({
             sessionId: ctx.session.id,
             chatModelSeesImages,
+            // Компактация eve зовёт эту же модель до шага; её расход пишется под этим ходом.
+            usage: stepUsageLabel(event, ctx.session.id),
           }),
         ),
         // Кастомный провайдер не отдаёт метаданные окна через AI Gateway — задаём вручную;
@@ -39,13 +43,16 @@ export default defineAgent({
   // Окно контекста едет вместе с выбором модели выше (у динамической модели место ему
   // только там). ВАЖНО: значение ОБЯЗАНО быть ≤ реального окна модели, иначе запрос
   // переполнит окно до компактации.
-  // Защита от overflow: компактуем заранее (0.7 вместо дефолтных 0.9), оставляя запас на
-  // summary-вызов и следующий ход. eve сам саммаризирует старые ходы, сохраняя todo и read-tracking.
-  compaction: { thresholdPercent: 0.7 },
+  // Страховка от overflow внутри хода: eve сам пересказывает старые ходы перед шагом модели,
+  // сохраняя todo и read-tracking. Обычный путь — свёртка между ходами на меньшем пороге
+  // (agent/lib/compaction.ts, agent/lib/idle-compaction.ts).
+  compaction: {
+    thresholdPercent: compactionThresholdPercent(cfg.contextWindow),
+  },
   // Сессия eve — durable workflow: каждый ход проигрывает весь журнал событий заново, и на
   // сутках активного чата реплей переваливает за потолок 240 с (vercel/workflow), ход
   // не стартует. Сутки от создания — штатный потолок eve: ход завершается, следующее
   // сообщение открывает свежую сессию. Память живёт в vault и это переживает; роллап
-  // ротирует свою сессию сам (SESSION_TTL_MS) и обрабатывает session_not_active.
+  // берёт на каждый день ночи свою сессию и снимает её после хода.
   limits: { sessionTimeoutMs: 24 * 60 * 60 * 1000 },
 });

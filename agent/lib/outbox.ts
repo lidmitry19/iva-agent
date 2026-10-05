@@ -34,6 +34,7 @@ import { traceOutboundGate } from "./trace.ts";
 import {
   htmlToPlain,
   needsRichMessage,
+  withButtonTypes,
   toTelegramHtmlChunks,
 } from "./telegram-format.ts";
 
@@ -121,7 +122,7 @@ export async function sendThroughOutbox(
   // Rich-путь рендерит нативно то, чего parse_mode=HTML не умеет. Любой отказ —
   // просто HTML-путь ниже, то есть худший случай равен обычному поведению.
   if (transport.sendRich && (alwaysRich || needsRichMessage(text))) {
-    const rich = await transport.sendRich(text);
+    const rich = await transport.sendRich(withButtonTypes(text));
     if (rich.ok) {
       result.delivered = 1;
       return result;

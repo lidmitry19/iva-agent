@@ -1,4 +1,11 @@
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { classifyRoot, gitRootFor } from "./version-layout.ts";
+
 export const DEFAULT_UPDATE_BRANCH = "main";
+/** Ветка бета-обновлений: в main только выпуски (ADR-0018). */
+const BETA_BRANCH = "beta";
 export const UPDATE_BRANCH_CONFIG = "iva.updateBranch";
 
 export type GitResult = {
@@ -26,6 +33,10 @@ async function requireGit(git: Git, ...args: string[]): Promise<string> {
   return output(result);
 }
 
+/** Ветку не получить: нет сети или такой ветки у origin. Единственная ошибка, при которой
+ * бета молчит (daily) или отказывает строкой «ветка beta недоступна» (iva update). */
+export class BranchUnavailableError extends Error {}
+
 async function fetchBranch(
   git: Git,
   remote: string,
@@ -34,8 +45,14 @@ async function fetchBranch(
   const valid = await git("check-ref-format", "--branch", branch);
   if (valid.code !== 0) throw new Error(`invalid update branch: ${branch}`);
   const fetched = await git("fetch", "--prune", remote, `refs/heads/${branch}`);
-  if (fetched.code !== 0)
-    throw new Error(fetched.stderr || `couldn't fetch ${remote}/${branch}`);
+  if (fetched.code !== 0) {
+    // Недоступна — только если origin не ответил или ветки у него нет; иначе сбой здесь.
+    const listed = await git("ls-remote", remote, `refs/heads/${branch}`);
+    const reason = fetched.stderr || `couldn't fetch ${remote}/${branch}`;
+    throw listed.code !== 0 || !output(listed)
+      ? new BranchUnavailableError(reason)
+      : new Error(reason);
+  }
   return requireGit(git, "rev-parse", "FETCH_HEAD");
 }
 
@@ -105,4 +122,190 @@ export async function persistUpdateBranch(
   branch: string,
 ): Promise<void> {
   await requireGit(git, "config", "--local", UPDATE_BRANCH_CONFIG, branch);
+}
+
+/** Beta updates — Update branch `beta` (ADR-0018); флаг `iva.beta` — для прежних бета-сборок:
+ * при main или без ветки уводит на beta, при своей ветке ставит её вершину. */
+export const BETA_CONFIG = "iva.beta";
+const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+
+/** Включены ли бета-обновления; чужое значение — нет, и строка-предупреждение. */
+async function readBeta(git: Git): Promise<boolean> {
+  const value = output(await git("config", "--local", "--get", BETA_CONFIG));
+  if (value && value !== "true" && value !== "false")
+    console.warn(`⚠️ ${BETA_CONFIG}=${value}: not true, installing releases`);
+  return value === "true";
+}
+
+/** Ставится ли вершина ветки: ветка beta или флаг iva.beta. */
+export async function betaChannel(git: Git): Promise<boolean> {
+  const branch = output(
+    await git("config", "--local", "--get", UPDATE_BRANCH_CONFIG),
+  );
+  return (await readBeta(git)) || branch === BETA_BRANCH;
+}
+
+/** Активный коммит в зеркале. Нет его — безопасность перехода не доказать: отказ. */
+async function installedIn(git: Git, installed: string): Promise<string> {
+  const found = await git(
+    "rev-parse",
+    "--verify",
+    "-q",
+    `${installed}^{commit}`,
+  );
+  if (found.code !== 0)
+    throw new Error(
+      `the installed commit ${installed} is not in the mirror; nothing was installed`,
+    );
+  return output(found);
+}
+
+/** Цель не ниже установленного: назад обновление не ходит нигде; откат — только явный. */
+async function notBelow(git: Git, target: string, installed?: string) {
+  if (!installed || !target) return target;
+  const at = await installedIn(git, installed);
+  if (at === target) return target;
+  return (await isAncestor(git, target, at)) ? at : target;
+}
+
+/** Предок ли: код 0 — да, 1 — нет, любой другой — не проверено, отказ. */
+async function isAncestor(git: Git, older: string, newer: string) {
+  const { code } = await git("merge-base", "--is-ancestor", older, newer);
+  if (code !== 0 && code !== 1)
+    throw new Error(
+      "can't check whether the target is older than the installed commit (git merge-base failed); nothing was installed",
+    );
+  return code === 0;
+}
+
+type UpdateTarget = Awaited<ReturnType<typeof resolveUpdateTarget>>;
+
+/** Бета-цель или null; прежний opt-in (флаг при main) переходит на beta один раз. */
+async function betaTarget(
+  git: Git,
+  remote: string,
+  resolved: UpdateTarget,
+  installed?: string,
+) {
+  let target = resolved;
+  const flag = await readBeta(git);
+  const migrate =
+    flag && (!target.configured || target.branch === DEFAULT_UPDATE_BRANCH);
+  if (migrate) {
+    const targetHead = await fetchBranch(git, remote, BETA_BRANCH);
+    target = { ...target, branch: BETA_BRANCH, configured: true, targetHead };
+  }
+  if (!flag && target.branch !== BETA_BRANCH) return null;
+  const head = await notBelow(git, target.targetHead, installed);
+  // Ветка переписывается, только когда цель получена и проверена.
+  if (migrate) await persistUpdateBranch(git, BETA_BRANCH);
+  return { ...target, beta: true, targetHead: head };
+}
+
+/**
+ * Цель обновления. Бета — вершина ветки обновления. Иначе — новейший выпуск: метка
+ * vX.Y.Z, достижимая из вершины; установленный коммит (`installed`), который сам этот
+ * выпуск или его потомок, — сама установка: назад обновление не ходит.
+ */
+export async function resolveReleaseTarget(
+  options: ResolveUpdateTargetOptions & { installed?: string },
+) {
+  const git = options.git!;
+  const remote = options.remote ?? "origin";
+  const target = await resolveUpdateTarget(options);
+  const beta = await betaTarget(git, remote, target, options.installed);
+  if (beta) return beta;
+  // This reviewed personal release branch includes owner patches after upstream tags.
+  // Following the official tag here would skip those patches on the next update.
+  if (target.configured && target.branch === "release/personal-production") {
+    return {
+      ...target,
+      beta: false,
+      tag: undefined,
+      newer: false,
+      targetHead: await notBelow(git, target.targetHead, options.installed),
+    };
+  }
+  // --prune: метка, удалённая из origin (отозванный выпуск), уходит и отсюда.
+  await requireGit(git, "fetch", "--prune", remote, "+refs/tags/*:refs/tags/*");
+  const tags = await requireGit(
+    git,
+    "tag",
+    "--list",
+    "v*",
+    "--merged",
+    target.targetHead,
+    "--sort=-v:refname",
+  );
+  const tag = tags.split("\n").find((name) => RELEASE_TAG.test(name));
+  if (!tag)
+    throw new Error(
+      `no release on ${target.branch} yet; for the newest build run: iva beta`,
+    );
+  const release = await requireGit(git, "rev-parse", `${tag}^{commit}`);
+  const installed = options.installed
+    ? await installedIn(git, options.installed)
+    : "";
+  const ahead = installed && (await isAncestor(git, release, installed));
+  return {
+    ...target,
+    beta: false,
+    tag,
+    // Установка новее выпуска (его потомок), а не он сам.
+    newer: Boolean(ahead) && installed !== release,
+    targetHead: ahead ? installed : release,
+  };
+}
+
+/** Где лежит iva.beta: git установки и её зеркало (обновление читает зеркало). */
+function betaRepos(root: string): string[] {
+  const install = classifyRoot(root);
+  const repos = new Set([install.home, gitRootFor(install)]);
+  const isRepo = (dir: string) =>
+    existsSync(join(dir, ".git")) || existsSync(join(dir, "HEAD"));
+  return [...repos].filter(isRepo);
+}
+
+/** Бета для показа (iva version, status, меню): ветка beta или флаг при main/без ветки. */
+export function betaOf(root: string): boolean {
+  const repo = gitRootFor(classifyRoot(root));
+  const get = (key: string) =>
+    spawnSync("git", ["-C", repo, "config", "--local", "--get", key], {
+      encoding: "utf8",
+    }).stdout?.trim() ?? "";
+  const branch = get(UPDATE_BRANCH_CONFIG);
+  const legacy = [DEFAULT_UPDATE_BRANCH, ""].includes(branch);
+  return branch === BETA_BRANCH || (legacy && get(BETA_CONFIG) === "true");
+}
+
+/** iva beta / stable и меню: ветка и флаг во всех репозиториях установки. Любая запись не
+ * прошла — прежние значения возвращаются везде, false. */
+export function setBeta(
+  root: string,
+  on: boolean,
+): "ok" | "unchanged" | "partial" | "no-repo" {
+  const git = (repo: string, args: string[]) =>
+    spawnSync("git", ["-C", repo, "config", "--local", ...args], {
+      encoding: "utf8",
+    });
+  const keys = [UPDATE_BRANCH_CONFIG, BETA_CONFIG];
+  const want = [on ? BETA_BRANCH : DEFAULT_UPDATE_BRANCH, on ? "true" : ""];
+  const repos = betaRepos(root);
+  const before = repos.map((repo) =>
+    keys.map((key) => git(repo, ["--get", key]).stdout.trim()),
+  );
+  // Пусто — ключа нет: снять (код 5 — его и так не было).
+  const put = (repo: string, key: string, value: string) =>
+    [0, value ? 0 : 5].includes(
+      git(repo, value ? [key, value] : ["--unset-all", key]).status!,
+    );
+  if (!repos.length) return "no-repo";
+  // Возвращается только то, что записалось: неудачная запись файл не трогала.
+  const written: Array<[number, number]> = [];
+  const ok = repos.every((repo, r) =>
+    keys.every((key, k) => put(repo, key, want[k]) && written.push([r, k])),
+  );
+  if (ok) return "ok";
+  const back = written.map(([r, k]) => put(repos[r], keys[k], before[r][k]));
+  return back.every(Boolean) ? "unchanged" : "partial";
 }

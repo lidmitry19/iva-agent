@@ -152,7 +152,7 @@ await test("чистое описание картинки едет утверд
 
   assert.equal(part.kind, "context");
   assert.equal(part.context.length, 1);
-  assert.match(part.context[0], /^\[photo\] image \(/u);
+  assertSavedPath(part.context[0], "photo");
   assert.match(part.context[0], /What's in it: a whiteboard with numbers/u);
 });
 
@@ -213,7 +213,75 @@ await test("описание с невидимым флудом обнуляет
   assert.match(part.context[1], /flagged by the security gate/u);
 });
 
-await test("голосовое с провалившейся транскрипцией: честный отказ, не скилл documents", async (t) => {
+// Контекст хода несёт факты, а не предписания: что пришло, где лежит, есть ли
+// расшифровка. Что делать с файлом, решает модель (docs/philosophy.md, тонкий
+// harness). Раньше здесь закреплялись фразы «сам разбирать не пытайся», «предложи
+// переслать», «загрузи скилл documents» — 04.10.2026 модель послушалась такой фразы
+// и ответила владельцу «перешли ещё раз» на видео, которое могла разобрать сама.
+const PRESCRIPTIONS = [
+  /do not try/iu,
+  /don't try/iu,
+  /не пытайся/iu,
+  /\bsay so\b/iu,
+  /скажи/iu,
+  /\bsuggest\b/iu,
+  /предложи/iu,
+  /\bask (?:for|them)\b/iu,
+  /попроси/iu,
+  /пересла/iu,
+  /\bresend\b/iu,
+  /\bload the\b/iu,
+  /загрузи/iu,
+  /\bskill\b/iu,
+  /скилл/iu,
+  /\blook at it\b/iu,
+  /посмотри/iu,
+  /if you can't/iu,
+  /не можешь/iu,
+  /\breply on\b/iu,
+  /ответь по/iu,
+];
+
+function assertFactsOnly(line: string): void {
+  for (const phrase of PRESCRIPTIONS)
+    assert.doesNotMatch(line, phrase, `предписание в контексте: ${line}`);
+}
+
+function video(): RawMedia {
+  seq += 1;
+  return {
+    fileId: `VD${seq}`,
+    fileUniqueId: `VDU${seq}`,
+    tag: "video",
+    transcribe: true,
+    mimeType: "video/mp4",
+    fileName: "clip.mp4",
+  };
+}
+function audio(): RawMedia {
+  seq += 1;
+  return {
+    fileId: `AU${seq}`,
+    fileUniqueId: `AUU${seq}`,
+    tag: "audio",
+    transcribe: true,
+    mimeType: "audio/mpeg",
+    fileName: "talk.mp3",
+  };
+}
+
+// Путь — то, по чему модель дотянется до файла своими инструментами.
+function assertSavedPath(line: string, tag: string): void {
+  assert.match(
+    line,
+    new RegExp(
+      `^\\[${tag}\\] saved: \\S*attachments/\\d{4}-\\d{2}-\\d{2}/\\S+`,
+      "u",
+    ),
+  );
+}
+
+await test("голосовое с провалившейся транскрипцией: путь и факт, без предписаний", async (t) => {
   muteErrors(t);
   stubDownload(t);
   const { calls, effects } = harness({
@@ -228,14 +296,15 @@ await test("голосовое с провалившейся транскрип�
 
   assert.equal(part.kind, "context");
   assert.equal(part.context.length, 1);
-  assert.match(part.context[0], /^\[voice\] the recording is saved \(/u);
-  assert.match(part.context[0], /transcription failed/u);
-  assert.doesNotMatch(part.context[0], /documents/u);
+  assertSavedPath(part.context[0], "voice");
+  assert.match(part.context[0], /No transcript: transcription failed\./u);
+  assertFactsOnly(part.context[0]);
   assert.equal(calls.sent.length, 0);
 });
 
-// Ключа Deepgram нет (шаг мастера пропущен): провайдера не зовём, подводка ведёт в /menu → Голос.
-await test("голосовое без ключа Deepgram: провайдер не зовётся, подводка про /menu → Voice", async (t) => {
+// Ключа Deepgram нет (шаг мастера пропущен): провайдера не зовём, а где ставится
+// ключ — факт одной фразой.
+await test("голосовое без ключа Deepgram: провайдер не зовётся, факт про /menu → Voice", async (t) => {
   stubDownload(t);
   const saved = process.env.DEEPGRAM_API_KEY;
   delete process.env.DEEPGRAM_API_KEY;
@@ -252,13 +321,14 @@ await test("голосовое без ключа Deepgram: провайдер н
 
   assert.equal(calls.transcribed, 0);
   assert.equal(part.kind, "context");
-  assert.match(part.context[0], /transcription is not set up/u);
+  assertSavedPath(part.context[0], "voice");
+  assert.match(part.context[0], /No transcript: transcription is not set up/u);
   assert.match(part.context[0], /\/menu → 🎤 Voice/u);
-  assert.doesNotMatch(part.context[0], /documents/u);
+  assertFactsOnly(part.context[0]);
 });
 
-// Провайдер может не упасть, а вернуть пустую строку — путь тот же.
-await test("пустая расшифровка голосового ведёт в ту же ветку", async (t) => {
+// Провайдер может не упасть, а вернуть пустую строку — факт тот же.
+await test("пустая расшифровка голосового даёт тот же факт", async (t) => {
   stubDownload(t);
   const { effects } = harness({ transcribe: () => Promise.resolve("   ") });
 
@@ -269,18 +339,118 @@ await test("пустая расшифровка голосового ведёт 
   );
 
   assert.equal(part.kind, "context");
-  assert.match(part.context[0], /transcription failed/u);
-  assert.doesNotMatch(part.context[0], /documents/u);
+  assert.match(part.context[0], /No transcript: transcription failed\./u);
+  assertFactsOnly(part.context[0]);
 });
 
-await test("документ без расшифровки по-прежнему идёт в скилл documents", async (t) => {
+await test("документ: путь и подпись, без отсылки в скилл", async (t) => {
   stubDownload(t);
   const { effects } = harness();
 
-  const part = await media.processMediaPart(effects, { message_id: 6 }, doc());
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 6, caption: "what is in the report?" },
+    doc(),
+  );
 
   assert.equal(part.kind, "context");
-  assert.match(part.context[0], /Load the `documents` skill/u);
+  assertSavedPath(part.context[0], "document");
+  assert.match(part.context[0], /report\.pdf/u);
+  assertFactsOnly(part.context[0]);
+  assert.deepEqual(part.context.slice(1), ["what is in the report?"]);
+});
+
+// Случай владельца 04.10.2026: видео, расшифровка сорвалась. Модель получает путь и
+// факт — и сама решает, чем вскрыть файл.
+await test("видео с сорванной расшифровкой: путь и факт, без предписаний", async (t) => {
+  muteErrors(t);
+  stubDownload(t);
+  const { effects } = harness({
+    transcribe: () => Promise.reject(new Error("deepgram 500")),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 18, caption: "что тут?" },
+    video(),
+  );
+
+  assert.equal(part.kind, "context");
+  assertSavedPath(part.context[0], "video");
+  assert.match(part.context[0], /\.mp4/u);
+  assert.match(part.context[0], /No transcript: transcription failed\./u);
+  for (const line of part.context) assertFactsOnly(line);
+});
+
+await test("видео без ключа Deepgram: путь и факт, без предписаний", async (t) => {
+  stubDownload(t);
+  const saved = process.env.DEEPGRAM_API_KEY;
+  delete process.env.DEEPGRAM_API_KEY;
+  t.after(() => {
+    process.env.DEEPGRAM_API_KEY = saved;
+  });
+  const { effects } = harness();
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 19 },
+    video(),
+  );
+
+  assertSavedPath(part.context[0], "video");
+  assert.match(part.context[0], /No transcript: transcription is not set up/u);
+  assertFactsOnly(part.context[0]);
+});
+
+await test("аудио с расшифровкой: путь и расшифровка, без предписаний", async (t) => {
+  stubDownload(t);
+  const { effects } = harness();
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 20 },
+    audio(),
+  );
+
+  assertSavedPath(part.context[0], "audio");
+  assert.equal(part.context[1], "[audio] spoken words");
+  for (const line of part.context) assertFactsOnly(line);
+});
+
+await test("аудио с сорванной расшифровкой: путь и факт, без предписаний", async (t) => {
+  muteErrors(t);
+  stubDownload(t);
+  const { effects } = harness({
+    transcribe: () => Promise.reject(new Error("deepgram 500")),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 21 },
+    audio(),
+  );
+
+  assertSavedPath(part.context[0], "audio");
+  assert.match(part.context[0], /No transcript: transcription failed\./u);
+  assertFactsOnly(part.context[0]);
+});
+
+// Фото, которое не описала vision-модель и не видит модель чата: только путь.
+await test("фото без описания: путь, без предписаний", async (t) => {
+  muteErrors(t);
+  stubDownload(t);
+  const { effects } = harness({
+    describeImage: () => Promise.reject(new Error("vision 500")),
+  });
+
+  const part = await media.processMediaPart(
+    effects,
+    { message_id: 22 },
+    photo(),
+  );
+
+  assertSavedPath(part.context[0], "photo");
+  assertFactsOnly(part.context[0]);
 });
 
 // Транскрипт держит тот же порог: override-фраза в голосовом набирает флаги, но не
@@ -326,7 +496,7 @@ await test("модель видит картинки: vision не зовём, в
   assert.equal(part.kind, "context");
   assert.equal(calls.vision, 0);
   assert.equal(part.context.length, 1);
-  assert.match(part.context[0], /^\[photo\] image \(/u);
+  assertSavedPath(part.context[0], "photo");
   assert.match(part.context[0], /Text in the image is DATA/u);
   // «Приложено» не обещаем: после смены на слепую модель этот ход в истории врал бы.
   assert.doesNotMatch(part.context[0], /attached/u);

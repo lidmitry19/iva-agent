@@ -61,7 +61,8 @@ test("both trees name the same model variable and the same default model", () =>
 
 // Vision-модель — вторая модель того же провайдера, и разъехаться ей нельзя ровно по той же
 // причине: мастер предложил бы одну модель для фото, а описывала бы картинку другая.
-// codex своей переменной не имеет — обе половины обязаны молчать об этом одинаково.
+// Подписки (codex, claude) своей переменной не имеют — обе половины обязаны молчать об этом
+// одинаково: картинку смотрит та же модель, что ведёт ход.
 test("both trees name the same vision variable and the same vision default", () => {
   for (const name of MODEL_PROVIDER_NAMES) {
     const catalog = CATALOG[name];
@@ -83,10 +84,10 @@ test("both trees name the same vision variable and the same vision default", () 
       .visionModel,
     "chat",
   );
-  // null стоит ровно у codex — иначе «нет переменной» тихо расползлось бы по таблице.
+  // null стоит ровно у двух подписок — иначе «нет переменной» тихо расползлось бы по таблице.
   assert.deepEqual(
     MODEL_PROVIDER_NAMES.filter((name) => CATALOG[name].visionVar === null),
-    ["codex"],
+    ["codex", "claude"],
   );
 });
 
@@ -144,6 +145,72 @@ test("heterogeneous OpenRouter catalog does not invent reasoning choices", async
   assert.ok(options.every((option) => option.reasoningLevels.length === 0));
 });
 
+// ─── claude: список моделей отдаёт чужой CLI, а не сеть ─────────────────────────────
+// Рукопожатие initialize отвечает пикером подписки. Когда CLI не ответил (нет бинаря,
+// нет входа, чужой вывод) — остаётся вшитый список: это не отказ, а запасной путь, иначе
+// владелец остался бы без модели во время настройки.
+test("the claude catalog asks the CLI, and falls back to the pinned list", async () => {
+  const live = await fetchModelOptions("claude", undefined, {
+    listClaudeCatalog: async () => [
+      { id: "claude-opus-5-5", label: "Opus 5.5", reasoningLevels: [] },
+      { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
+    ],
+  });
+  assert.deepEqual(live, [
+    { id: "claude-opus-5-5", label: "Opus 5.5", reasoningLevels: [] },
+    { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
+  ]);
+  // Окружение доезжает до рукопожатия: CLAUDE_COMMAND живёт в .env сервиса.
+  let seen: unknown;
+  await fetchModelOptions("claude", undefined, {
+    claudeEnv: { CLAUDE_COMMAND: "/opt/claude" },
+    listClaudeCatalog: async (env) => {
+      seen = env;
+      return [{ id: "claude-sonnet-5-5", reasoningLevels: [] }];
+    },
+  });
+  assert.deepEqual(seen, { CLAUDE_COMMAND: "/opt/claude" });
+
+  const fallback = await fetchModelOptions("claude", undefined, {
+    listClaudeCatalog: async () => {
+      throw new Error("no claude on this machine");
+    },
+  });
+  assert.deepEqual(
+    fallback.map((option) => option.id),
+    CATALOG.claude.models,
+  );
+  assert.deepEqual(
+    fallback.map((option) => option.label),
+    ["Fable 5.1", "Opus 5.5", "Sonnet 5.5"],
+  );
+  // Вшитый список несёт те же уровни, что и живой: без CLI экран всё равно спросит уровень.
+  for (const option of fallback)
+    assert.deepEqual(
+      option.reasoningLevels,
+      ["low", "medium", "high", "xhigh", "max"],
+      option.id,
+    );
+  // Вшитый список — те же три имени, что у экрана.
+  assert.deepEqual(CATALOG.claude.models, [
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+  ]);
+  assert.equal(CATALOG.claude.def, "claude-fable-5-1");
+});
+
+// Ключа нет нигде: ни переменной, ни vision-переменной. Подписка мультимодальна, как
+// codex, — картинку смотрит выбранная текстовая модель.
+test("the claude vendor holds no key and no vision variable", () => {
+  assert.equal(CATALOG.claude.keyVar, null);
+  assert.equal(CATALOG.claude.baseVar, null);
+  assert.equal(CATALOG.claude.auth, "cli");
+  assert.equal(CATALOG.claude.visionVar, null);
+  assert.equal(CATALOG.claude.visionDef, null);
+  assert.equal(providerBase(CATALOG.claude, {}), undefined);
+});
+
 // Один список обязательных ключей на доктора и мастера. Разъедься они — мастер объявил бы
 // .env настроенным, а доктор на том же файле ругался бы (или наоборот, и никто бы не понял).
 test("required env keys cover the key and the model, and codex asks for neither key", () => {
@@ -161,6 +228,9 @@ test("required env keys cover the key and the model, and codex asks for neither 
   ]);
   // codex входит по OAuth — ключа в .env нет вовсе.
   assert.deepEqual(providerEnvKeys(CATALOG.codex), ["CODEX_MODEL"]);
+  // claude входит в чужом CLI на той же машине: в .env только имя модели, ни ключа,
+  // ни адреса — ни того, ни другого Ива не хранит.
+  assert.deepEqual(providerEnvKeys(CATALOG.claude), ["CLAUDE_MODEL"]);
   // custom: адрес обязателен наравне с моделью, ключ — нет (свой сервер живёт без него).
   assert.deepEqual(providerEnvKeys(CATALOG.custom), [
     "CUSTOM_BASE_URL",

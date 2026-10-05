@@ -36,6 +36,13 @@ export function localStamp(): VaultStamp {
   return { date, hhmm, hhmmss };
 }
 
+// Строки `<!-- … -->` в сыром дне — служебные отметки ночной сводки, и пишет их только
+// скилл (scripts/lib/rollup-days.ts). Реплика, которая начинает строку с `<!--`,
+// записывается с `&lt;!--`: читатель видит тот же текст, а сводка не примет цитату за
+// отметку.
+const COMMENT_LINE = /^<!--/gmu;
+const ENTRY_HEADER_LINE = /^## ((?:[01]\d|2[0-3]):[0-5]\d)\s+(.+)$/gmu;
+
 // Возвращает путь дневного файла: он же ссылка на полную запись, когда гейт
 // усёк вход для модели.
 export function appendDaily(type: string, content: string): string {
@@ -44,7 +51,10 @@ export function appendDaily(type: string, content: string): string {
   mkdirSync(dir, { recursive: true });
   // Append-only: существующие записи никогда не переписываются.
   const path = join(dir, `${date}.md`);
-  appendFileSync(path, `\n## ${hhmm} ${type}\n${content}\n`, "utf8");
+  const text = content
+    .replace(COMMENT_LINE, "&lt;!--")
+    .replace(ENTRY_HEADER_LINE, "<!-- ## $1 $2 -->");
+  appendFileSync(path, `\n## ${hhmm} ${type}\n${text}\n`, "utf8");
   return path;
 }
 

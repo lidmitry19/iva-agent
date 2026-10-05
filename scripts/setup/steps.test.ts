@@ -15,6 +15,16 @@ import {
   type SetupState,
 } from "./steps.ts";
 
+/** Вход в чужой CLI есть: подписка, план и отсутствие чужой авторизации. */
+const readyClaude = {
+  installed: true,
+  loggedIn: true,
+  plan: "max",
+  conflict: null,
+  ready: true,
+  hint: "",
+};
+
 function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
   return {
     t: (en: string) => en,
@@ -25,7 +35,11 @@ function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
     askYesNo: async () => false,
     askRequired: async () => "value",
     mask: (value: string) => value,
-    pickFromList: async (items: string[]) => items[0] ?? "",
+    pickFromList: async (items) => {
+      const first = items[0];
+      if (!first) return "";
+      return typeof first === "string" ? first : first.id;
+    },
     pickPort: async (def: string) => def,
     head: () => undefined,
     hr: () => undefined,
@@ -50,6 +64,7 @@ function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
     opencodeModels: async () => ["deepseek-v4-pro"],
     openrouterKeyCheck: async () => null,
     openrouterModelCheck: async () => null,
+    claudeCli: async () => readyClaude,
     deepgramCheck: async () => null,
     telegramGetMe: async () => ({ username: "ivabot" }),
     fetchTelegramUserIds: async () => [],
@@ -72,8 +87,12 @@ test("шаг провайдера: happy — ключ, модель и vision п
       captured.push((await options?.validate?.("ollama-key")) ?? null);
       return "ollama-key";
     },
-    pickFromList: async (items, _current, recommended) =>
-      items.includes(recommended) ? recommended : items[0],
+    pickFromList: async (items, _current, recommended) => {
+      const ids = items.map((item) =>
+        typeof item === "string" ? item : item.id,
+      );
+      return ids.includes(recommended) ? recommended : (ids[0] ?? "");
+    },
   });
   const s = state("ollama");
   await askProviderSettings(s, ctx);
@@ -294,4 +313,121 @@ test("шаг записи .env: failure — отказ проверки моде
     /model is not available/u,
   );
   assert.equal(writes, 0, ".env не должен писаться при отказе проверки");
+});
+
+// ─── claude: ключа нет, вход в чужом CLI ─────────────────────────────────────────────
+// Шаг проверяет то, что мастер может проверить (статус CLI), называет команды для
+// сервера и повторяет проверку. На экране — имя модели, в .env — её id.
+test("the claude step shows the name and writes the canonical id", async () => {
+  let shown: readonly (string | { id: string; label?: string })[] = [];
+  const out = await askProviderSettings(
+    { existing: {}, out: {}, provider: "claude" },
+    makeContext({
+      fetchModels: async () => ["claude-sonnet-5-5", "claude-fable-5-1"],
+      pickFromList: async (items) => {
+        shown = items;
+        const first = items[0];
+        if (!first) return "";
+        return typeof first === "string" ? first : first.id;
+      },
+    }),
+  );
+  assert.deepEqual(shown, [
+    { id: "claude-sonnet-5-5", label: "Sonnet 5.5" },
+    { id: "claude-fable-5-1", label: "Fable 5.1" },
+  ]);
+  assert.equal(out.CLAUDE_MODEL, "claude-sonnet-5-5");
+  assert.equal(out.CLAUDE_CONTEXT_WINDOW, "1000000");
+});
+
+test("a CLI that is not ready is named, and the check can be repeated", async () => {
+  const printed: string[] = [];
+  let asked = 0;
+  let checks = 0;
+  const ctx = makeContext({
+    print: (...args: unknown[]) => printed.push(args.map(String).join(" ")),
+    askYesNo: async () => {
+      asked += 1;
+      return true;
+    },
+    claudeCli: async () => {
+      checks += 1;
+      return checks === 1
+        ? {
+            installed: false,
+            loggedIn: false,
+            plan: "",
+            conflict: null,
+            ready: false,
+            hint: `Claude Code CLI not found — install it on the server as iva: npm install -g --prefix ~/.local @anthropic-ai/claude-code`,
+          }
+        : readyClaude;
+    },
+    fetchModels: async () => ["claude-fable-5-1"],
+  });
+
+  const out = await askProviderSettings(
+    { existing: {}, out: {}, provider: "claude" },
+    ctx,
+  );
+  assert.equal(asked, 1);
+  assert.equal(checks, 2);
+  const screen = printed.join("\n");
+  assert.match(
+    screen,
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
+  assert.match(screen, /max/u, "план подписки не назван после входа");
+  assert.equal(out.CLAUDE_MODEL, "claude-fable-5-1");
+});
+
+test("the setup summary and the final check know the claude vendor", async () => {
+  const written: Record<string, string>[] = [];
+  const validated: unknown[] = [];
+  const out = await writeSetupEnv(
+    {
+      existing: {},
+      out: { MODEL_PROVIDER: "claude", CLAUDE_MODEL: "claude-fable-5-1" },
+      provider: "claude",
+    },
+    makeContext({
+      writeEnv: async (env: Env) => {
+        written.push({ ...env });
+      },
+      validateModelSelection: async (selection: unknown) => {
+        validated.push(selection);
+        return { id: "claude-fable-5-1", reasoningLevels: [] };
+      },
+    }),
+    false,
+  );
+  assert.deepEqual(validated, [
+    {
+      provider: "claude",
+      model: "claude-fable-5-1",
+      key: undefined,
+      dataDir: "/data",
+      // Адреса у этого вендора нет вовсе: он ходит через CLI, а не в сеть.
+      base: undefined,
+    },
+  ]);
+  assert.equal(written.length, 1);
+  assert.equal(out.CLAUDE_MODEL, "claude-fable-5-1");
+});
+
+test("OpenCode setup keeps explicit text and independent vision protocols", async () => {
+  const s = state("opencode");
+  const prompts: string[] = [];
+  const ctx = makeContext({
+    ask: async (question, fallback) => {
+      prompts.push(question);
+      return question.includes("OPENCODE_PROTOCOL")
+        ? "responses"
+        : fallback || "";
+    },
+  });
+  await askProviderSettings(s, ctx);
+  assert.equal(s.out.OPENCODE_PROTOCOL, "responses");
+  assert.equal(s.out.OPENCODE_VISION_PROTOCOL, "chat-completions");
+  assert.ok(prompts.some((prompt) => prompt.includes("/messages unsupported")));
 });

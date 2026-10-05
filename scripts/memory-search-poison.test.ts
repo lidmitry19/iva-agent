@@ -85,13 +85,13 @@ test("одна карточка с апострофом во frontmatter не о
 test("одна карточка с апострофом не отменяет запись новых карточек", async () => {
   const { default: writeCard } = await import("../agent/tools/write_card.ts");
   const card = (title: string) => ({
-    operation: "ADD" as const,
+    operation: "fact" as const,
     type: "contact",
     title,
+    text: "новая встреча про бюджет",
     description: "новый контакт по бюджету",
     tags: ["budget", "contact"],
-    status: "active",
-    body: "новая встреча про бюджет",
+    aliases: [],
   });
   const context = { ...toolContext(), toolName: "write_card" };
 
@@ -122,36 +122,37 @@ test("одна карточка с апострофом не отменяет з
 });
 
 // Пин Muse F6 (.scratch/work/reviews/pbt-muse-2026-09-12.md), перенесён в утверждении
-// «как должно быть»: сломана frontmatter САМОЙ карточки, о которой спрашивают.
-// storedStatus читал её вне try/catch, и NOOP вылетал исключением из тула — для
-// владельца «посмотри карточку» превращалось в ошибку хода.
-test("NOOP по карточке с битой кавычкой отвечает, а не роняет ход", async () => {
+// «как должно быть»: сломана frontmatter САМОЙ карточки, в которую пишут. Тул отвечает
+// отказом значением и не затирает файл, а не роняет ход исключением.
+test("факт в Card с битой кавычкой отвечает отказом, а не роняет ход", async () => {
   const { default: writeCard } = await import("../agent/tools/write_card.ts");
   const context = { ...toolContext(), toolName: "write_card" };
   const title = "Битая Кавычка";
-  const note = (operation: "ADD" | "NOOP") => ({
-    operation,
+  const note = (text: string) => ({
+    operation: "fact" as const,
     type: "note",
     title,
+    text,
     description: "заметка про кавычку",
     tags: ["note", "quote"],
-    status: "active",
-    body: "тело заметки",
+    aliases: [],
   });
-  const created = settled(await writeCard.execute(note("ADD"), context));
+  const created = settled(await writeCard.execute(note("тело"), context));
   const file = (created as { file?: string }).file;
   assert.equal(typeof file, "string", "карточка создана");
-  const abs = join(vault, ...String(file).split("/"));
+  const abs = join(vault, ...`${String(file)}.md`.split("/"));
   writeFileSync(
     abs,
     readFileSync(abs, "utf8").replace('status: "active"', 'status: "oops'),
   );
 
+  const broken = readFileSync(abs, "utf8");
   let answer: unknown;
   try {
-    answer = await writeCard.execute(note("NOOP"), context);
+    answer = await writeCard.execute(note("второй факт"), context);
   } catch (error) {
-    assert.fail(`NOOP уронил ход исключением: ${String(error)}`);
+    assert.fail(`запись уронила ход исключением: ${String(error)}`);
   }
-  assert.equal(typeof settled(answer), "object", "тул ответил значением");
+  assert.equal((settled(answer) as { ok?: boolean }).ok, false);
+  assert.equal(readFileSync(abs, "utf8"), broken, "битая Card не затёрта");
 });

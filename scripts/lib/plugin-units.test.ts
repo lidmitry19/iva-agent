@@ -166,7 +166,10 @@ test("the MCP proxy unit runs the proxy of the running version, with no secrets"
   assert.match(body, /^UMask=0077$/mu);
   assert.match(body, /^After=network-online\.target$/mu);
   assert.match(body, /^WantedBy=default\.target$/mu);
-  assert.match(body, new RegExp(`^Environment="PATH=${NODE_BIN}:`, "mu"));
+  assert.match(
+    body,
+    new RegExp(`^Environment="PATH=%h/.local/bin:${NODE_BIN}:`, "mu"),
+  );
   // Ни одного секрета инсталляции: EnvironmentFile у прокси нет.
   assert.doesNotMatch(body, /EnvironmentFile/u);
   assert.doesNotMatch(body, /TELEGRAM|OPENAI|ASSISTANT_BEARER/u);
@@ -206,7 +209,7 @@ test("a plugin service gets its port, its paths, and nothing of the agent's", ()
       `Environment="IVA_DATA_DIR=${DATA}"`,
       `Environment="PLUGIN_ROOT=${DATA}/custom/plugins/trace"`,
       `Environment="PLUGIN_DATA=${DATA}/plugin-data/trace"`,
-      `Environment="PATH=${NODE_BIN}:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`,
+      `Environment="PATH=%h/.local/bin:${NODE_BIN}:/usr/local/bin:/usr/bin:/bin"`,
     ],
   );
   assert.doesNotMatch(body, /EnvironmentFile/u);
@@ -406,7 +409,7 @@ test("a data directory with a space or a percent survives into Environment=", ()
       'Environment="IVA_DATA_DIR=/home/my box/100%% iva/data"',
       'Environment="PLUGIN_ROOT=/home/my box/100%% iva/data/custom/plugins/trace"',
       'Environment="PLUGIN_DATA=/home/my box/100%% iva/data/plugin-data/trace"',
-      'Environment="PATH=/opt/node bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"',
+      'Environment="PATH=%h/.local/bin:/opt/node bin:/usr/local/bin:/usr/bin:/bin"',
     ],
   );
   // `%h` в нашей части PATH остаётся спецификатором: удваивается только чужое значение.

@@ -65,7 +65,7 @@ test("расписания есть — legacy-юниты снимаются", (
     const unitDir = join(dir, "home/.config/systemd/user");
     mkdirSync(unitDir, { recursive: true });
     writeFileSync(join(unitDir, "iva-memory-daily.timer"), "[Unit]\n");
-    seedSchedules(project, ["daily", "weekly", "monthly", "yearly"]);
+    seedSchedules(project, ["night"]);
     const events: string[] = [];
 
     const removed = services(

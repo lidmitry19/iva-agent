@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ToolContext } from "eve/tools";
+import fc from "fast-check";
 
 import type {
   RemindAdded,
@@ -102,6 +103,9 @@ void test("add stores a one-time reminder and answers with the owner-zone time",
   const schedule = rows[0].schedule;
   if (schedule.kind !== "at") assert.fail("expected an at schedule");
   assert.equal(schedule.atMs, NOW + 1_800_000);
+  // Сессия идущего хода: созданной строке её ещё нет — null, а не пустая строка
+  // (старые таблицы без поля читаются так же: agent/lib/reminder-store.test.ts).
+  assert.equal(rows[0].sessionId, null);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
     "chat",
     "createdAt",
@@ -111,6 +115,7 @@ void test("add stores a one-time reminder and answers with the owner-zone time",
     "id",
     "nextRunAtMs",
     "schedule",
+    "sessionId",
     "status",
     "text",
   ]);
@@ -267,11 +272,11 @@ void test("list and remove", async (t) => {
     cron: "0 9 * * *",
   });
   if (both.ok) assert.fail("expected exactly one of at or cron");
-  assert.match(both.error, /give exactly one of at or cron/u);
+  assert.match(both.error, /exactly one of at or cron/u);
 
   const neither = await addReminder({ text: "x" });
   if (neither.ok) assert.fail("expected exactly one of at or cron");
-  assert.match(neither.error, /give exactly one of at or cron/u);
+  assert.match(neither.error, /at \(one-time\) or cron \(repeating/u);
 });
 
 void test("action decides what the call does, and each action needs its own fields", async (t) => {
@@ -314,12 +319,12 @@ void test("action decides what the call does, and each action needs its own fiel
 
   const noText = await addReminder({ at: "in 30m" });
   if (noText.ok) assert.fail("expected a missing text error");
-  assert.match(noText.error, /action add needs text/u);
+  assert.match(noText.error, /add needs text/u);
   assert.equal((await list()).length, 0);
 
   const noId = await removeReminder({});
   if (noId.ok) assert.fail("expected a missing id error");
-  assert.match(noId.error, /action remove needs id/u);
+  assert.match(noId.error, /remove needs id/u);
 });
 
 void test("the three old tool names are gone from the code, the instructions and the docs", () => {
@@ -351,5 +356,144 @@ void test("the three old tool names are gone from the code, the instructions and
     offenders.map((file) => file.slice(root.length)),
     [],
     "три тула напоминаний свёрнуты в один remind с полем action",
+  );
+});
+
+// Отказ remind обязан сказать, что исправить: какое поле пришло не так, какое ждали, и
+// одним вызовом-образцом показать исправленный ход. Образец - последний кусок текста после
+// «Example: », он обязан разбираться как JSON: модель копирует его буквально.
+function exampleCall(error: string): Record<string, unknown> {
+  const marker = "Example: ";
+  const at = error.lastIndexOf(marker);
+  assert.notEqual(at, -1, `no example call in: ${error}`);
+  const parsed: unknown = JSON.parse(error.slice(at + marker.length));
+  assert.equal(typeof parsed, "object", error);
+  return parsed as Record<string, unknown>;
+}
+
+/** Образец add: text и ровно одно из at/cron, других полей нет. */
+function assertAddExample(error: string): Record<string, unknown> {
+  const call = exampleCall(error);
+  assert.equal(call.action, "add", error);
+  assert.equal(typeof call.text, "string", error);
+  assert.equal("at" in call !== "cron" in call, true, error);
+  assert.deepEqual(
+    Object.keys(call).filter(
+      (key) => !["action", "text", "at", "cron"].includes(key),
+    ),
+    [],
+    error,
+  );
+  return call;
+}
+
+void test("every remind refusal names the field and carries one example call", async (t) => {
+  resetState();
+  frozenNow(t);
+
+  // Живой провал 0.4.2: модель слала at словами и заглушки в cron/id - 135 отказов подряд.
+  const both = await addReminder({
+    text: "позвонить",
+    at: "завтра в 8 утра",
+    cron: "0 8 22 9 *",
+    id: "x",
+  });
+  if (both.ok) assert.fail("expected a refusal");
+  assert.match(both.error, /at="завтра в 8 утра"/u);
+  assert.match(both.error, /cron="0 8 22 9 \*"/u);
+  assert.match(both.error, /no empty string or placeholder/u);
+  // at словами не разбирается - оставлять надо cron, и образец его и несёт.
+  assert.equal(assertAddExample(both.error).cron, "0 8 22 9 *");
+
+  const fillerCron = await addReminder({ text: "x", at: "in 30m", cron: ":" });
+  if (fillerCron.ok) assert.fail("expected a refusal");
+  assert.match(fillerCron.error, /cron=":"/u);
+  assert.equal(assertAddExample(fillerCron.error).at, "in 30m");
+
+  const unreadableBoth = await addReminder({
+    text: "x",
+    at: "через 3 минуты",
+    cron: ":",
+  });
+  if (unreadableBoth.ok) assert.fail("expected a refusal");
+  // Ни одно не годится: образец - разовое напоминание в поддерживаемой форме, а текст
+  // называет, почему at не прочитан.
+  assert.match(unreadableBoth.error, /at: unsupported form "через 3 минуты"/u);
+  assert.equal(assertAddExample(unreadableBoth.error).at, "in 30m");
+
+  const neither = await addReminder({ text: "x", id: "r-1" });
+  if (neither.ok) assert.fail("expected a refusal");
+  assert.match(neither.error, /got text, id="r-1"/u);
+  assertAddExample(neither.error);
+
+  const noText = await addReminder({ cron: "0 9 * * *" });
+  if (noText.ok) assert.fail("expected a refusal");
+  assert.match(noText.error, /\btext\b/u);
+  assert.equal(assertAddExample(noText.error).cron, "0 9 * * *");
+
+  const badAt = await addReminder({ text: "x", at: "завтра" });
+  if (badAt.ok) assert.fail("expected a refusal");
+  assert.match(badAt.error, /^at: /u);
+  assert.equal(assertAddExample(badAt.error).at, "in 30m");
+
+  const pastAt = await addReminder({ text: "x", at: "2026-09-01 09:00" });
+  if (pastAt.ok) assert.fail("expected a refusal");
+  assert.match(pastAt.error, /^at: .*in the past/u);
+  assertAddExample(pastAt.error);
+
+  for (const cron of [":", "0 9 * *", "* * * * *", "0/7 * * * *"]) {
+    const badCron = await addReminder({ text: "x", cron });
+    if (badCron.ok) assert.fail(`expected a refusal for ${cron}`);
+    assert.match(badCron.error, /^cron/u, cron);
+    assert.equal(assertAddExample(badCron.error).cron, "0 9 * * 1-5", cron);
+  }
+
+  const noId = await removeReminder({ text: "x" });
+  if (noId.ok) assert.fail("expected a refusal");
+  assert.match(noId.error, /\bid\b/u);
+  assert.match(noId.error, /\{"action":"list"\}/u);
+  assert.deepEqual(exampleCall(noId.error), {
+    action: "remove",
+    id: "r-1a2b3c",
+  });
+
+  const unknown = await removeReminder({ id: "." });
+  if (unknown.ok) assert.fail("expected a refusal");
+  assert.match(unknown.error, /^id "\.": /u);
+  assert.match(unknown.error, /\{"action":"list"\}/u);
+  assert.equal(exampleCall(unknown.error).action, "remove");
+
+  assert.equal((await list()).length, 0, "no refusal stores a row");
+});
+
+// Seed в имени теста: провал воспроизводится подстановкой его же в fc.assert.
+const REFUSAL_SEED = 20260924;
+
+void test(`remind add: any mix of at, cron, id and text either succeeds or names the field with an example (seed ${String(REFUSAL_SEED)})`, async (t) => {
+  resetState();
+  frozenNow(t);
+  const filler = fc.oneof(
+    fc.constantFrom(":", ".", ",", " ", "x", "null", "__omit__", "0 0 0 0 0"),
+    fc.string({ minLength: 1, maxLength: 12 }),
+  );
+  const at = fc.oneof(
+    fc.constantFrom("in 30m", "14:30", "2026-09-14 09:00", "завтра в 8 утра"),
+    filler,
+  );
+  const cron = fc.oneof(fc.constantFrom("0 9 * * 1-5", "0 8 22 9 *"), filler);
+  await fc.assert(
+    fc.asyncProperty(
+      fc.record(
+        { text: fc.constantFrom("позвонить"), at, cron, id: filler },
+        { requiredKeys: [] },
+      ),
+      async (input) => {
+        const answer = await addReminder(input);
+        if (answer.ok) return;
+        assert.match(answer.error, /\b(?:at|cron|text)\b/u);
+        assertAddExample(answer.error);
+      },
+    ),
+    { numRuns: 150, seed: REFUSAL_SEED },
   );
 });

@@ -11,7 +11,7 @@
 //      know about eve schedules at all.
 //
 // setup() runs before eve's own HTTP listener is guaranteed to be accepting connections.
-// A catch-up run spawns scripts/memory/rollup.ts, which opens an eve/client Client
+// A catch-up run spawns scripts/memory/night.ts, which calls the configured model
 // against that same listener immediately — spawning it too early is a bare "connection
 // refused", not a retryable rollup failure. So the migration itself is only kicked off
 // after polling the local health route (the same probeEveHealth used by `iva update`'s

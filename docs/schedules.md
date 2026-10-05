@@ -1,14 +1,16 @@
 # Schedules — what runs on its own, and what happens when it fails
 
-Iva runs its background work as in-process Eve schedules: four memory rollups
-(`memory-daily`, `memory-weekly`, `memory-monthly`, `memory-yearly`), the morning
-`digest`, the daily `jobs-watchdog`, and the reminder dispatcher that ticks every
+Iva runs its background work as in-process Eve schedules: one `memory-night`
+pipeline at 04:00, the half-hourly
+`proactive` tick (Watch and the Brief), the daily `jobs-watchdog`, and the reminder dispatcher that ticks every
 minute. Each scheduled job is a thin spawner — the work itself lives in
 `scripts/` (see `docs/deploy.md`).
 
 ## Every run leaves a fact
 
-One row per run, in `data/jobs.json`: name, started/finished time, ok, the reason
+One row per run, in `data/jobs.json` (except the half-hourly `proactive` tick: it
+writes only a failure and the first success after it, so 48 rows a day do not crowd
+out the rest): name, started/finished time, ok, the reason
 of a failure, the exit code, and the tail of the run's error output (last 20 lines
 of `stderr`, cut by the same rule the evidence package uses — the report a script
 prints to `stdout` stays out of the row and out of the agent's turn). Rows older than seven days are
@@ -23,19 +25,27 @@ turn and:
 
 - on success the turn says "nothing is broken — answer with an empty message",
   and an empty answer sends nothing;
-- on failure the agent is asked to try to fix it (restart the job, repair the
-  file) and then tell the owner what broke and what it did.
+- on failure the agent finds the cause, tells the owner briefly what broke and
+  why, and ends with a «Починить» (Fix) button. It fixes nothing until the owner
+  taps it.
 
-Only a non-empty answer is sent to your Telegram chat. The outcome of the turn
-(answered / empty / failed) is written back into the same row.
+Only a non-empty answer is sent, to the owner's private chat (the first id of
+`TELEGRAM_ALLOWED_USER_IDS`: the button is accepted only there). In the quiet hours
+(23:00–08:00 by default) with Watch and Brief on, the answer is not sent at night:
+the failure stays open and comes first in the morning Brief. With Watch and Brief
+off, or with no Brief times, it is sent at once. The outcome of the turn
+(answered / empty / failed, plus a `deferred` mark for a failure that waits for
+the Brief) is written back into the same row.
 
 ## Where to look
 
 - `iva doctor` → the schedules section: the last run of every name (ok or
-  failure, when) and the open failures. The same command reports the minute
-  dispatcher's pulse in its reminders section.
-- Every agent turn carries a short "open failures of the last 24h" block, so the
-  agent sees a broken schedule even before you ask.
+  failure, when; for `proactive` the last success comes from
+  `data/rollup-status.json`) and the open failures. The same command reports the
+  minute dispatcher's pulse in its reminders section.
+- Every agent turn carries a short "open failures" block, so the agent sees a
+  broken schedule even before you ask. A failed schedule stays there, and in the
+  morning Brief, until a later success or `iva jobs ack`.
 - `iva jobs ack <name>` closes an open failure you decided not to fix. A later
   successful run closes one by itself.
 - If the agent cannot wake at all (the turn fails every time), one message per day

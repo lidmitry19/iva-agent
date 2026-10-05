@@ -110,6 +110,8 @@ void test("configured branch validation and fetch failures stop target resolutio
         code: 128,
         stderr: "remote branch disappeared",
       },
+      // origin ответил, ветки нет — ветка недоступна (ADR-0018).
+      { args: ["ls-remote", "origin", "refs/heads/release/beta"] },
     ]);
 
     await assert.rejects(

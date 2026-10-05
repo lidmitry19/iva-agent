@@ -112,7 +112,9 @@ function world(
   git(home, ["config", "iva.updateBranch", "main"]);
   git(home, ["add", "-A"]);
   git(home, ["commit", "-m", "release"]);
-  git(home, ["push", "-q", "origin", "main"]);
+  // A release is a vX.Y.Z tag: an update without beta updates installs only those.
+  git(home, ["tag", "v0.3.19"]);
+  git(home, ["push", "-q", "--tags", "origin", "main"]);
 
   const dataDir = join(home, "data");
   const jobPath = join(dataDir, "update-jobs", "job-1.json");
@@ -331,7 +333,11 @@ test("the managed update refuses an invalid MODEL_PROVIDER before it touches any
   const refusal = iva.finals().at(-1) ?? "";
   assert.match(refusal, /Fix MODEL_PROVIDER in \.env first \(iva config\)/u);
   assert.match(refusal, /"ollmaa"/u);
-  assert.match(refusal, /ollama, opencode, codex, openrouter/u);
+  // Список имён берётся у рантайма: вписанный сюда рукой устаревает на первом же вендоре.
+  assert.ok(
+    refusal.includes(MODEL_PROVIDER_NAMES.join(", ")),
+    `${refusal} перечисляет имена рантайма`,
+  );
   // Ни зеркала, ни хендоффа, ни версий: установка ровно та же, что была.
   assert.equal(
     iva.lines().some((line) => line.startsWith("handoff")),
@@ -388,7 +394,7 @@ test("a release that needs a newer updater says so in the chat, command intact",
   const refusal = iva.finals().at(-1) ?? "";
   assert.match(
     refusal,
-    /Ваша Iva \(\d+\.\d+\.\d+\) слишком старая, чтобы обновиться сама\./u,
+    /Ваша Iva \(\d+\.\d+\.\d+(?:-beta\.\d+)?\) слишком старая, чтобы обновиться сама\./u,
   );
   assert.equal(
     refusal.includes(

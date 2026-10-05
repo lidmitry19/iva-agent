@@ -22,7 +22,7 @@ interface PreferenceCandidate {
 // и для сторожа, который сравнивает файл до и после ночного хода.
 const HEADING = /^##[ \t]+(.+?)[ \t]*$/u;
 
-const SECTION_KIND = new Map<string, Section>([
+export const SECTION_KIND = new Map<string, Section>([
   ["Пользователь", "user"],
   ["User", "user"],
   ["Предпочтения", "preferences"],
@@ -205,16 +205,61 @@ export function clampCore(text: string): string {
 // SECTION_KIND выше; здесь — обе локали самой метки. Значение (путь до сводки) кончается
 // на первом пробеле или `·`, поэтому хвост строки («· Индекс: MOC.md») переживает правку
 // байт в байт, а старое значение с префиксом `vault/` заменяется целиком.
-const LAST_DAY_LABEL =
+export const LAST_DAY_LABEL =
   /^(\s*[-*][ \t]+(?:Последний день|Last day)[ \t]*:[ \t]*)([^\s·]*)(.*)$/u;
 const DAILY_SUMMARY_PREFIX = "summaries/daily/";
-// Канонический вид секции из Shape (core-format.md) — на случай, когда её нет вовсе.
+// Канонический вид секции указателей — на случай, когда её нет вовсе.
 const POINTERS_HEADING = "## Указатели";
 const LAST_DAY_LABEL_TEXT = "- Последний день: ";
 
 function newlineOf(lines: readonly CoreLine[]): string {
   for (const line of lines) if (line.ending !== "") return line.ending;
   return "\n";
+}
+
+function replaceLastDayPointer(
+  lines: CoreLine[],
+  value: string,
+  original: string,
+): string | null {
+  for (const line of lines) {
+    if (line.section !== "pointers") continue;
+    const found = LAST_DAY_LABEL.exec(line.content);
+    if (!found) continue;
+    const tail =
+      found[3] === "" || /^\s/u.test(found[3]) ? found[3] : ` ${found[3]}`;
+    const next = `${found[1]}${value}${tail}`;
+    if (next === line.content) return original;
+    line.replacement = `${next}${line.ending}`;
+    return render(lines);
+  }
+  return null;
+}
+
+function lastPointerLine(lines: readonly CoreLine[]): CoreLine | null {
+  let anchor: CoreLine | null = null;
+  for (const line of lines) {
+    if (line.section === "pointers" && line.content.trim() !== "")
+      anchor = line;
+  }
+  return anchor;
+}
+
+function appendLastDayPointer(
+  text: string,
+  lines: CoreLine[],
+  bullet: string,
+): string {
+  const newline = newlineOf(lines);
+  const anchor = lastPointerLine(lines);
+  if (anchor) {
+    anchor.replacement = `${anchor.content}${anchor.ending || newline}${bullet}${anchor.ending}`;
+    return render(lines);
+  }
+  let out = text;
+  if (out !== "" && !out.endsWith(newline)) out += newline;
+  if (out !== "" && !out.endsWith(`${newline}${newline}`)) out += newline;
+  return `${out}${POINTERS_HEADING}${newline}${newline}${bullet}${newline}`;
 }
 
 /**
@@ -236,102 +281,6 @@ export function setLastDayPointer(text: string, isoDate: string): string {
   const bullet = `${LAST_DAY_LABEL_TEXT}${value}`;
   const lines = linesOf(text);
   classifySections(lines);
-
-  let anchor: CoreLine | null = null;
-  for (const line of lines) {
-    if (line.section !== "pointers") continue;
-    if (line.content.trim() !== "") anchor = line;
-    // Первая строка-указатель и есть указатель: вторую такую же трогать нечем — какая из
-    // них правда, знает только автор файла.
-    const found = LAST_DAY_LABEL.exec(line.content);
-    if (!found) continue;
-    // Значения не было («- Последний день: · Индекс: …») — вернуть пробел, который иначе
-    // склеил бы путь с хвостом.
-    const tail =
-      found[3] === "" || /^\s/u.test(found[3]) ? found[3] : ` ${found[3]}`;
-    const next = `${found[1]}${value}${tail}`;
-    if (next === line.content) return text;
-    line.replacement = `${next}${line.ending}`;
-    return render(lines);
-  }
-
-  const newline = newlineOf(lines);
-  if (anchor) {
-    // Секция есть, строки нет: дописываем её последней содержательной строкой секции,
-    // сохраняя стиль переводов строки самого файла (в том числе их отсутствие в конце).
-    anchor.replacement = `${anchor.content}${anchor.ending || newline}${bullet}${anchor.ending}`;
-    return render(lines);
-  }
-
-  let out = text;
-  if (out !== "" && !out.endsWith(newline)) out += newline;
-  if (out !== "" && !out.endsWith(`${newline}${newline}`)) out += newline;
-  return `${out}${POINTERS_HEADING}${newline}${newline}${bullet}${newline}`;
-}
-
-export interface CoreDamage {
-  /** Заголовки `## `, которые были до хода и пропали после (без самих решёток). */
-  readonly lostHeadings: readonly string[];
-  /** Уцелевшие заголовки `## `, у которых непустое тело стало пустым. */
-  readonly hollowedHeadings: readonly string[];
-  /** Файл был непустым и стал пустым. */
-  readonly emptied: boolean;
-  readonly damaged: boolean;
-}
-
-/** Имя заголовка `## ` → текст его тела: строки до следующего `## ` или конца файла. */
-function sectionsOf(text: string): Map<string, string> {
-  const sections = new Map<string, string>();
-  let heading: string | null = null;
-  let body: string[] = [];
-  const flush = (): void => {
-    if (heading === null) return;
-    const joined = body.join("\n");
-    const previous = sections.get(heading);
-    sections.set(
-      heading,
-      previous === undefined ? joined : `${previous}\n${joined}`,
-    );
-  };
-  for (const line of linesOf(text)) {
-    const next = HEADING.exec(line.content);
-    if (next) {
-      flush();
-      heading = next[1];
-      body = [];
-    } else if (heading !== null) {
-      body.push(line.content);
-    }
-  }
-  flush();
-  return sections;
-}
-
-/**
- * Что ночной ход снёс в CORE: сравнение файла до и после. Судим по заголовкам и телам
- * секций, а не по строкам — правка строк это работа ночи, а исчезнувшая секция или
- * опустевшее тело под уцелевшим заголовком (в том числе пользовательские, которых нет
- * в шаблоне) это потеря данных, которую откатывает код (ADR-0002).
- */
-export function coreDamage(before: string, after: string): CoreDamage {
-  const beforeSections = sectionsOf(before);
-  const afterSections = sectionsOf(after);
-  const lostHeadings = [...beforeSections.keys()].filter(
-    (heading) => !afterSections.has(heading),
-  );
-  const hollowedHeadings = [...beforeSections.keys()].filter((heading) => {
-    const kept = afterSections.get(heading);
-    return (
-      (beforeSections.get(heading) as string).trim() !== "" &&
-      kept !== undefined &&
-      kept.trim() === ""
-    );
-  });
-  const emptied = before.trim() !== "" && after.trim() === "";
-  return {
-    lostHeadings,
-    hollowedHeadings,
-    emptied,
-    damaged: lostHeadings.length > 0 || hollowedHeadings.length > 0 || emptied,
-  };
+  const replaced = replaceLastDayPointer(lines, value, text);
+  return replaced ?? appendLastDayPointer(text, lines, bullet);
 }

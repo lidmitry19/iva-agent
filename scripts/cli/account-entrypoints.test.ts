@@ -137,18 +137,18 @@ void test("version preserves metadata fallback and undefined-version output", as
 
   let result = runCli(fixture, ["version"]);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.equal(result.stdout, "iva 9.8.7 · commit ?\n");
+  assert.equal(result.stdout, "iva 9.8.7 · commit ? · updates stable\n");
   assert.equal(result.stderr, "");
 
   await writeFile(join(fixture.project, "package.json"), "{}\n");
   result = runCli(fixture, ["version"]);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.equal(result.stdout, "iva undefined · commit ?\n");
+  assert.equal(result.stdout, "iva undefined · commit ? · updates stable\n");
 
   await rm(join(fixture.project, "package.json"));
   result = runCli(fixture, ["version"]);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.equal(result.stdout, "iva ? · commit ?\n");
+  assert.equal(result.stdout, "iva ? · commit ? · updates stable\n");
 });
 
 void test("usage tail preserves Number(args[1]) || 10 slicing quirks", async (t) => {

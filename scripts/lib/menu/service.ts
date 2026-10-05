@@ -11,6 +11,7 @@ import { updateRunning } from "../version-store.ts";
 import { button } from "./buttons.ts";
 import { menuStyle } from "../telegram-buttons.ts";
 import { writeSettings } from "#lib/settings.ts";
+import { betaOf, setBeta } from "../update-channel.ts";
 import {
   LOADERS,
   currentRun,
@@ -24,6 +25,7 @@ import {
   type ServiceRun,
 } from "./svc-run.ts";
 import { resolveVaultDir } from "../../../packages/vault-dir/index.ts";
+import { loadVaultPair, type VaultPair } from "../vault-pair.ts";
 
 type ServiceCommand = "doc" | "cln" | "mem";
 type ServiceStatus = "running" | "failed" | "cancelled" | "timeout" | "done";
@@ -92,8 +94,8 @@ const describe = (cmd: ServiceCommand, T: MenuServiceContext["tr"]): string =>
       "Проходит по карточкам памяти стримингом и убирает раздутые description из бага 0.3.0. Тела карточек не трогает.\nОбычно меньше минуты; гигабайтные файлы — дольше.",
     ),
     mem: T(
-      "Runs the nightly brain now, without waiting for 05:00: cleanup → enforce → graph → git push.\nUsually 1–10 minutes.",
-      "Запускает ночной цикл памяти сейчас, не дожидаясь 05:00: cleanup → enforce → graph → git push.\nОбычно 1–10 минут.",
+      "Runs the nightly brain now, without waiting for 05:00: commit what is uncommitted → link graph → CORE alert → git push.\nUsually under a minute.",
+      "Запускает ночной уход за vault сейчас, не дожидаясь 05:00: коммит незакоммиченного → граф ссылок → Alert по CORE → git push.\nОбычно меньше минуты.",
     ),
   })[cmd];
 
@@ -119,15 +121,12 @@ export async function commandSpec(
   if (cmd === "cln") {
     const env = await readEnvValues(ctx.deps.envPath);
     const vaultDir = resolveVaultDir(root, env.ASSISTANT_VAULT_DIR);
-    // Скрипт живёт в репо (в vault'е его может не быть — до 0.3.3 его туда клал синк, и
-    // прыжок 0.3.0 → 0.3.2 оставлял кнопку без файла: «Failed to spawn … (os error 2)»).
-    // Путь абсолютный, cwd — vault: скрипты autograph берут vault первым аргументом («.»).
+    // Путь абсолютный: обновляемая установка не зависит от cwd vault.
     return {
       kind: "proc",
       argv: [
-        "uv",
-        "run",
-        join(root, "scripts/autograph/cleanup.py"),
+        process.execPath,
+        join(root, "scripts/vault-cleanup.ts"),
         ".",
         "--apply",
       ],
@@ -159,7 +158,7 @@ function progressView(
 }
 
 // Финальная сводка. Чистка: парсим «cleanup (applied): N file(s), X bytes …» → файлы и МБ.
-// Режим в выводе cleanup.py — applied/dry-run (не apply): ошибёшься — сводка молча
+// Режим в выводе vault-cleanup.ts — applied/dry-run (не apply): ошибёшься — сводка молча
 // деградирует до дежурного «Готово».
 function summaryText(run: ServiceRun, ctx: MenuServiceContext): string {
   const T = ctx.tr;
@@ -264,6 +263,7 @@ function idleView(
       "check for and install a new version.",
       "проверить и поставить новую версию.",
     )}`,
+    updatesLine(ctx),
     menuStyle() === "rich"
       ? `${button(T("◀︎ Classic menu", "◀︎ Старое меню"), "iva_menu:svc:menu:classic")} — ${T(
           "buttons under the message, as before 0.4.2.",
@@ -279,6 +279,65 @@ function idleView(
     )}`,
   );
   return { text: lines.join("\n\n") };
+}
+
+/** Одна кнопка бета-обновлений: показывает, что ставит обновление; нажатие переключает. */
+function updatesLine(ctx: MenuServiceContext): string {
+  const T = ctx.tr;
+  const beta = betaOf(ctx.deps.root);
+  const name = beta ? T("beta", "бета") : T("stable", "стабильные");
+  return `${button(T(`🧪 Updates: ${name}`, `🧪 Обновления: ${name}`), "iva_menu:svc:beta")} — ${T(
+    beta
+      ? "every accepted change; tap for releases only."
+      : "releases only; tap for every accepted change (beta).",
+    beta
+      ? "всё принятое сразу; нажми — только выпуски."
+      : "только выпуски; нажми — всё принятое сразу (бета).",
+  )}`;
+}
+
+/** Чистка трогает vault чужим процессом, а мост в это время свободен: правки владельца в
+ * Obsidian ложатся рядом с её работой. Без пары коммитов они уехали бы в ночной `add -A`
+ * неотличимо от результата чистки, поэтому чистка оформляется тем же швом, что и у
+ * обновлятора. `spec.cwd` у неё — это и есть vault; нет каталога — оформлять нечего. */
+async function cleanupPair(
+  cmd: ServiceCommand,
+  spec: CommandSpec,
+): Promise<VaultPair | null> {
+  if (cmd !== "cln" || spec.kind !== "proc" || !spec.cwd) return null;
+  return await loadVaultPair("menu", spec.cwd);
+}
+
+/** Итог команды рисуем, только если юзер всё ещё на экране svc — иначе сводка ждёт в render. */
+function summaryOnFinish(
+  st: MenuServiceState,
+  ctx: MenuServiceContext,
+): (run: ServiceRun) => Promise<void> {
+  return async (run) => {
+    if (!(ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc"))
+      return;
+    await ctx.flows.screen(
+      st,
+      [summaryText(run, ctx), backLine(ctx)].join("\n\n"),
+    );
+  };
+}
+
+/** Коммит результата чистки — до сводки, и его не отменяет подменённый в тестах onFinish:
+ * работу раннера в тесте подменяют, а след в истории vault остаётся тем же. */
+function withCleanupCommit(
+  opts: RunOptions,
+  pair: VaultPair | null,
+): RunOptions {
+  if (pair === null) return opts;
+  const inner = opts.onFinish;
+  return {
+    ...opts,
+    onFinish: async (run) => {
+      await pair.after();
+      await inner?.(run);
+    },
+  };
 }
 
 async function startCommand(
@@ -311,24 +370,23 @@ async function startCommand(
   }
   const spec = await commandSpec(cmd, ctx);
   const over = ctx.deps.svcRun || {};
-  const opts: RunOptions = {
-    edit: (markdown) => ctx.flows.screen(st, markdown),
-    chatId: st.chatId,
-    messageId: st.msgId,
-    attached: () =>
-      ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc",
-    progressView: (run) => progressView(run, ctx),
-    onFinish: async (run: ServiceRun) => {
-      // Итог рисуем, только если юзер всё ещё на экране svc — иначе сводка ждёт в render.
-      if (!(ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc"))
-        return;
-      await ctx.flows.screen(
-        st,
-        [summaryText(run, ctx), backLine(ctx)].join("\n\n"),
-      );
+  const pair = await cleanupPair(cmd, spec);
+  const opts = withCleanupCommit(
+    {
+      edit: (markdown) => ctx.flows.screen(st, markdown),
+      chatId: st.chatId,
+      messageId: st.msgId,
+      attached: () =>
+        ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc",
+      progressView: (run) => progressView(run, ctx),
+      onFinish: summaryOnFinish(st, ctx),
+      ...over,
     },
-    ...over,
-  };
+    pair,
+  );
+  // Снимок «до» — перед процессом: правки владельца, сделанные после старта чистки, остаются
+  // незакоммиченными и уезжают в ночной коммит, а не приписываются чистке.
+  await pair?.before();
   const run =
     spec.kind === "unit"
       ? startUnit(cmd, spec, opts)
@@ -345,6 +403,66 @@ async function startCommand(
   }
 }
 
+type Verb = (
+  args: string[],
+  st: MenuServiceState,
+  ctx: MenuServiceContext,
+) => unknown;
+
+/** Глагол кнопки экрана → действие. */
+const VERBS: Record<string, Verb> = {
+  c: (args, st, ctx) =>
+    isServiceCommand(args[0]) ? confirmView(args[0], st, ctx) : undefined,
+  go: (args, st, ctx) =>
+    isServiceCommand(args[0]) ? startCommand(args[0], st, ctx) : undefined,
+  ab: (_args, st, ctx) =>
+    cancelRun()
+      ? ctx.flows.screen(st, ctx.tr("Stopping…", "Останавливаю…"))
+      : ctx.show(st, "svc"), // нечего отменять — перерисовать текущее состояние
+  up: (_args, st, ctx) => ctx.deps.handleUpdateCheck?.(st.chatId),
+  menu: (args, st, ctx) => {
+    if (args[0] !== "rich" && args[0] !== "classic") return undefined;
+    writeSettings({ menuStyle: args[0] });
+    return ctx.show(st, "r"); // корень сразу в новом стиле
+  },
+  beta: (_args, st, ctx) => {
+    const result = setBeta(ctx.deps.root, !betaOf(ctx.deps.root));
+    if (result === "ok") return ctx.show(st, "svc"); // ставится при следующем обновлении
+    return ctx.flows.screen(
+      st,
+      result === "partial"
+        ? ctx.tr(
+            "The update setting may be partly written (git config failed). Tap again or run: iva beta / iva stable",
+            "Настройка обновлений могла записаться частично (git config не прошёл). Нажми ещё раз или выполни: iva beta / iva stable",
+          )
+        : ctx.tr(
+            "The update setting was not recorded (git config failed). Try again or run: iva beta",
+            "Настройка обновлений не записана (git config не прошёл). Повтори или выполни: iva beta",
+          ),
+    );
+  },
+};
+
+function confirmView(
+  cmd: ServiceCommand,
+  st: MenuServiceState,
+  ctx: MenuServiceContext,
+): unknown {
+  const T = ctx.tr;
+  return ctx.flows.screen(
+    st,
+    [
+      `# ${label(cmd, T)}`,
+      describe(cmd, T),
+      `${button(T("▶ Run", "▶ Запустить"), `iva_menu:svc:go:${cmd}`)} — ${T(
+        "start it now.",
+        "запустить сейчас.",
+      )}`,
+      backLine(ctx),
+    ].join("\n\n"),
+  );
+}
+
 const service = {
   parent: "r",
   // eslint-disable-next-line @typescript-eslint/require-await -- async preserves the original synchronous run snapshot before returning a Promise.
@@ -357,40 +475,13 @@ const service = {
       ? progressView(run, ctx)
       : idleView(st, ctx);
   },
-  async on(
+  on(
     verb: string,
     args: string[],
     st: MenuServiceState,
     ctx: MenuServiceContext,
-  ): Promise<unknown> {
-    const T = ctx.tr;
-    if (verb === "c" && isServiceCommand(args[0])) {
-      const cmd = args[0];
-      return ctx.flows.screen(
-        st,
-        [
-          `# ${label(cmd, T)}`,
-          describe(cmd, T),
-          `${button(T("▶ Run", "▶ Запустить"), `iva_menu:svc:go:${cmd}`)} — ${T(
-            "start it now.",
-            "запустить сейчас.",
-          )}`,
-          backLine(ctx),
-        ].join("\n\n"),
-      );
-    }
-    if (verb === "go" && isServiceCommand(args[0]))
-      return startCommand(args[0], st, ctx);
-    if (verb === "ab") {
-      if (cancelRun())
-        return ctx.flows.screen(st, T("Stopping…", "Останавливаю…"));
-      return ctx.show(st, "svc"); // нечего отменять — перерисовать текущее состояние
-    }
-    if (verb === "up") return ctx.deps.handleUpdateCheck?.(st.chatId);
-    if (verb === "menu" && (args[0] === "rich" || args[0] === "classic")) {
-      writeSettings({ menuStyle: args[0] });
-      return ctx.show(st, "r"); // корень сразу в новом стиле
-    }
+  ): unknown {
+    return Object.hasOwn(VERBS, verb) ? VERBS[verb](args, st, ctx) : undefined;
   },
 };
 

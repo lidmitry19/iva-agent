@@ -17,12 +17,12 @@ import {
 } from "../lib/plugin-units.ts";
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { classifyAgentListeners } from "../lib/listener-security.ts";
-import { readMemoryMaintenanceReport } from "../lib/memory-maintenance.ts";
 import {
   CATALOG,
   catalogProvider,
   providerEnvKeys,
 } from "../lib/model-catalog.ts";
+import { claudeStatus } from "../lib/claude-cli-status.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
 import {
   acquireUpdateLock,
@@ -97,28 +97,58 @@ export function authoredTreeMissing(error: unknown): boolean {
  */
 export async function scheduleFactsReport(
   dataDirectory: string,
-  now: number,
 ): Promise<ScheduleFactsReport> {
   const { jobFactsFile, latestFact, readFactsSync } =
     await import("#lib/job-facts.ts");
   const { openJobFailures } = await import("#lib/open-failures.ts");
-  const { SCHEDULE_CRON } = await import("#lib/schedule-table.ts");
+  const { PROACTIVE_SCHEDULE, SCHEDULE_CRON } =
+    await import("#lib/schedule-table.ts");
   const facts = readFactsSync(jobFactsFile(dataDirectory));
-  const names = [
-    ...new Set([...Object.keys(SCHEDULE_CRON), ...facts.map((f) => f.name)]),
-  ].sort();
+  const succeeded = lastSuccesses(dataDirectory);
+  // Только живые расписания (isLiveSchedule): строки снятых остаются в jobs.json.
+  const names = [...Object.keys(SCHEDULE_CRON), PROACTIVE_SCHEDULE].sort();
   const lastRuns: string[] = [];
   for (const name of names) {
-    const latest: JobFact | null = latestFact(facts, name);
-    if (!latest) continue;
-    const when = new Date(latest.finishedAt).toISOString();
-    lastRuns.push(
-      latest.ok
-        ? `${name}: ok, ${when}`
-        : `${name}: провал (${latest.error ?? "без причины"}), ${when}`,
-    );
+    const line = lastRunLine(name, latestFact(facts, name), succeeded[name]);
+    if (line !== null) lastRuns.push(line);
   }
-  return { lastRuns, openFailures: openJobFailures(facts, now), facts };
+  return { lastRuns, openFailures: openJobFailures(facts), facts };
+}
+
+/**
+ * Строка последнего запуска. Успех — позднейшее из факта и `lastSuccessAt` раннера: тик proactive
+ * пишет факт успеха только после провала, остальные успехи видны лишь в статусе.
+ */
+function lastRunLine(
+  name: string,
+  latest: JobFact | null,
+  successAt: number | undefined,
+): string | null {
+  if (latest === null || latest.ok) {
+    const at = Math.max(latest?.finishedAt ?? 0, successAt ?? 0);
+    return at > 0 ? `${name}: ok, ${new Date(at).toISOString()}` : null;
+  }
+  const when = new Date(latest.finishedAt).toISOString();
+  const reason = latest.error ?? "без причины";
+  return latest.acked // закрыт iva jobs ack: без предупреждения
+    ? `${name}: закрытый провал (${reason}), ${when}`
+    : `${name}: провал (${reason}), ${when}`;
+}
+
+/** `lastSuccessAt` по именам из rollup-status.json; нет или не читается — пусто (история в jobs.json). */
+function lastSuccesses(dataDirectory: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(dataDirectory, "rollup-status.json"), "utf8"),
+    ) as Record<string, { lastSuccessAt?: unknown } | null>;
+    for (const [name, entry] of Object.entries(parsed))
+      if (Number.isSafeInteger(entry?.lastSuccessAt))
+        out[name] = entry?.lastSuccessAt as number;
+  } catch {
+    // Статуса нет или он битый: о нём говорит свой раздел доктора, здесь — только факты.
+  }
+  return out;
 }
 
 /** Сколько ждём `/health` прокси: он на loopback, и медленный ответ — уже симптом. */
@@ -294,7 +324,7 @@ export function createDoctorCommand(
     if (bearerChanged) ctx.fix();
 
     checkNode(ctx);
-    if (checkEnvFile(ctx)) checkEnvOptions(ctx);
+    if (await checkEnvFile(ctx)) checkEnvOptions(ctx);
     checkBuild(ctx);
     ctx.install = checkVersionState(ctx);
     await checkScheduleFacts(ctx);
@@ -315,8 +345,7 @@ export function createDoctorCommand(
     checkRollupStatus(ctx);
     await checkReminders(ctx);
     await checkBridge(ctx);
-    const vaultPath = checkVault(ctx);
-    checkMaintenance(ctx, vaultPath);
+    checkVault(ctx);
     return finishDoctor(ctx);
   };
 }
@@ -461,11 +490,11 @@ function checkNode(ctx: DoctorContext): void {
 }
 
 /**
- * 2. .env и обязательные ключи — та же REQUIRED-логика, что в scripts/setup/main.ts.
+ * 2. .env и обязательные ключи — та же REQUIRED-логика, что в scripts/setup/wizard.ts.
  * True возвращается, когда .env есть: только тогда имеет смысл необязательный хвост
  * раздела (checkEnvOptions), как и было в монолите.
  */
-function checkEnvFile(ctx: DoctorContext): boolean {
+async function checkEnvFile(ctx: DoctorContext): Promise<boolean> {
   if (!existsSync(ctx.envPath)) {
     ctx.fail(".env missing — run: iva config");
     return false;
@@ -502,7 +531,23 @@ function checkEnvFile(ctx: DoctorContext): boolean {
       `.env incomplete, missing: ${missing.join(", ")} — run: iva config`,
     );
   }
+  // Вендора без ключа в .env доктор проверяет там же, где живёт его вход: в чужом CLI
+  // на этой же машине. Молчать об этом значило бы объявить .env здоровым перед
+  // отказом агента на старте.
+  if (provider.auth === "cli") await checkClaudeCli(ctx);
   return true;
+}
+
+/** Статус Claude Code CLI: имя плана при входе и подсказка вместо него при отказе. */
+async function checkClaudeCli(ctx: DoctorContext): Promise<void> {
+  // PATH берём у процесса, значения — из .env: юнит несёт EnvironmentFile, а бинарь
+  // ищется по PATH сервиса, не по строке в файле.
+  const status = await claudeStatus({ ...process.env, ...ctx.env });
+  if (status.ready) {
+    ctx.ok(`Claude Code CLI: signed in (plan: ${status.plan || "unnamed"})`);
+    return;
+  }
+  ctx.fail(status.hint);
 }
 
 /** Хвост раздела .env: двусмысленные строки, миграция порта, необязательные поиск и память. */
@@ -634,7 +679,7 @@ function checkVersionState(
  */
 async function checkScheduleFacts(ctx: DoctorContext): Promise<void> {
   try {
-    const report = await scheduleFactsReport(ctx.dataDirectory, ctx.now());
+    const report = await scheduleFactsReport(ctx.dataDirectory);
     for (const line of report.lastRuns) {
       if (line.includes(": провал")) {
         ctx.warn(`расписание ${line} — check: iva doctor, iva jobs ack <name>`);
@@ -840,13 +885,8 @@ function checkRollupStatus(ctx: DoctorContext): void {
     // No rollup-status.json yet (fresh install, or nothing has fired yet) — not an error.
   }
   if (!rollupStatus) return;
-  const staleAfterHours = {
-    daily: 26,
-    weekly: 8 * 24,
-    monthly: 32 * 24,
-    yearly: 370 * 24,
-  };
-  for (const period of ["daily", "weekly", "monthly", "yearly"] as const) {
+  const staleAfterHours = { night: 26 };
+  for (const period of ["night"] as const) {
     // "memory-<period>" — the `name` each agent/schedules/memory-*.ts passes to
     // runScheduledJob, not the bare period (see scripts/lib/schedule-runner.ts).
     const entry = (rollupStatus as RollupStatus)[`memory-${period}`];
@@ -1132,7 +1172,7 @@ async function checkBridge(ctx: DoctorContext): Promise<void> {
 }
 
 // 6. Vault + git origin (report only — we don't initiate git operations)
-function checkVault(ctx: DoctorContext): string {
+function checkVault(ctx: DoctorContext): void {
   const vaultPath = resolveVaultDir(ctx.root, ctx.env.ASSISTANT_VAULT_DIR);
   if (!existsSync(vaultPath)) {
     ctx.warn(
@@ -1146,33 +1186,6 @@ function checkVault(ctx: DoctorContext): string {
     ctx.warn(
       `vault without git origin — memory backup not configured:\n    gh repo create <user>/iva-vault --private --source="${vaultPath}" --remote=origin --push`,
     );
-  }
-  return vaultPath;
-}
-
-/**
- * enforce-report.json is produced by iva-brain.service, so only complain about
- * missing/stale output when that timer is enabled. A fresh report is still useful either way.
- */
-function checkMaintenance(ctx: DoctorContext, vaultPath: string): void {
-  const maintenanceTimerEnabled = ctx.systemd.isEnabled(ctx.brainTimer);
-  const maintenanceReport = readMemoryMaintenanceReport(
-    join(vaultPath, ".graph/enforce-report.json"),
-  );
-  if (maintenanceReport.status === "fresh") {
-    if (maintenanceReport.problems.length) {
-      ctx.warn(
-        `ночной maintenance сообщает о проблемах: ${maintenanceReport.problems
-          .map(({ key, count }) => `${key}=${count}`)
-          .join(", ")}`,
-      );
-    } else {
-      ctx.ok("Ночной maintenance-отчёт свежий, проблем нет");
-    }
-  } else if (maintenanceTimerEnabled) {
-    if (maintenanceReport.status === "invalid")
-      ctx.warn("ночной maintenance оставил нечитаемый отчёт");
-    else ctx.warn("ночной maintenance давно не отчитывался");
   }
 }
 

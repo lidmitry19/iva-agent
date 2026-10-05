@@ -8,10 +8,10 @@ import type { AttachSessionFn, CancelTurnResult } from "eve/channels";
  * `attachSession` приходит из RouteHandlerArgs, поэтому вызывающий обязан быть
  * роутом канала: событийные обработчики этот helper не получают.
  *
- * Второй, НЕ канальный путь отмены в проекте — `scripts/lib/rollup-turn.ts`
- * (`cancelTurnQuietly` / `cancelTurnAndConfirmQuietly`): ночной роллап держит
- * client-сессию eve и гасит свой зависший ход через `session.cancel()`. Это другой
- * API и другой владелец сессии, сюда он не сводится; при апгрейде eve его надо
+ * Второй, НЕ канальный путь отмены в проекте — `scripts/lib/night-session.ts`: ночной
+ * роллап держит client-сессию eve и гасит свой ход через
+ * `session.cancel({ turnId, tasks: true })` — с задачами, как здесь, — а снимает её reset.
+ * Это другой API и другой владелец сессии, сюда он не сводится; при апгрейде eve его надо
  * мигрировать отдельно.
  */
 export interface EveCancelRequest {
@@ -27,6 +27,9 @@ export function cancelEveTurn(
   { sessionId, turnId }: EveCancelRequest,
 ): Promise<CancelTurnResult> {
   return attachSession(sessionId).cancel({
+    // Гасим не только сам ход, но и задачи, которые он успел породить: без `tasks`
+    // осиротевшая задача сессии продолжает работать после «Стопа» и писать в vault.
+    tasks: true,
     ...(turnId === undefined ? {} : { turnId }),
   });
 }

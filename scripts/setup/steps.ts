@@ -1,3 +1,4 @@
+import { resolveOpenCodeProtocol } from "@iva/opencode-protocol";
 // Шаги мастера настройки, вынесенные из scripts/setup/main.ts (B5, шаг 1).
 //
 // Шаг получает состояние мастера и контекст: диалог, печать и запись .env приходят
@@ -13,6 +14,11 @@ import {
 } from "../lib/model-catalog.ts";
 import { resolveMemorySearchMode } from "../lib/memory-mode.ts";
 import { validateTimeZone } from "../lib/timezone.ts";
+import {
+  claudeContextWindow,
+  type ClaudeStatus,
+} from "../lib/claude-cli-status.ts";
+import { claudeModelLabel } from "../lib/claude-cli-status.ts";
 import type { fetchModels } from "../lib/model-catalog.ts";
 import type {
   listCodexModels,
@@ -58,7 +64,7 @@ export type SetupIo = {
   askRequired: (label: string, options?: AskRequiredOptions) => Promise<string>;
   mask: (value: string) => string;
   pickFromList: (
-    items: string[],
+    items: readonly (string | { id: string; label?: string })[],
     current: string,
     recommended: string,
   ) => Promise<string>;
@@ -83,6 +89,8 @@ export type SetupBackend = {
   opencodeModels: (key: string) => Promise<string[]>;
   openrouterKeyCheck: (key: string) => Promise<string | null>;
   openrouterModelCheck: (key: string, model: string) => Promise<string | null>;
+  /** Статус Claude Code CLI: у вендора claude нет ключа, вход живёт на этом же сервере. */
+  claudeCli: () => Promise<ClaudeStatus>;
   deepgramCheck: (key: string) => Promise<string | null>;
   telegramGetMe: (token: string) => Promise<TelegramBot | undefined>;
   fetchTelegramUserIds: (token: string) => Promise<TelegramUser[]>;
@@ -178,7 +186,22 @@ async function askOpencodeSettings(
     "deepseek-v4-pro",
   );
   ctx.print(
-    `\n  ${ctx.t("Vision model (photos)", "Vision-модель (фото)")}: ${ctx.t("describes incoming pictures — the text model above is usually blind.", "описывает входящие картинки — текстовая модель выше обычно их не видит.")} ${ctx.t("I recommend", "Рекомендую")} ${C.g}${CATALOG.opencode.visionDef ?? ""}${C.x}.`,
+    ctx.t(
+      "Choose each model's protocol from https://opencode.ai/docs/go/#endpoints. /messages is unsupported.",
+      "Выберите протокол каждой модели по https://opencode.ai/docs/go/#endpoints. /messages не поддерживается.",
+    ),
+  );
+  out.OPENCODE_PROTOCOL = resolveOpenCodeProtocol(
+    await ctx.ask(
+      "  OPENCODE_PROTOCOL (chat-completions / responses)",
+      out.OPENCODE_PROTOCOL || "chat-completions",
+    ),
+  );
+  ctx.print(
+    ctx.t(
+      "Vision fallback: choose an image-capable model and its documented wire. The old qwen3.7-plus default now uses unsupported /messages.",
+      "Запасное зрение: выберите модель с поддержкой картинок и её протокол. Старый дефолт qwen3.7-plus теперь требует неподдерживаемый /messages.",
+    ),
   );
   // Тот же срез устаревшего префикса, что и у текстовой модели выше.
   const curVision = (out.OPENCODE_VISION_MODEL || "").replace(
@@ -189,6 +212,13 @@ async function askOpencodeSettings(
     models,
     curVision,
     CATALOG.opencode.visionDef ?? "",
+  );
+  out.OPENCODE_VISION_PROTOCOL = resolveOpenCodeProtocol(
+    await ctx.ask(
+      "  OPENCODE_VISION_PROTOCOL (chat-completions / responses; /messages unsupported)",
+      out.OPENCODE_VISION_PROTOCOL || "chat-completions",
+    ),
+    "OPENCODE_VISION_PROTOCOL",
   );
   out.OPENCODE_CONTEXT_WINDOW = out.OPENCODE_CONTEXT_WINDOW || "131072";
   ctx.print(
@@ -219,7 +249,7 @@ async function askOpenrouterModel(
     `\n  ${ctx.t("Now the model.", "Теперь модель.")} ${ctx.t("Open", "Откройте")} ${C.c}https://openrouter.ai/models${C.x}, ${ctx.t("pick a model and copy its slug", "выберите модель и скопируйте её слаг")}`,
   );
   ctx.print(
-    `  ${ctx.t("— the id under the name, form", "— id под названием, вид")} ${C.g}vendor/model${C.x} (${ctx.t("e.g.", "напр.")} ${C.g}anthropic/claude-sonnet-4.5${C.x}, ${C.g}openai/gpt-5.1${C.x}, ${C.g}google/gemini-2.5-pro${C.x}).`,
+    `  ${ctx.t("— the id under the name, form", "— id под названием, вид")} ${C.g}vendor/model${C.x} (${ctx.t("e.g.", "напр.")} ${C.g}anthropic/claude-sonnet-5.5${C.x}, ${C.g}openai/gpt-5.1${C.x}, ${C.g}google/gemini-2.5-pro${C.x}).`,
   );
   ctx.print(
     `  ${C.y}${ctx.t("I'll send a live test (incl. tool/function calling, which Iva needs) — so a wrong or chat-only model can't slip through and leave the bot mute.", "Сразу отправлю живой тест (включая поддержку инструментов — она нужна Iva) — чтобы кривая или chat-only модель не проскочила и бот не остался немым.")}${C.x}`,
@@ -397,6 +427,50 @@ async function askCustomSettings(
   ctx.print(`  → ${ctx.t("model", "модель")}: ${C.g}${out.CUSTOM_MODEL}${C.x}`);
 }
 
+/**
+ * Вендор claude: ключа нет вовсе — Ива зовёт Claude Code CLI на том же сервере.
+ * Поставить пакет и войти в подписку мастер за владельца не может, поэтому он проверяет
+ * статус, показывает команды для сервера и даёт повторить проверку.
+ */
+async function askClaudeSettings(
+  state: SetupState,
+  ctx: SetupContext,
+): Promise<void> {
+  const { out } = state;
+  ctx.print(
+    `\n  ${ctx.t("Claude by subscription: Iva calls the claude CLI on this server. No API key — sign the CLI in once and Iva uses that login.", "Claude по подписке: Ива зовёт CLI claude на этом же сервере. API-ключа нет — войдите в CLI один раз, и Ива пользуется этим входом.")}`,
+  );
+  let status = await ctx.claudeCli();
+  while (!status.ready) {
+    ctx.print(`  ${C.y}${status.hint}${C.x}`);
+    if (
+      !(await ctx.askYesNo(
+        `  ${ctx.t("Done that? Check again?", "Сделали? Проверить снова?")}`,
+        true,
+      ))
+    )
+      break;
+    status = await ctx.claudeCli();
+  }
+  if (status.ready)
+    ctx.print(
+      `  ${C.g}${ctx.t("signed in", "вход выполнен")}${status.plan ? ` — ${ctx.t("plan", "план")}: ${status.plan}` : ""}${C.x}`,
+    );
+  // Список моделей спрашиваем у того же CLI; не ответил — остаётся вшитый список каталога.
+  // На экране — имя, в .env — канонический id.
+  const models = await ctx.fetchModels("claude");
+  out.CLAUDE_MODEL = await ctx.pickFromList(
+    models.map((id) => ({ id, label: claudeModelLabel(id) })),
+    out.CLAUDE_MODEL,
+    CATALOG.claude.def ?? "",
+  );
+  // Окно контекста пишем сразу за моделью: компактация считает порог от него.
+  out.CLAUDE_CONTEXT_WINDOW = claudeContextWindow(out.CLAUDE_MODEL);
+  ctx.print(
+    `  → ${ctx.t("model", "модель")}: ${C.g}${out.CLAUDE_MODEL}${C.x} · ${ctx.t("context window", "окно контекста")}: ${out.CLAUDE_CONTEXT_WINDOW}`,
+  );
+}
+
 /** Вход по подписке OpenAI (OAuth): токен уезжает в data/codex-auth.json. */
 async function askCodexLogin(
   state: SetupState,
@@ -508,6 +582,7 @@ export async function askProviderSettings(
   else if (provider === "opencode") await askOpencodeSettings(state, ctx);
   else if (provider === "openrouter") await askOpenrouterSettings(state, ctx);
   else if (provider === "custom") await askCustomSettings(state, ctx);
+  else if (provider === "claude") await askClaudeSettings(state, ctx);
   else await askCodexSettings(state, ctx);
   ctx.print(
     `  ${C.y}${ctx.t("Don't inflate the context window:", "Окно контекста не завышайте:")}${C.x} ${ctx.t("compaction computes its threshold from it; an inflated window risks overflow.", "компактация считает порог от него; завышенное окно = риск переполнения.")}`,
@@ -988,6 +1063,7 @@ function printSetupSummary(
     opencode: out.OPENCODE_MODEL,
     openrouter: out.OPENROUTER_MODEL,
     codex: out.CODEX_MODEL,
+    claude: out.CLAUDE_MODEL,
     custom: out.CUSTOM_MODEL,
   }[provider];
   ctx.print();
@@ -1029,6 +1105,7 @@ export async function writeSetupEnv(
     opencode: { model: "OPENCODE_MODEL", key: "OPENCODE_API_KEY" },
     openrouter: { model: "OPENROUTER_MODEL", key: "OPENROUTER_API_KEY" },
     codex: { model: "CODEX_MODEL", key: null },
+    claude: { model: "CLAUDE_MODEL", key: null },
     custom: { model: "CUSTOM_MODEL", key: "CUSTOM_API_KEY" },
   }[provider];
   if (!selected) throw new Error(`unknown provider: ${provider}`);
@@ -1038,6 +1115,9 @@ export async function writeSetupEnv(
   const catOut = catalogProvider(provider);
   await ctx.validateModelSelection({
     provider: out.MODEL_PROVIDER,
+    ...(out.MODEL_PROVIDER === "opencode"
+      ? { opencodeProtocol: out.OPENCODE_PROTOCOL }
+      : {}),
     model: out[selected.model],
     key: selected.key ? out[selected.key] || undefined : undefined,
     dataDir: ctx.dataDirAbs(out),

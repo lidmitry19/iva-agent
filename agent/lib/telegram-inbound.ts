@@ -293,6 +293,19 @@ function messageViewForRaw(
   };
 }
 
+// /digest: обзор дня. В группе его читают другие участники — только задачи, как дайджест 0.4.11.
+function digestRequest(msg: TelegramInboundMessage): string {
+  return msg.chat.type === "private"
+    ? tr(
+        "Load the brief skill and assemble the daily brief.",
+        "Загрузи скилл brief и собери обзор дня.",
+      )
+    : tr(
+        "This is a group chat: load the brief skill and show only the open tasks, nothing from mail, calendar, personal Telegram or Connections.",
+        "Это групповой чат: загрузи скилл brief и покажи только открытые задачи, ничего из почты, календаря, личного Telegram и Connection.",
+      );
+}
+
 // Воспроизводит дефолтный auth-контекст eve для Telegram-актора.
 function buildAuth(msg: TelegramInboundMessage): TelegramInboundAuth | null {
   const u = msg.from;
@@ -697,12 +710,7 @@ export async function runTelegramInbound(
       await effects.startTyping();
       return withPre({
         auth: buildAuth(message),
-        context: [
-          tr(
-            "Load the morning-digest skill and assemble the morning digest.",
-            "Загрузи скилл morning-digest и собери утренний дайджест.",
-          ),
-        ],
+        context: [digestRequest(message)],
       });
     }
     // прочие команды — пусть отвечает модель обычным ходом (fall through)

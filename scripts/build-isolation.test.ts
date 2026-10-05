@@ -69,6 +69,11 @@ function world(): string {
 function plantTree(root: string): void {
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(join(REPO, "scripts/build.ts"), join(root, "scripts/build.ts"));
+  mkdirSync(join(root, "agent/lib"), { recursive: true });
+  cpSync(
+    join(REPO, "agent/lib/memory-night-time.ts"),
+    join(root, "agent/lib/memory-night-time.ts"),
+  );
   cpSync(join(REPO, "scripts/lib"), join(root, "scripts/lib"), {
     recursive: true,
     filter: (source) => !source.endsWith(".test.ts"),
@@ -125,6 +130,7 @@ function build(
   root: string,
   configuredDataDir?: string,
   nodeImport?: string,
+  nightTime?: string,
 ): { status: number | null; output: string } {
   const result = spawnSync(
     process.execPath,
@@ -138,6 +144,7 @@ function build(
       env: {
         ...process.env,
         NO_COLOR: "1",
+        ...(nightTime === undefined ? {} : { MEMORY_NIGHT_TIME: nightTime }),
         ...(configuredDataDir === undefined
           ? {}
           : { ASSISTANT_DATA_DIR: configuredDataDir }),
@@ -339,4 +346,31 @@ test("a version builds itself, never the checkout's custom layer", () => {
     readFileSync(join(version, "agent/skills/mine/SKILL.md"), "utf8"),
     "stock\n",
   );
+});
+
+test("night time is promoted with output; env-only changes and failed builds retain the active clock", () => {
+  const home = join(world(), "iva");
+  const version = join(home, "versions/0.3.15-0123456789ab");
+  mkdirSync(version, { recursive: true });
+  plantTree(version);
+  let built = build(version, undefined, undefined, "11:37");
+  assert.equal(built.status, 0, built.output);
+  const settings = join(version, ".output/iva-memory-night.json");
+  const active = readFileSync(settings, "utf8");
+  assert.deepEqual(JSON.parse(active), {
+    schema: "iva-memory-night/v1",
+    time: "11:37",
+  });
+  assert.equal(
+    existsSync(join(version, ".iva-memory-night-build.json")),
+    false,
+  );
+  writeFileSync(join(version, "scripts/core-build.mjs"), "process.exit(1);\n");
+  built = build(version, undefined, undefined, "20:45");
+  assert.notEqual(built.status, 0);
+  assert.equal(readFileSync(settings, "utf8"), active);
+  built = build(version, undefined, undefined, "24:00");
+  assert.notEqual(built.status, 0);
+  assert.match(built.output, /MEMORY_NIGHT_TIME must be HH:mm/);
+  assert.equal(readFileSync(settings, "utf8"), active);
 });

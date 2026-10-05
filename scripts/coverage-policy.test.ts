@@ -28,27 +28,10 @@ const BLIND_SPOT: ReadonlyArray<{
     why: "адаптер канала eve; тесты идут через инбаунд",
   },
   {
-    path: "agent/hooks/transcript.ts",
-    why: "хук eve; рядом trace-hook покрыт, этот грузит ядро",
-  },
-  {
     path: "agent/instructions/05-language.ts",
     why: "динамика eve; язык проверен через ходы",
   },
-  // Тонкие тулы: тривиальные обёртки, поведение держат тесты поверхностей.
-  {
-    path: "agent/tools/glob.ts",
-    why: "тонкая обёртка; гоняют bash/grep-тесты поверхностей",
-  },
-  {
-    path: "agent/tools/grep.ts",
-    why: "тонкая обёртка; гоняют bash/grep-тесты поверхностей",
-  },
   // Транзитивно покрыты: свой тест грузит соседа, этот едет прицепом.
-  {
-    path: "agent/lib/embeddings.ts",
-    why: "прицеп embed-index; ключи и фолбэки в его тесте",
-  },
   {
     path: "agent/lib/plugin-skills.ts",
     why: "прицеп plugin-store/reader; листинг в их тестах",
@@ -64,10 +47,6 @@ const BLIND_SPOT: ReadonlyArray<{
   {
     path: "agent/lib/telegram-private-chat.ts",
     why: "прицеп канала; приватный чат в тестах канала",
-  },
-  {
-    path: "agent/lib/telegram-stop.ts",
-    why: "прицеп стопа; сценарии в failure-events",
   },
   {
     path: "agent/transcribe.ts",
@@ -99,16 +78,16 @@ const BLIND_SPOT: ReadonlyArray<{
     why: "ручная проверка разработчика, не рантайм",
   },
   {
-    path: "scripts/check-reasoning-strip.ts",
-    why: "ручная проверка разработчика, не рантайм",
-  },
-  {
     path: "scripts/migrations/001-iva-port.ts",
     why: "одноразовая миграция версии 0.3.3",
   },
   {
     path: "scripts/replica-smoke.ts",
     why: "ручной стенд; e2e идет через capture/analyze",
+  },
+  {
+    path: "scripts/live-turn.ts",
+    why: "стенд приёмки: живой ход на настоящем провайдере, сам и есть проверка",
   },
 ];
 

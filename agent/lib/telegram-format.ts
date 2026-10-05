@@ -584,6 +584,26 @@ export function toTelegramHtmlChunks(md: unknown, limit = 4096): string[] {
 // render fine in HTML, so — like hermes-agent — we do NOT route on those: normal
 // replies stay on the proven HTML path. Conservative by design: a false negative
 // is just today's behavior; a false positive falls back on API rejection anyway.
+/**
+ * Кнопка без `type`: Telegram отвергает весь rich message (400 BUTTON_URL_INVALID), и ответ
+ * уходит HTML-путём уже без кнопок. Модель забывает атрибут — по остальным видно, что она
+ * имела в виду: `data` → callback_data, `url` → url, `text` → copy_text. Ничего из них —
+ * кнопка остаётся как есть.
+ */
+export function withButtonTypes(md: string): string {
+  return md.replace(/<tg-button(?=[\s>])([^>]*)>/gi, (tag, attrs: string) => {
+    if (/\stype\s*=/i.test(attrs)) return tag;
+    const type = /\sdata\s*=/i.test(attrs)
+      ? "callback_data"
+      : /\surl\s*=/i.test(attrs)
+        ? "url"
+        : /\stext\s*=/i.test(attrs)
+          ? "copy_text"
+          : null;
+    return type === null ? tag : `<tg-button type="${type}"${attrs}>`;
+  });
+}
+
 export function hasRichButtons(md: unknown): boolean {
   return /<tg-button[\s>]/i.test(String(md));
 }

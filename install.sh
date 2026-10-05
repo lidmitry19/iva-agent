@@ -24,6 +24,11 @@ printf '\n  \033[36m⏳ Preparing environment / Идёт подготовка о
 set -Eeuo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/smixs/iva-agent.git}"
+# IVA_BETA=1 - бета-обновления: всегда ветка beta, в main только выпуски (ADR-0018).
+if [ "${IVA_BETA:-}" = 1 ]; then
+  [ "${BRANCH:-beta}" = beta ] || printf 'IVA_BETA=1: BRANCH=%s ignored, installing the beta branch\n' "$BRANCH" >&2
+  BRANCH=beta
+fi
 BRANCH="${BRANCH:-main}"
 UPDATE_CHANNEL="$BRANCH"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/iva}"
@@ -112,6 +117,7 @@ download_verified() {
 
 install_verified_npm_tarball() {
   local label="$1" url="$2" expected="$3" rc=0
+  shift 3
   if download_verified "$label" "$url" "$expected"; then
     :
   else
@@ -119,7 +125,7 @@ install_verified_npm_tarball() {
     cleanup_verified_download
     return "$rc"
   fi
-  if npm i -g "$VERIFIED_DOWNLOAD"; then rc=0; else rc=$?; fi
+  if npm i -g "$@" "$VERIFIED_DOWNLOAD"; then rc=0; else rc=$?; fi
   cleanup_verified_download
   return "$rc"
 }
@@ -416,6 +422,17 @@ repair_script_url() {
 # It hands the tree to repair.sh, which is where `iva update`, the bridge and the repair
 # command all go, and exits with what came back. The installer keeps no second copy of that
 # route - and no second answer to whether a tree may be updated at all.
+# IVA_BETA=1 над существующей установкой: выбор - в зеркало и .git до передачи обновлятору.
+record_beta_choice() {
+  [ "${IVA_BETA:-}" = 1 ] || return 0
+  local repo
+  for repo in "$INSTALL_DIR/repo" "$INSTALL_DIR/.git"; do
+    [ -e "$repo" ] || continue
+    git --git-dir="$repo" config --local iva.updateBranch beta
+    git --git-dir="$repo" config --local iva.beta true
+  done
+}
+
 hand_installation_to_repair() {
   local url script rc=0
   url="$(repair_script_url)" || die "$(t "REPO_URL is not a GitHub repository of the project, so there is no repair.sh to update $INSTALL_DIR with: run 'iva update' yourself." "REPO_URL не репозиторий проекта на GitHub, взять repair.sh для обновления $INSTALL_DIR неоткуда: запустите 'iva update' сами.")"
@@ -857,6 +874,25 @@ fi
 command -v node >/dev/null 2>&1 || die "$(t "Node $NODE_MAJOR_MIN+ failed to install. Install it manually (nvm install $NODE_MAJOR_MIN) and re-run." "Node $NODE_MAJOR_MIN+ не установился. Поставьте вручную (nvm install $NODE_MAJOR_MIN) и перезапустите.")"
 ok "Node $(node -v)"
 
+# Новая установка и ремонт ставят новейший выпуск (метку vX.Y.Z на ветке, ADR-0017), если
+# он не старше первого выпуска с бета-обновлениями, иначе вершину ветки; IVA_BETA=1 или
+# iva.beta=true — вершину. Ветка остаётся той же: за ней следит обновлятор. Та же функция
+# стоит в install.sh и repair.sh: оба запускаются через curl | bash и самодостаточны.
+checkout_release() {
+  local first="0.4.9" tag target="${3:-HEAD}"
+  if [ "${IVA_BETA:-}" = 1 ]; then git -C "$1" config --local iva.beta true; fi
+  # Бета - ветка beta или прежний флаг (ADR-0018): вершина. Иначе новейший выпуск.
+  if [ "$(git -C "$1" config --local --get iva.beta || true)" != true ] \
+    && [ "$(git -C "$1" config --local --get iva.updateBranch || true)" != beta ]; then
+    tag="$(git -C "$1" tag --list 'v*' --merged "$target" --sort=-v:refname \
+      | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -n 1 || true)"
+    if [ -n "$tag" ] && [ "$(printf '%s\n%s\n' "$first" "${tag#v}" | sort -V | head -n 1)" = "$first" ]; then target="$tag"; fi
+  fi
+  # $2 - коммит, стоявший до ремонта: новее цели (её потомок) - он и остаётся.
+  if [ -n "${2:-}" ] && git -C "$1" merge-base --is-ancestor "$target" "$2" 2>/dev/null; then target="$2"; fi
+  git -C "$1" reset -q --hard "$target"
+}
+
 # ─────────────────────────────────────────────────────────────────────────
 # 4. Project code (current directory / an installation that exists / clone). SCRIPT_DIR is
 #    resolved at the top.
@@ -882,10 +918,12 @@ elif [ -d "$INSTALL_DIR/.git" ] || [ -d "$INSTALL_DIR/versions" ]; then
   # «index.lock: File exists» вместо отказа по имени. Версионную раскладку сторожит замок
   # самого обновлятора.
   if [ -d "$INSTALL_DIR/.git" ]; then PROJECT_DIR="$INSTALL_DIR"; acquire_install_lock "$INSTALL_DIR/data"; fi
+  record_beta_choice
   hand_installation_to_repair
 else
   run_stage "$(t "Cloning Iva" "Клонирую Iva")" "$(t "Iva downloaded" "Iva загружена")" \
     git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  checkout_release "$INSTALL_DIR"
   PROJECT_DIR="$INSTALL_DIR"
   acquire_install_lock
 fi
@@ -939,7 +977,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 # The binary installs into npm-global; the path is needed here and in the service PATH (below).
 NPM_GLOBAL_BIN="$(npm prefix -g 2>/dev/null)/bin"
-export PATH="$NPM_GLOBAL_BIN:$PATH"
+export PATH="$HOME/.local/bin:$NPM_GLOBAL_BIN:$PATH"
 CURRENT_STEP="agent-browser"
 # The launch check first, not after the install: it is the same proof the install path
 # ends with, and passing it means the binary and Chromium are both there. Downloading
@@ -984,7 +1022,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 # Installed once and left alone: an installed `gws` is kept current by `iva update`,
 # so re-running the installer after a failure has no reason to pay for it again. Non-fatal — Google-service tasks are
-# optional. Binary lands in npm-global (already on PATH). Auth is per-user and
+# optional. Binary lands in ~/.local/bin (first on the service PATH). Auth is per-user and
 # interactive — the bot walks the user through it in chat (agent skill
 # `google-workspace`); nothing to configure here.
 CURRENT_STEP="gws"
@@ -993,7 +1031,7 @@ if command -v gws >/dev/null 2>&1; then
 else
   gws_rc=0
   if run_stage "$(t "Installing Google Workspace CLI" "Ставлю Google Workspace CLI")" "$(t "gws installed" "gws установлен")" \
-    install_verified_npm_tarball gws "$GWS_TARBALL_URL" "$GWS_TARBALL_SHA256" \
+    install_verified_npm_tarball gws "$GWS_TARBALL_URL" "$GWS_TARBALL_SHA256" --prefix "$HOME/.local" \
     && command -v gws >/dev/null 2>&1; then
     ok "$(t "gws ready — connect Google later: message the bot \"connect Google\"" "gws готов — Google подключишь позже: напиши боту «подключи Google»")"
   else

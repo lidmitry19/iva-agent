@@ -104,3 +104,71 @@ test("текст отказа объясняет модели, что предл
   assert.match(msg, /\/restart/);
   assert.match(msg, /#68/);
 });
+
+test("iva plugin trust|enable|update|sync из bash блокируются: плагин с кодом ставит тап владельца", () => {
+  for (const verb of ["trust", "enable", "update", "sync"]) {
+    blocked(`iva plugin ${verb} relay`);
+    blocked(`iva plugin ${verb}`);
+    blocked(`node bin/iva.mjs plugin ${verb} relay`);
+    blocked(`cd ~/iva/current && iva "plugin" ${verb} relay`);
+    blocked(`npm run iva -- plugin ${verb}`);
+    blocked(`bash -c 'iva plugin  ${verb} relay'`);
+  }
+});
+
+test("iva plugin install-proposal из bash блокируется: установку по предложению запускает только тап в Bridge", () => {
+  blocked("iva plugin install-proposal a5bdc6f1401c");
+  blocked("node bin/iva.mjs plugin install-proposal a5bdc6f1401c </dev/null");
+  blocked("npm run iva -- plugin install-proposal a5bdc6f1401c");
+  blocked(`bash -c 'iva plugin install-proposal a5bdc6f1401c'`);
+  blocked(
+    "mv data/plugin-proposals/relay-a5bdc6f1401c data/plugin-proposals/.taken-a5bdc6f1401c && iva plugin install-proposal a5bdc6f1401c",
+  );
+  allowed("iva plugin propose drafts/relay");
+  allowed("rg -n 'iva plugin install-proposal' docs/");
+});
+
+test("остальные подкоманды iva plugin проходят: их гвард не трогает", () => {
+  for (const verb of [
+    "remove",
+    "disable",
+    "untrust",
+    "list",
+    "add",
+    "propose",
+    "marketplace",
+  ])
+    allowed(`iva plugin ${verb} relay`);
+  allowed("iva plugin trusted");
+  allowed("iva plugin updates");
+  allowed("rg -n 'iva plugin trust' docs/");
+});
+
+test("npm run iva без -- и npx iva блокируются для всего списка глаголов", () => {
+  for (const verb of [
+    "restart",
+    "stop",
+    "reset",
+    "full-reset",
+    "update",
+    "rollback",
+    "doctor",
+    "plugin trust x",
+    "plugin enable x",
+    "plugin update x",
+    "plugin sync",
+    "plugin install-proposal abc",
+  ]) {
+    blocked(`npm run iva ${verb}`);
+    blocked(`npm run iva -- ${verb}`);
+    blocked(`npx iva ${verb}`);
+    blocked(`npx iva -- ${verb}`);
+    blocked(`cd ~/iva && npm  run  iva ${verb}`);
+  }
+  allowed("npm run iva plugin propose x");
+  allowed("npx iva plugin propose x");
+  allowed("npm run iva-something restart");
+  allowed("npx iva-something restart");
+  allowed("npm run iva usage");
+  allowed("rg -n 'npm run iva restart' docs/");
+});

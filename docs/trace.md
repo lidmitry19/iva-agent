@@ -12,17 +12,18 @@ one line per write.
 
 Exactly seven fields, always in this order:
 
-| Field     | Meaning                                                                        |
-| --------- | ------------------------------------------------------------------------------ |
-| `ts`      | ISO-8601 **UTC**, the moment of writing                                        |
-| `turn`    | turn key — three cases, see below                                              |
-| `session` | Eve session id (empty until the turn starts)                                   |
-| `source`  | `telegram`, `bridge`, `web`, `http`, `rollup`, `digest`, `cron`, `unknown`     |
-| `kind`    | group: `bridge`, `inbound`, `gate`, `context`, `turn`, `eve`, `outbox`, `stop` |
-| `name`    | the specific event inside the group                                            |
-| `data`    | object: names, timings, sizes, content                                         |
+| Field     | Meaning                                                                            |
+| --------- | ---------------------------------------------------------------------------------- |
+| `ts`      | ISO-8601 **UTC**, the moment of writing                                            |
+| `turn`    | turn key — three cases, see below                                                  |
+| `session` | Eve session id (empty until the turn starts)                                       |
+| `source`  | `telegram`, `bridge`, `web`, `http`, `rollup`, `watch`, `brief`, `cron`, `unknown` |
+| `kind`    | group: `bridge`, `inbound`, `gate`, `context`, `turn`, `eve`, `outbox`, `stop`     |
+| `name`    | the specific event inside the group                                                |
+| `data`    | object: names, timings, sizes, content                                             |
 
-`source` is `unknown` when an Eve event arrives without a channel kind. Note that `ts` is
+`source` is `unknown` when an Eve event arrives without a channel kind. Journals of 0.4.11
+and earlier may also carry `digest`. Note that `ts` is
 UTC while the **day file** is named after the installation timezone
 (`ASSISTANT_TIMEZONE`): near midnight the first lines of a file can carry a UTC timestamp
 that belongs to the previous UTC day. That is deliberate — the journal splits days the way
@@ -37,11 +38,13 @@ content and is marked `data.traceTrimmed: true`; names, timings and sizes always
    and the core can compute it; `update_id` is invisible to the core.
 2. **After the turn starts** — the Eve `turnId` (`turn_0`, `turn_1`, …). Subagent steps
    carry a suffix: `turn_3#planner`, the same key `data/usage.jsonl` uses.
-3. **Night turns have no turn key at all.** Rollup, digest and other cron deliveries go
-   through the Eve client, which exposes only a session id, so their `gate.outbound` and
+3. **Night turns have no turn key at all.** Rollup and other cron deliveries go through
+   the Eve client, which exposes only a session id, so their `gate.outbound` and
    `outbox.*` lines carry `turn: ""` with a non-empty `session` and `source` in
-   {`rollup`, `digest`, `cron`}. The Eve events of that same night turn still carry
-   `turn_N` from the hook, because the hook runs inside the agent.
+   {`rollup`, `cron`}. Watch and Brief parts are sent by the proactive tick itself: their
+   lines carry `turn: ""`, no `session` and `source` `watch` or `brief`. The Eve events of
+   that same night turn still carry `turn_N` from the hook, because the hook runs inside
+   the agent.
 
 **How a reader stitches one turn**
 
@@ -49,7 +52,7 @@ content and is marked `data.traceTrimmed: true`; names, timings and sizes always
   `data.updateKey` (Bridge, inbound, inbound gate) plus everything whose `turn` equals its
   `turn` (Eve events, Outbox, Stop), then sort by `ts`.
 - _Night turn:_ group by `session` **and** `turn_N` together. One Eve session holds many
-  turns — the daily digest sends twice inside one session, and the nightly Rollup keeps its
+  turns — the nightly Rollup, for one, keeps its
   session alive across nights — so a session on its own would glue a fortnight of nights
   into one turn.
 - _A line with no turn key_ (`gate.outbound` and `outbox.*` of a night send) belongs to the

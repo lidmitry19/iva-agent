@@ -30,6 +30,11 @@ export interface UsageRecord {
   turnId: string;
   step: number;
   subagent?: string;
+  // Строка ребёнка, запущенного встроенным `agent`: чей ход его породил. eve отдаёт это в
+  // ctx.session.parent; у строк основной сессии полей нет, JSON.stringify их опускает.
+  parentSessionId?: string;
+  parentTurnId?: string;
+  parentCallId?: string;
   in: number;
   out: number;
   cacheRead: number;
@@ -41,6 +46,27 @@ interface TurnLike {
   readonly id?: string;
   readonly sequence?: number;
 }
+
+/** Родитель сессии в форме eve (`ctx.session.parent`): вызов, сессия и ход родителя. */
+export interface ParentLike {
+  readonly callId?: string;
+  readonly sessionId?: string;
+  readonly turn?: TurnLike;
+}
+
+/** Расход одного вызова модели в том виде, в каком его пишет лог. */
+export interface UsageTokens {
+  readonly in: number;
+  readonly out: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+}
+
+/** Всё о вызове, кроме расхода: кто, где, в каком ходе. */
+export type UsageMeta = Omit<
+  UsageRecord,
+  "ts" | "in" | "out" | "cacheRead" | "cacheWrite" | "total"
+>;
 
 const defaultDir = dataDir;
 
@@ -123,4 +149,83 @@ export function parentTurnId(
   const bySequence =
     typeof turn?.sequence === "number" ? `turn_${turn.sequence}` : "";
   return turn?.id || bySequence || childTurnId || "";
+}
+
+/**
+ * Одно число расхода: конечное неотрицательное целое. Отсутствующее значение — ноль;
+ * всё остальное (1e308, отрицательное, «12», NaN) — `null`, то есть мусор провайдера.
+ * Такая строка в лог не пишется: сумма такого числа теряет конечность, `JSON.stringify`
+ * пишет Infinity как null, а /usage печатает «0 tokens (in Infinity/out Infinity)» —
+ * и лечится это только у источника (PBT-DS1-P F1).
+ */
+function usageTokens(value: unknown): number | null {
+  if (value === undefined || value === null) return 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+/**
+ * Вход шага для свёртки между ходами: то же правило, что у строки расхода, но только это
+ * поле. Нет поля, 0 или мусор — null: контекст неизвестен, а не пуст.
+ */
+export function stepInputTokens(
+  usage: { readonly inputTokens?: unknown } | undefined,
+): number | null {
+  const tokens = usageTokens(usage?.inputTokens);
+  return tokens !== null && tokens > 0 ? tokens : null;
+}
+
+/**
+ * Расход как его прислал провайдер → числа лога, либо `null`, если хоть одно число мусор.
+ * Одно правило на всех, кто пишет в лог: шаг хода, компактация, зрение.
+ */
+export function readUsageTokens(raw: {
+  readonly in: unknown;
+  readonly out: unknown;
+  readonly cacheRead: unknown;
+  readonly cacheWrite: unknown;
+}): UsageTokens | null {
+  const tokens = {
+    in: usageTokens(raw.in),
+    out: usageTokens(raw.out),
+    cacheRead: usageTokens(raw.cacheRead),
+    cacheWrite: usageTokens(raw.cacheWrite),
+  };
+  const valid = Object.values(tokens).every((value) => value !== null);
+  return valid ? (tokens as UsageTokens) : null;
+}
+
+/** Строка лога из метаданных и расхода. Нулевой расход строкой не становится. */
+export function usageRecord(
+  meta: UsageMeta,
+  tokens: UsageTokens,
+): UsageRecord | null {
+  const { in: inT, out, cacheRead, cacheWrite } = tokens;
+  if (inT + out + cacheRead + cacheWrite === 0) return null;
+  return {
+    ts: new Date().toISOString(),
+    ...meta,
+    in: inT,
+    out,
+    cacheRead,
+    cacheWrite,
+    total: inT + out,
+  };
+}
+
+/**
+ * Поля связи ребёнка с родителем. Пусто для сессии без родителя, поэтому строки основной
+ * сессии остаются прежними байт в байт.
+ */
+export function parentFields(
+  parent: ParentLike | undefined,
+): Pick<UsageRecord, "parentSessionId" | "parentTurnId" | "parentCallId"> {
+  if (!parent) return {};
+  const turn = parentTurnId(parent.turn);
+  return {
+    ...(parent.sessionId ? { parentSessionId: parent.sessionId } : {}),
+    ...(turn ? { parentTurnId: turn } : {}),
+    ...(parent.callId ? { parentCallId: parent.callId } : {}),
+  };
 }

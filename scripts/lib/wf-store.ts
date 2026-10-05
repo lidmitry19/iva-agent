@@ -84,6 +84,34 @@ export function sessionStateTargets(root: string, dataDir: string): string[] {
   ];
 }
 
+// A record recovery or an update already marked (updatedAt 0) waits for Bridge, not
+// for another quarantine: every live status write stamps Date.now().
+function isInterruptedRun(parsed: unknown): parsed is Record<string, unknown> {
+  const run = parsed as { status?: unknown; updatedAt?: unknown } | null;
+  return run?.status === "running" && run.updatedAt !== 0;
+}
+
+function interruptedRunStatusFiles(dataDir: string): string[] {
+  const dir = join(dataDir, "run-status.d");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  return names
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => join(dir, name))
+    .filter((file) => {
+      try {
+        return isInterruptedRun(JSON.parse(readFileSync(file, "utf8")));
+      } catch {
+        return false;
+      }
+    });
+}
+
 function writeRunStatusAtomicSync(path: string, value: unknown): void {
   const parent = dirname(path);
   let temporaryPath = "";
@@ -115,41 +143,84 @@ function writeRunStatusAtomicSync(path: string, value: unknown): void {
   }
 }
 
-/** Make only interrupted runs immediately reapable after an update clears sessions. */
-export function rewriteRunStatusesForUpdate(dataDir: string): void {
-  const dir = join(dataDir, "run-status.d");
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return;
-    throw error;
-  }
+function nextGeneration(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value + 1
+    : 1;
+}
 
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const file = join(dir, name);
+/**
+ * Make only interrupted runs immediately reapable after an update clears sessions.
+ * `retired` — the workflow store is gone for good (startup recovery): an interrupted
+ * compaction is then simply free. An update keeps the mark instead: a rollback restores
+ * the store, and the restarted writers must still see the interrupted session.
+ */
+export function rewriteRunStatusesForUpdate(
+  dataDir: string,
+  retired = false,
+): number {
+  let rewritten = 0;
+  for (const file of interruptedRunStatusFiles(dataDir)) {
     try {
       const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-      if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        Array.isArray(parsed)
-      )
-        continue;
-      // An update interrupts an in-flight turn, not an idle or terminal chat. Rewriting
-      // every saved record re-arms the stale-run notification after every plugin build,
-      // even when the owner has sent nothing and there is no session to reset.
-      if ((parsed as { status?: unknown }).status !== "running") continue;
-      writeRunStatusAtomicSync(file, {
-        ...parsed,
-        status: "running",
-        updatedAt: 0,
-      });
-    } catch {
-      // One damaged chat record must not block the update or its healthy neighbors.
+      // A turn Bridge finished since the scan must not be re-armed.
+      if (!isInterruptedRun(parsed)) continue;
+      // An interrupted compaction between turns carried no request from the owner: once
+      // its session is retired the record is simply free again, with a reset tombstone.
+      // Bridge has nothing to close and nothing to tell.
+      const stamp = Date.now();
+      writeRunStatusAtomicSync(
+        file,
+        retired && parsed.compacting === true
+          ? {
+              status: "idle",
+              generation: nextGeneration(parsed.generation),
+              updatedAt: stamp,
+              resetAt: stamp,
+            }
+          : { ...parsed, status: "running", updatedAt: 0 },
+      );
+      rewritten++;
+    } catch (error) {
+      // One damaged chat record must not block the update or its healthy neighbors;
+      // a record that cannot be written is named in the journal.
+      if (!(error instanceof SyntaxError))
+        console.error(
+          `run-status ${basename(file)} not marked interrupted: ${(error as Error).message}`,
+        );
     }
   }
+  return rewritten;
+}
+
+/** Retire the workflow store only when the previous Iva process died mid-turn. */
+export function recoverInterruptedSessionState(
+  root: string,
+  dataDir: string,
+  stamp = new Date().toISOString().replace(/[:.]/g, "-"),
+): { interrupted: number; quarantined: string[] } {
+  const interrupted = interruptedRunStatusFiles(dataDir).length;
+  if (interrupted === 0) return { interrupted: 0, quarantined: [] };
+
+  const moved: Array<{ path: string; trash: string }> = [];
+  try {
+    for (const target of [
+      join(root, ".eve", ".workflow-data"),
+      join(root, ".workflow-data"),
+    ]) {
+      const path = throughLink(target);
+      const trash = quarantinePath(target, stamp);
+      if (trash) moved.push({ path, trash });
+    }
+  } catch (error) {
+    for (const { path, trash } of moved.reverse()) {
+      rmSync(path, { recursive: true, force: true });
+      renameSync(trash, path);
+    }
+    throw error;
+  }
+  rewriteRunStatusesForUpdate(dataDir, true);
+  return { interrupted, quarantined: moved.map(({ trash }) => trash) };
 }
 
 /** Inbound Telegram input belongs to reset, never to an update. */

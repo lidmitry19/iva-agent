@@ -43,7 +43,6 @@ export class SettingsWriteError extends Error {
 
 // Каталог фиксируется на импорте (см. data-dir.ts — почему от cwd, а не от import.meta.url).
 const SETTINGS_FILE = join(dataDir(), "settings.json");
-const SETTINGS_LOCK = `${SETTINGS_FILE}.lock`;
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" &&
@@ -101,23 +100,33 @@ export function readSettings(file: string = SETTINGS_FILE): Settings {
 }
 
 // Частичное обновление: patch мержится поверх текущего, null-поля удаляют ключ.
-// Missing/valid сериализуются общим локом. Corrupt/unreadable не меняются.
 export function writeSettings(patch: Settings): Settings {
-  const lock = acquireFileLockSync(SETTINGS_LOCK, { mode: 0o600 });
-  if (!lock) throw new SettingsWriteError("busy");
-  try {
-    const current = readSettingsState();
-    if (current.state === "corrupt" || current.state === "unreadable") {
-      throw new SettingsWriteError(current.state, current.error);
-    }
-    const next = {
-      ...(current.state === "valid" ? current.settings : {}),
-      ...patch,
-    };
+  return updateSettings((current) => {
+    const next = { ...current, ...patch };
     for (const [key, value] of Object.entries(patch)) {
       if (value === null) delete next[key];
     }
-    writeFileAtomicSync(SETTINGS_FILE, JSON.stringify(next), { mode: 0o600 });
+    return next;
+  });
+}
+
+// Чтение, правка и запись под одним замком настроек: `fn` получает текущий объект и
+// возвращает новый целиком. Missing/valid сериализуются общим локом. Corrupt/unreadable
+// не меняются: отказ SettingsWriteError, байты файла на месте. Путь параметром нужен CLI —
+// его cwd не корень установки.
+export function updateSettings(
+  fn: (current: Settings) => Settings,
+  file: string = SETTINGS_FILE,
+): Settings {
+  const lock = acquireFileLockSync(`${file}.lock`, { mode: 0o600 });
+  if (!lock) throw new SettingsWriteError("busy");
+  try {
+    const current = readSettingsState(file);
+    if (current.state === "corrupt" || current.state === "unreadable") {
+      throw new SettingsWriteError(current.state, current.error);
+    }
+    const next = fn(current.state === "valid" ? { ...current.settings } : {});
+    writeFileAtomicSync(file, JSON.stringify(next), { mode: 0o600 });
     return next;
   } finally {
     releaseFileLock(lock);

@@ -2,19 +2,20 @@ import { randomBytes } from "node:crypto";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { notificationChat } from "../lib/notification-chat.ts";
-import {
-  nextCronRunMs,
-  ownerTimeZone,
-  resolveAt,
-} from "../lib/reminder-time.ts";
+import { ownerTimeZone } from "../lib/reminder-time.ts";
 import {
   add,
   list,
-  normalizeSchedule,
   remove,
-  type Reminder,
+  ReminderNotFoundError,
   type ReminderChat,
 } from "../lib/reminder-store.ts";
+import {
+  addFieldsRefusal,
+  planSchedule,
+  removeFieldsRefusal,
+  unknownIdRefusal,
+} from "../lib/reminder-refusal.ts";
 import {
   chatOfTurn,
   describeReminder,
@@ -60,15 +61,13 @@ type Input = {
 };
 
 async function addReminder(
-  { text, at, cron }: Input,
+  input: Input,
   tz: string,
   nowMs: number,
   chat: ReminderChat | null,
 ): Promise<RemindAdded | RemindFailure> {
-  if (text === undefined)
-    return { ok: false as const, error: "action add needs text" };
-  if ((at === undefined) === (cron === undefined))
-    return { ok: false as const, error: "give exactly one of at or cron" };
+  const refusal = addFieldsRefusal(input, nowMs, tz);
+  if (refusal !== null) return { ok: false as const, error: refusal };
   // Напоминание возвращается туда, где его попросили (чат и тема хода). Без Telegram-хода
   // остаётся чат владельца из настроек - и тогда он обязан быть.
   if (chat === null && !notificationChat(process.env))
@@ -77,33 +76,22 @@ async function addReminder(
       error:
         "no owner chat: set TELEGRAM_DIGEST_CHAT_ID or TELEGRAM_ALLOWED_USER_IDS",
     };
-  const id = `r-${randomBytes(3).toString("hex")}`;
-  const answer = (row: Reminder) => ({
+  const planned = planSchedule(input, nowMs, tz);
+  if ("refusal" in planned)
+    return { ok: false as const, error: planned.refusal };
+  const row = await add({
+    id: `r-${randomBytes(3).toString("hex")}`,
+    // addFieldsRefusal пропускает только вызов с text.
+    text: input.text ?? "",
+    chat,
+    ...planned,
+  });
+  return {
     ok: true as const,
     reminder: describeReminder(row, tz),
     now: formatZoned(nowMs, tz),
     scheduler: schedulerStatus(nowMs, tz),
-  });
-  if (at !== undefined) {
-    const row = await add({
-      id,
-      text,
-      chat,
-      schedule: { kind: "at", atMs: resolveAt(at, nowMs, tz) },
-    });
-    return answer(row);
-  }
-  const schedule = normalizeSchedule({ kind: "cron", expr: cron, tz });
-  if (schedule.kind !== "cron")
-    return toolFailure(new Error("schedule: not a cron expression"));
-  const row = await add({
-    id,
-    text,
-    chat,
-    schedule,
-    nextRunAtMs: nextCronRunMs(schedule.expr, tz, nowMs),
-  });
-  return answer(row);
+  };
 }
 
 async function listReminders(tz: string, nowMs: number): Promise<RemindListed> {
@@ -118,13 +106,18 @@ async function listReminders(tz: string, nowMs: number): Promise<RemindListed> {
   };
 }
 
-async function removeReminder({
-  id,
-}: Input): Promise<RemindRemoved | RemindFailure> {
-  if (id === undefined)
-    return { ok: false as const, error: "action remove needs id" };
-  const row = await remove(id);
-  return { ok: true as const, removed: { id: row.id, text: row.text } };
+async function removeReminder(
+  input: Input,
+): Promise<RemindRemoved | RemindFailure> {
+  if (input.id === undefined)
+    return { ok: false as const, error: removeFieldsRefusal(input) };
+  try {
+    const row = await remove(input.id);
+    return { ok: true as const, removed: { id: row.id, text: row.text } };
+  } catch (error) {
+    if (!(error instanceof ReminderNotFoundError)) throw error;
+    return { ok: false as const, error: unknownIdRefusal(input.id) };
+  }
 }
 
 export default defineTool({

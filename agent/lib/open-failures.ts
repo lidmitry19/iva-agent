@@ -1,11 +1,12 @@
-// «Незакрытые провалы за сутки» — то, что агент видит каждым ходом
-// (agent/instructions/40-open-failures.ts). Два источника: таблица фактов расписаний и
-// таблица напоминаний. T20 напоминания не трогает, но общий источник обязан видеть и их
-// провалы: сработавшая за сутки строка напоминания с причиной (error) считается открытой.
+// «Незакрытые провалы» — то, что агент видит каждым ходом (agent/instructions/40-open-failures.ts)
+// и утренний Brief называет первым. Два источника: таблица фактов расписаний и таблица
+// напоминаний. T20 напоминания не трогает, но общий источник обязан видеть и их провалы:
+// сработавшая за сутки строка напоминания с причиной (error) считается открытой.
 //
 // Провал расписания закрыт, когда есть более поздний успешный запуск того же имени или
-// владелец/агент закрыл его через `iva jobs ack <name>`. Повторам в коде здесь места нет:
-// открытый провал — это состояние, а не событие.
+// владелец/агент закрыл его через `iva jobs ack <name>`. Суточного окна у него нет: непочиненный
+// сбой называется каждый день до починки (ADR-0020), пока строка жива в jobs.json (ротация 7
+// дней). Повторам в коде здесь места нет: открытый провал — это состояние, а не событие.
 import { dataDir } from "./data-dir.ts";
 import {
   jobFactsFile,
@@ -14,7 +15,9 @@ import {
   type JobFact,
 } from "./job-facts.ts";
 import { list, type Reminder } from "./reminder-store.ts";
+import { isLiveSchedule } from "./schedule-table.ts";
 
+/** Окно провала напоминания: строку разовой напоминалки уборка снимает через сутки. */
 export const OPEN_FAILURES_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export type OpenFailure = {
@@ -28,16 +31,14 @@ function byTime(left: OpenFailure, right: OpenFailure): number {
   return left.at - right.at;
 }
 
-export function openJobFailures(
-  facts: readonly JobFact[],
-  now: number,
-): OpenFailure[] {
-  const names = [...new Set(facts.map((fact) => fact.name))];
+export function openJobFailures(facts: readonly JobFact[]): OpenFailure[] {
+  const names = [...new Set(facts.map((fact) => fact.name))].filter(
+    isLiveSchedule,
+  );
   const failures: OpenFailure[] = [];
   for (const name of names) {
     const latest = latestFact(facts, name);
     if (!latest || latest.ok || latest.acked) continue;
-    if (now - latest.finishedAt > OPEN_FAILURES_WINDOW_MS) continue;
     failures.push({
       source: "job",
       name,
@@ -80,7 +81,7 @@ export function openFailuresFrom(
   now: number,
 ): OpenFailure[] {
   return [
-    ...openJobFailures(facts, now),
+    ...openJobFailures(facts),
     ...openReminderFailures(reminders, now),
   ].sort(byTime);
 }
@@ -125,7 +126,7 @@ function line(failure: OpenFailure): string {
 export function brokenFailureSourceMarkdown(error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
   return [
-    "## Незакрытые провалы за сутки",
+    "## Незакрытые провалы",
     `- Источник провалов не читается: ${reason}. Почини сам (прочитать файл, вернуть массив строк), потом скажи владельцу, что было сломано.`,
   ].join("\n");
 }
@@ -144,5 +145,5 @@ export function openFailuresMarkdown(failures: readonly OpenFailure[]): string {
     shown.push(
       `- … и ещё ${failures.length - MAX_FAILURE_LINES} провалов (полный список: iva doctor)`,
     );
-  return ["## Незакрытые провалы за сутки", ...shown].join("\n");
+  return ["## Незакрытые провалы", ...shown].join("\n");
 }

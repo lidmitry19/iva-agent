@@ -15,6 +15,7 @@ process.env.ASSISTANT_TIMEZONE = "UTC";
 process.env.AGENT_LANGUAGE = "en";
 process.env.TELEGRAM_ALLOWED_USER_IDS = "42";
 process.env.TELEGRAM_BOT_TOKEN = "1:test-token";
+process.env.DEEPGRAM_API_KEY = "dg-test";
 const modulePath = fileURLToPath(
   new URL("./telegram-inbound.ts", import.meta.url),
 );
@@ -465,6 +466,32 @@ await test("/task уходит в модель отдельной инструк
   assert.match(dailyText(), /\/task купить молоко/u);
 });
 
+await test("/digest отдаёт Brief: обычный ход со скиллом brief, одно сообщение", async () => {
+  const { calls, effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    privateText("/digest"),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "Load the brief skill and assemble the daily brief.",
+  ]);
+  assert.equal(calls.typing, 1);
+  assert.match(dailyText(), /\/digest/u);
+});
+
+await test("/digest в группе — только задачи, как в 0.4.11: личная почта и переписка не выносятся к другим участникам", async () => {
+  const { effects } = harness();
+  const result = await inbound.runTelegramInbound(
+    privateText("/digest", { chat: { id: -77, type: "supergroup" } }),
+    effects,
+  );
+
+  assert.deepEqual(result?.context, [
+    "This is a group chat: load the brief skill and show only the open tasks, nothing from mail, calendar, personal Telegram or Connections.",
+  ]);
+});
+
 await test("фото: vision в контексте, повтор того же файла не качает и не смотрит заново", async (t) => {
   const { calls, effects } = harness();
   stubDownload(t, calls);
@@ -478,7 +505,7 @@ await test("фото: vision в контексте, повтор того же �
 
   const first = await inbound.runTelegramInbound(photo(), effects);
   assert.ok(first?.context);
-  assert.match(first.context[0], /^\[photo\] image \(/u);
+  assert.match(first.context[0], /^\[photo\] saved: \S*attachments\//u);
   assert.match(first.context[0], /What's in it: a whiteboard with numbers/u);
   assert.ok(first.context[0].includes(`${VAULT}/attachments/`));
   assert.equal(calls.downloads, 1);

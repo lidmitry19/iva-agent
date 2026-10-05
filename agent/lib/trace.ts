@@ -3,7 +3,7 @@
 // и швы Ивы. Файл дня — data/trace/YYYY-MM-DD.jsonl, append-only. Читают вьюер плагина
 // `trace` и `iva trace`, поэтому схема события фиксирована и мала:
 //   { ts, turn, session, source, kind, name, data }
-// `kind` — группа шва (bridge, inbound, gate, turn, eve, outbox, stop), `name` — конкретное
+// `kind` — группа шва (bridge, inbound, gate, turn, eve, outbox, stop, tool, guard), `name` — конкретное
 // событие внутри группы. Всё остальное живёт в `data`, у полей содержимого свой потолок.
 //
 // Три правила, из которых всё остальное следует:
@@ -534,6 +534,26 @@ export function traceWithScope<T>(scope: TraceScope, run: () => T): T {
   return scopeStore.run(scope, run);
 }
 
+/** Ошибки инструмента и остановка повторов на границе модели. */
+export function traceRepeatGuard(
+  event: "tool.rejected" | "guard.repeat_stop",
+  data: { tool: string; errorHead: string; count?: number },
+): void {
+  const scope = activeScope();
+  appendTrace({
+    kind: event === "tool.rejected" ? "tool" : "guard",
+    name: event === "tool.rejected" ? "rejected" : "repeat_stop",
+    turn: scope?.turn,
+    session: scope?.session,
+    source: scope?.source ?? "agent",
+    data: {
+      tool: data.tool,
+      errorHead: data.errorHead.slice(0, 160),
+      ...(data.count === undefined ? {} : { count: data.count }),
+    },
+  });
+}
+
 // --- Швы Ивы ---
 
 type InboundMessageLike = {
@@ -741,8 +761,8 @@ type OutboxResultLike = {
  * быть одно на любой из них. Заодно ставит контекст хода — вердикт outbound-Gate внутри
  * шва уезжает с тем же ключом.
  *
- * `source` НЕ зашит: ночной ход (rollup, дайджест) уходит тем же швом и обязан
- * называться своим именем, иначе вьюер считает его разговором в Telegram.
+ * `source` НЕ зашит: ночной ход (rollup) и части Watch и Brief (watch, brief) уходят тем же
+ * швом и обязаны называться своим именем, иначе вьюер считает их разговором в Telegram.
  */
 export async function traceOutbox<T extends OutboxResultLike>(
   scope: TraceScope,

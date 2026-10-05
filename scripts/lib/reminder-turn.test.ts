@@ -1,13 +1,20 @@
+// Контракт хода напоминания: он длится, пока идут события (потолка длительности нет),
+// молчащий стрим гасится на окне тишины, а пока ход идёт — чат видит его сессию, чтобы
+// ⏹ и /stop гасили её тем же путём, что и ход канала. Самой записи в run-status ход не
+// знает: её передаёт хозяин хода (scripts/reminders/fire.ts) зависимостью, иначе модуль
+// не загрузился бы на установке без agent/.
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  ReminderTurnError,
-  runReminderTurn,
-  type CreateClient,
-  type ReminderClient,
-  type ReminderClientOptions,
-  type TurnStreamEvent,
+import type {
+  CreateClient,
+  ReminderClient,
+  ReminderClientOptions,
+  TurnStreamEvent,
+  TurnWatch,
 } from "./reminder-turn.ts";
+
+const { ReminderTurnError, runReminderTurn } =
+  await import("./reminder-turn.ts");
 
 const OPTIONS: ReminderClientOptions = {
   host: "http://127.0.0.1:8723",
@@ -25,16 +32,48 @@ type TurnSpy = {
   readonly sent: string[];
   readonly resets: string[];
   readonly cancelCount: () => number;
+  /** Остановки через сессию (session.cancel), в порядке вызова вместе с reset. */
+  readonly sessionCalls: string[];
 };
+
+type WatchCalls = {
+  readonly claimed: string[];
+  readonly pulsed: string[];
+  readonly released: string[];
+};
+
+/** Присмотр чата, каким его видит ход: запись живёт в fire.ts, здесь важен только контракт. */
+function watchSpy(claim = true): { watch: TurnWatch; calls: WatchCalls } {
+  const calls: WatchCalls = { claimed: [], pulsed: [], released: [] };
+  return {
+    watch: {
+      claim: (sessionId) => {
+        calls.claimed.push(sessionId);
+        return Promise.resolve(claim);
+      },
+      pulse: (sessionId) => {
+        calls.pulsed.push(sessionId);
+      },
+      release: (sessionId) => {
+        calls.released.push(sessionId);
+      },
+    },
+    calls,
+  };
+}
 
 // A turn reads its response as a stream and cancels it cooperatively, the way eve's
 // MessageResponse does; the session records what the turn told it to do.
 function spyTurn(
   events: (cancelled: Promise<void>) => AsyncGenerator<TurnStreamEvent>,
+  sessionId = "sess-1",
+  sessionCancel: () => Promise<unknown> = () =>
+    Promise.resolve({ status: "accepted", sessionId }),
 ): TurnSpy {
   const prompts: string[] = [];
   const sent: string[] = [];
   const resets: string[] = [];
+  const sessionCalls: string[] = [];
   let cancels = 0;
   let releaseCancel = (): void => {};
   const cancelled = new Promise<void>((resolve) => {
@@ -46,6 +85,7 @@ function spyTurn(
       releaseCancel();
       return Promise.resolve();
     },
+    sessionId,
   });
   const client: ReminderClient = {
     sessions: {
@@ -58,8 +98,13 @@ function spyTurn(
               sent.push(message);
               return Promise.resolve();
             },
+            cancel: (options) => {
+              sessionCalls.push(`cancel tasks=${String(options.tasks)}`);
+              return sessionCancel();
+            },
             reset: ({ reason }) => {
               resets.push(reason);
+              sessionCalls.push("reset");
               return Promise.resolve();
             },
           },
@@ -73,6 +118,7 @@ function spyTurn(
     sent,
     resets,
     cancelCount: () => cancels,
+    sessionCalls,
   };
 }
 
@@ -110,6 +156,7 @@ void test("the last message.completed text is returned and the session is reset"
   assert.deepEqual(spy.prompts, ["сформулируй напоминание"]);
   assert.equal(turn.status, "waiting");
   assert.equal(turn.message, "final");
+  assert.equal(turn.cancelled, false);
   await turn.feedback("hint");
   assert.deepEqual(spy.sent, ["hint"]);
   assert.deepEqual(spy.resets, ["Reminder finished"]);
@@ -128,7 +175,6 @@ void test("a silent stream is cancelled at the idle window, never swallowed", as
     runReminderTurn("зависни", OPTIONS, {
       createClient: silent.createClient,
       inactivityMs: 80,
-      hardTimeoutMs: 10_000,
     }),
   );
 
@@ -136,26 +182,291 @@ void test("a silent stream is cancelled at the idle window, never swallowed", as
   assert.match(idle.message, /no activity for 80ms/u);
   assert.equal(silent.cancelCount(), 1);
   assert.deepEqual(silent.resets, ["Reminder finished"]);
+});
 
+void test("a turn that keeps sending events lasts many idle windows and ends on its own boundary", async () => {
   const talkative = spyTurn(async function* () {
-    // Events keep coming faster than the idle window, so only the cap can end this turn;
-    // the stream stops by itself after the cap, so a broken cap fails instead of hanging.
+    // Events arrive faster than the idle window, so the turn outlives it many times over
+    // and only the stream's own boundary may end it: no wall-clock cap cuts a working turn.
     for (let count = 0; count < 40; count += 1) {
       await delay(5);
       yield { type: "step.started" };
     }
+    yield { type: "message.completed", data: { message: "готово" } };
+    yield { type: "session.completed" };
   });
 
-  const capped = await failureOf(
-    runReminderTurn("говори без конца", OPTIONS, {
-      createClient: talkative.createClient,
-      inactivityMs: 1_000,
-      hardTimeoutMs: 50,
+  const long = await runReminderTurn("работай долго", OPTIONS, {
+    createClient: talkative.createClient,
+    inactivityMs: 60,
+  });
+
+  assert.equal(long.status, "completed");
+  assert.equal(long.message, "готово");
+  assert.equal(long.cancelled, false);
+  assert.equal(talkative.cancelCount(), 0, "рабочий ход никто не гасил");
+  assert.deepEqual(talkative.resets, ["Reminder finished"]);
+});
+
+void test("the turn claims the chat for the whole run and releases it when it ends", async () => {
+  const { watch, calls } = watchSpy();
+  const seen: string[][] = [];
+  const spy = spyTurn(async function* () {
+    // ⏹ и /stop ищут сессию хода именно здесь, поэтому запись обязана существовать уже
+    // на первом событии, а не появиться к концу хода.
+    seen.push([...calls.claimed]);
+    await delay(0);
+    yield { type: "message.completed", data: { message: "готово" } };
+    yield { type: "session.completed" };
+  }, "sess-run");
+
+  const turn = await runReminderTurn("напиши статью", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+    watch,
+  });
+
+  assert.deepEqual(seen, [["sess-run"]], "чат занят на первом же событии хода");
+  assert.equal(turn.status, "completed");
+  assert.deepEqual(calls.claimed, ["sess-run"]);
+  assert.deepEqual(calls.released, ["sess-run"]);
+  // Пульс идёт по событиям хода: без него долгий ход выглядит протухшим и стоп слепнет.
+  assert.ok(calls.pulsed.includes("sess-run"), calls.pulsed.join(","));
+  assert.deepEqual(
+    [...new Set(calls.pulsed)],
+    ["sess-run"],
+    "пульс — только своя сессия",
+  );
+});
+
+void test("a stalled turn releases the chat too", async () => {
+  const { watch, calls } = watchSpy();
+  const spy = spyTurn(async function* (cancelled) {
+    yield { type: "step.started" };
+    await Promise.race([cancelled, delay(400)]);
+  }, "sess-stall");
+
+  const stalled = await failureOf(
+    runReminderTurn("зависни", OPTIONS, {
+      createClient: spy.createClient,
+      inactivityMs: 40,
+      watch,
     }),
   );
 
-  assert.ok(capped instanceof ReminderTurnError);
-  assert.match(capped.message, /turn exceeded 50ms/u);
-  assert.equal(talkative.cancelCount(), 1);
-  assert.deepEqual(talkative.resets, ["Reminder finished"]);
+  assert.ok(stalled instanceof ReminderTurnError);
+  assert.deepEqual(calls.released, ["sess-stall"], "запись снята и на провале");
+});
+
+void test("a chat taken by another turn is left alone: no record, no release", async () => {
+  const { watch, calls } = watchSpy(false);
+  const spy = spyTurn(async function* () {
+    await delay(0);
+    yield { type: "message.completed", data: { message: "готово" } };
+    yield { type: "session.completed" };
+  }, "sess-busy");
+
+  const turn = await runReminderTurn("напиши статью", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+    watch,
+  });
+
+  assert.equal(turn.status, "completed", "ход всё равно работает");
+  assert.deepEqual(calls.claimed, ["sess-busy"]);
+  assert.deepEqual(calls.pulsed, [], "чужую запись пульсом не трогаем");
+  assert.deepEqual(calls.released, [], "и не снимаем чужое");
+});
+
+void test("a cancelled turn is a cancellation even when the stream has no boundary", async () => {
+  const spy = spyTurn(async function* () {
+    // Границы сессии нет вовсе: eve штатно шлёт её после отмены, но признак отмены
+    // терять нельзя — иначе код отправит владельцу дословный текст напоминания.
+    await delay(0);
+    yield { type: "turn.cancelled" };
+  }, "sess-cut");
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+  });
+
+  assert.equal(turn.cancelled, true);
+  assert.equal(turn.status, "waiting");
+  assert.deepEqual(spy.resets, ["Reminder finished"]);
+});
+
+void test("a stream that breaks right after the cancellation still comes back cancelled", async () => {
+  const spy = spyTurn(async function* () {
+    // Боевой /stop: eve успел сказать turn.cancelled, session.* не прислал, и связь
+    // оборвалась — обрыв не имеет права отменить отмену.
+    await delay(0);
+    yield { type: "turn.cancelled" };
+    throw new Error("stream reset by peer");
+  }, "sess-broken");
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+  });
+
+  assert.equal(turn.cancelled, true, "отмену видно вызывающему и на обрыве");
+  assert.equal(turn.status, "waiting");
+  assert.deepEqual(spy.resets, ["Reminder finished"], "сессия погашена");
+});
+
+void test("the owner's stop ends the turn as cancelled, not as a failure", async () => {
+  const { watch, calls } = watchSpy();
+  const spy = spyTurn(async function* () {
+    // Ровно это eve шлёт ходу, который погасили снаружи: turn.cancelled → session.waiting.
+    await delay(0);
+    yield { type: "turn.cancelled" };
+    yield { type: "session.waiting" };
+  }, "sess-cancel");
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+    watch,
+  });
+
+  assert.equal(turn.status, "waiting");
+  assert.equal(turn.cancelled, true, "отмену видно вызывающему");
+  assert.equal(spy.cancelCount(), 0, "гасил владелец, а не сторож тишины");
+  assert.deepEqual(
+    calls.released,
+    ["sess-cancel"],
+    "запись снята и после отмены",
+  );
+});
+
+// Запрос лимита сессии eve ровно в той форме, в какой его шлёт стрим
+// (eve/dist/src/harness/session-limit-continuation.js): вопрос «Approve/Stop» к человеку.
+const SESSION_LIMIT_REQUESTED: TurnStreamEvent = {
+  type: "input.requested",
+  data: {
+    requests: [
+      {
+        kind: "session-limit",
+        requestId: "sess-limit:limit:input:40064924",
+        display: "confirmation",
+        options: [
+          { id: "continue", label: "Approve" },
+          { id: "stop", label: "Stop" },
+        ],
+      },
+    ],
+    sequence: 1424,
+    stepIndex: 712,
+    turnId: "turn-1",
+  },
+};
+
+void test("a turn parked on the eve session limit fails with the reason, not the stale step text", async () => {
+  const { watch, calls } = watchSpy();
+  const spy = spyTurn(async function* (cancelled) {
+    await delay(0);
+    yield { type: "message.completed", data: { message: "текст шага 6" } };
+    yield SESSION_LIMIT_REQUESTED;
+    // Дальше eve молчит: ход стоит на вопросе, который в фоне некому показать. Ждать
+    // сторожа тишины нельзя — окно ниже на порядок длиннее теста.
+    await Promise.race([cancelled, delay(5_000)]);
+    yield { type: "turn.completed" };
+    yield { type: "session.waiting" };
+  }, "sess-limit");
+
+  const started = Date.now();
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 60_000,
+    watch,
+    log: () => {},
+  });
+
+  assert.ok(Date.now() - started < 2_000, "ход не ждёт тишины после вопроса");
+  assert.equal(turn.status, "failed");
+  assert.equal(turn.sessionLimit, true);
+  assert.equal(turn.cancelled, false);
+  assert.match(turn.message ?? "", /session token limit/u);
+  assert.doesNotMatch(turn.message ?? "", /текст шага 6/u);
+  assert.deepEqual(
+    spy.sessionCalls,
+    ["cancel tasks=true", "reset"],
+    "ход гасится с задачами, как у сводки, и только потом сессия снимается",
+  );
+  assert.deepEqual(calls.released, ["sess-limit"]);
+});
+
+void test("a failed stop of the parked turn keeps the honest failure and still resets", async () => {
+  const logged: unknown[][] = [];
+  const spy = spyTurn(
+    async function* () {
+      await delay(0);
+      yield SESSION_LIMIT_REQUESTED;
+      yield { type: "turn.completed" };
+      yield { type: "session.waiting" };
+    },
+    "sess-limit-down",
+    () => Promise.reject(new Error("eve is down")),
+  );
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+    log: (...args) => logged.push(args),
+  });
+
+  assert.equal(turn.status, "failed");
+  assert.equal(turn.sessionLimit, true);
+  assert.deepEqual(spy.sessionCalls, ["cancel tasks=true", "reset"]);
+  assert.ok(
+    logged.some((line) =>
+      /session-limit turn cancel failed/u.test(String(line[0])),
+    ),
+    "отказ остановки виден в журнале",
+  );
+});
+
+void test("another input request is not the session limit: the turn ends as before", async () => {
+  const spy = spyTurn(async function* () {
+    await delay(0);
+    yield {
+      type: "input.requested",
+      data: { requests: [{ kind: "approval", requestId: "r-1" }] },
+    };
+    yield { type: "message.completed", data: { message: "готово" } };
+    yield { type: "session.waiting" };
+  }, "sess-ask");
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+  });
+
+  assert.equal(turn.status, "waiting");
+  assert.equal(turn.sessionLimit, undefined);
+  assert.equal(turn.message, "готово");
+  assert.deepEqual(spy.sessionCalls, ["reset"], "чужой вопрос ход не гасит");
+});
+
+void test("the owner's stop before the limit question stays a cancellation", async () => {
+  const spy = spyTurn(async function* () {
+    await delay(0);
+    yield { type: "turn.cancelled" };
+    yield SESSION_LIMIT_REQUESTED;
+    yield { type: "session.waiting" };
+  }, "sess-stop-limit");
+
+  const turn = await runReminderTurn("долгая работа", OPTIONS, {
+    createClient: spy.createClient,
+    inactivityMs: 1_000,
+  });
+
+  assert.equal(
+    turn.cancelled,
+    true,
+    "владелец погасил ход сам — текста не ждут",
+  );
+  assert.notEqual(turn.status, "failed");
+  assert.deepEqual(spy.sessionCalls, ["reset"]);
 });

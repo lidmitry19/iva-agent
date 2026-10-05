@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { notificationChat } from "./notification-chat.ts";
 import { button, escapeRichText, screenPayload } from "./telegram-buttons.ts";
-import { resolveUpdateTarget, type GitResult } from "./update-channel.ts";
+import { resolveReleaseTarget, type GitResult } from "./update-channel.ts";
 
 export { notificationChat };
 
@@ -99,6 +99,17 @@ export function compareStableVersions(
     if (remote[i] < local[i]) return -1;
   }
   return 0;
+}
+
+/** Как compareStableVersions, но установленный пререлиз (бета X.Y.Z-…) — чуть младше
+ * своего релиза X.Y.Z: сравнивается его ядро. */
+function compareInstalled(
+  installed: string | null,
+  other: string | null,
+): number | null {
+  const core = String(installed).replace(/-[0-9A-Za-z.-]+$/u, "");
+  const bare = compareStableVersions(core, other);
+  return bare === 0 && core !== installed ? 1 : bare;
 }
 
 /** The file a release uses to name the oldest CLI that can install it. */
@@ -190,7 +201,7 @@ export async function updaterCompat(
 ): Promise<UpdaterCompat> {
   const minUpdater = await readMinUpdater(git, commit);
   if (!minUpdater) return { status: "ok" };
-  const comparison = compareStableVersions(own, minUpdater);
+  const comparison = compareInstalled(own, minUpdater);
   if (comparison === null)
     throw new Error(
       `cannot compare the installed release ${JSON.stringify(own)} with minUpdater ${JSON.stringify(minUpdater)}`,
@@ -236,24 +247,22 @@ export async function inspectUpstream({
       ? { code: 0, stdout: result, stderr: "" }
       : result;
   };
-  const target = await resolveUpdateTarget({ git: run, remote });
   const local = await requireGit(gitImpl, root, ["rev-parse", head]);
-  const remoteHead = target.targetHead ?? "";
-  const behind =
-    Number(
-      await requireGit(gitImpl, root, [
-        "rev-list",
-        "--count",
-        `${head}..${remoteHead}`,
-      ]),
-    ) || 0;
+  // Цель: выпуск (метка) или вершина при бета-обновлениях; ниже установленного — никогда.
+  const target = await resolveReleaseTarget({
+    git: run,
+    remote,
+    installed: local,
+  });
+  const remoteHead = target.targetHead;
+  const behind = await commitsBehind(gitImpl, root, `${head}..${remoteHead}`);
   const localVersion = packageVersion(
     await requireGit(gitImpl, root, ["show", `${head}:package.json`]),
   );
   const remoteVersion = packageVersion(
     await requireGit(gitImpl, root, ["show", `${remoteHead}:package.json`]),
   );
-  const versionComparison = compareStableVersions(localVersion, remoteVersion);
+  const versionComparison = compareInstalled(localVersion, remoteVersion);
   const hasCommitUpdate = behind > 0 && local !== remoteHead;
   const hasVersionUpdate = hasCommitUpdate && versionComparison === 1;
   // The same marker both updaters read, from the ref this call already fetched: an
@@ -265,6 +274,7 @@ export async function inspectUpstream({
     localVersion ?? undefined,
   );
   const common = {
+    beta: target.beta,
     branch: target.branch,
     currentBranch: target.currentBranch,
     legacyMigration: target.legacyMigration,
@@ -276,17 +286,25 @@ export async function inspectUpstream({
     hasCommitUpdate,
     updaterTooOld: compat.status === "too-old",
   };
-  if (hasVersionUpdate && remoteVersion !== null) {
-    return {
-      ...common,
-      remoteVersion,
-      hasVersionUpdate: true as const,
-    };
-  }
-  return {
-    ...common,
-    hasVersionUpdate: false as const,
-  };
+  return withVersionUpdate(common, hasVersionUpdate, remoteVersion);
+}
+
+/** Сколько коммитов в диапазоне; нечисло — ноль. */
+async function commitsBehind(gitImpl: GitCommand, root: string, range: string) {
+  return (
+    Number(await requireGit(gitImpl, root, ["rev-list", "--count", range])) || 0
+  );
+}
+
+/** Итог проверки: новая версия есть только с известным номером. */
+function withVersionUpdate<T extends object>(
+  common: T,
+  hasVersionUpdate: boolean,
+  remoteVersion: string | null,
+) {
+  if (hasVersionUpdate && remoteVersion !== null)
+    return { ...common, remoteVersion, hasVersionUpdate: true as const };
+  return { ...common, hasVersionUpdate: false as const };
 }
 
 /**
@@ -339,6 +357,39 @@ export function updateOffer(
     text: `${head}\n\n${tail}\n\n${actions}`,
     actions,
   };
+}
+
+/** Заголовки строк CHANGELOG `Unreleased` (эмодзи и жирный заголовок), не больше пяти. */
+function unreleasedHeadlines(changelog: string): string[] {
+  const section =
+    changelog.split(/^## /mu).find((part) => part.startsWith("[Unreleased]")) ??
+    "";
+  return [...section.matchAll(/^- (\S+) \*\*(.+?)\*\*/gmu)]
+    .slice(0, 5)
+    .map(([, emoji, title]) => `${emoji} ${title}`);
+}
+
+/** Alert бета-обновлений: новая сборка ветки — её версия и что в ней из CHANGELOG.
+ * Обновлятор установки старше нужного сборке — вместо кнопки инструкция ремонта. */
+export function betaOffer(
+  version: string,
+  changelog: string,
+  locale = "en",
+  updaterTooOld = false,
+): UpdateOffer {
+  const ru = locale === "ru";
+  const head = `${ru ? "🧪 Новая бета-сборка Ивы" : "🧪 A new Iva beta build"}\n\nv${escapeRichText(version)}`;
+  const news = unreleasedHeadlines(changelog)
+    .map((line) => `• ${escapeRichText(line)}`)
+    .join("\n");
+  const actions = updaterTooOld
+    ? ""
+    : updateOfferActionLines(locale, ru ? "бета-сборку" : "the beta build");
+  const tail = updaterTooOld
+    ? repairInstructions(locale)
+    : updateKeepsLine(locale);
+  const parts = [head, news, tail, actions];
+  return { text: parts.filter(Boolean).join("\n\n"), actions };
 }
 
 export async function sendUpdateOffer({

@@ -20,6 +20,7 @@ import {
   sleep,
 } from "./config.ts";
 import { tg } from "./transport.ts";
+import { noteDroppedBridgeTasks, scheduleBridgeTask } from "./background.ts";
 import { fastForwardOffset, saveOffset } from "./offset.ts";
 import {
   admitTelegramUpdate,
@@ -226,8 +227,8 @@ async function reconcileResetIntentsSafely(): Promise<number> {
   }
 }
 
-let resetIntentReconciliationInFlight: Promise<void> | null = null;
-
+// Сверка интентов сброса — фоновая задача моста из общего слота (background.ts): приём один
+// на всех, второй такой же ключ во время работы получает false.
 export function scheduleResetIntentReconciliation({
   reconcileImpl = reconcileResetIntentsSafely,
   logImpl = log,
@@ -235,20 +236,16 @@ export function scheduleResetIntentReconciliation({
   reconcileImpl?: () => Promise<number>;
   logImpl?: (...args: unknown[]) => void;
 } = {}): boolean {
-  if (resetIntentReconciliationInFlight) return false;
-  resetIntentReconciliationInFlight = reconcileImpl()
-    .then((count) => {
+  return scheduleBridgeTask(
+    "reset-intents",
+    async () => {
+      const count = await reconcileImpl();
       if (count > 0) {
         logImpl(`reconciled ${count} durable private Telegram reset intent(s)`);
       }
-    })
-    .catch((error: unknown) => {
-      logImpl("reset intent background task failed:", errorMessage(error));
-    })
-    .finally(() => {
-      resetIntentReconciliationInFlight = null;
-    });
-  return true;
+    },
+    { logImpl },
+  );
 }
 
 async function deleteWebhookOrThrow(
@@ -439,6 +436,13 @@ export function runEntrypoint(
   executedPath: string | undefined = process.argv[1],
 ): void {
   if (fileURLToPath(moduleUrl) !== executedPath) return;
+  // У остановки моста нет своего пути завершения: задачи в полёте умирают вместе с процессом.
+  // Скажем об этом в журнал и пропустим сигнал дальше — обработчик снят, и повторный SIGTERM
+  // убивает процесс как раньше, иначе systemd ждал бы нас до SIGKILL.
+  process.once("SIGTERM", () => {
+    noteDroppedBridgeTasks({ logImpl: log });
+    process.kill(process.pid, "SIGTERM");
+  });
   void main().catch((error: unknown) => {
     console.error("telegram-poll fatal:", error);
     process.exit(1);

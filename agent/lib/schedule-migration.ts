@@ -31,14 +31,17 @@ import { jobFactsFile } from "./job-facts.ts";
 import { SCHEDULE_CRON, parseCron } from "./schedule-table.ts";
 import type { ScheduleCron, ScheduleName } from "./schedule-table.ts";
 import {
+  JOB_STOP_GRACE_MS,
   readStatus,
   runScheduledJob,
+  type RunScheduledJobOptions,
   withStatusLock,
   writeStatusAtomic,
 } from "./schedule-runner.ts";
+import { memoryLockPath } from "./schedule-paths.ts";
 import { addDaysToDate, zonedParts, zonedToUtcMs } from "./zoned-time.ts";
 
-type Period = "daily" | "weekly" | "monthly" | "yearly";
+type Period = "night";
 
 interface ExecResult {
   readonly code: number;
@@ -105,10 +108,7 @@ export const LEGACY_MEMORY_UNITS: readonly string[] = [
 // How late a missed run may still be caught up, per period — a catch-up policy of this
 // module alone, not schedule metadata.
 const PERIOD_GRACE_MS: Record<Period, number> = {
-  daily: 20 * 60 * 60 * 1000,
-  weekly: 3 * 24 * 60 * 60 * 1000,
-  monthly: 7 * 24 * 60 * 60 * 1000,
-  yearly: 14 * 24 * 60 * 60 * 1000,
+  night: 20 * 60 * 60 * 1000,
 };
 const PERIODS = Object.keys(PERIOD_GRACE_MS) as Period[];
 
@@ -242,6 +242,36 @@ function removeLegacyUnits({
   }
 }
 
+// Задание догона одного периода — то же, что у расписания, со своими путями и со сроком
+// остановки сводки (agent/lib/schedule-paths.ts): сводка гасит ход на сервере до SIGKILL.
+export function catchUpJob(
+  period: Period,
+  {
+    root,
+    nodeBin,
+    statusPath,
+    log,
+  }: {
+    readonly root: string | undefined;
+    readonly nodeBin: string;
+    readonly statusPath: string;
+    readonly log: (...args: unknown[]) => void;
+  },
+): RunScheduledJobOptions {
+  return {
+    name: statusKey(period),
+    argv: ["scripts/memory/night.ts"],
+    root,
+    nodeBin,
+    lockPath: root ? memoryLockPath(root) : undefined,
+    statusPath,
+    factsPath: jobFactsFile(dirname(statusPath)),
+    killGraceMs: JOB_STOP_GRACE_MS,
+    wake: false,
+    log,
+  };
+}
+
 export async function runScheduleMigration({
   homedir,
   execImpl = defaultExecImpl,
@@ -259,16 +289,9 @@ export async function runScheduleMigration({
     const runPeriod =
       runJob ??
       ((period: Period) =>
-        runScheduledJob({
-          name: statusKey(period),
-          argv: ["scripts/memory/rollup.ts", period],
-          root,
-          nodeBin,
-          lockPath: root ? join(root, ".memory.lock") : undefined,
-          statusPath,
-          factsPath: jobFactsFile(dirname(statusPath)),
-          log,
-        }));
+        runScheduledJob(
+          catchUpJob(period, { root, nodeBin, statusPath, log }),
+        ));
 
     // Per-key seed, the seed write, AND the due-check all happen inside the
     // SAME single lock acquisition runScheduledJob's own admission check uses — never

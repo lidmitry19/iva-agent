@@ -507,3 +507,182 @@ void test("a copy of .env that was never finished cannot replace a whole one", a
     "an unfinished copy overwrote the copy that was whole",
   );
 });
+
+// ── Выпуск новой установки (ADR-0017) ──────────────────────────────────────
+// Новейший выпуск vX.Y.Z на ветке, если он не старше 0.4.9 (первый с бета-обновлениями),
+// иначе вершина; IVA_BETA=1 — вершина и iva.beta=true. Ветка остаётся той же.
+void test("новая установка: выпуск от 0.4.9 на той же ветке, старше — вершина, меток нет — вершина, IVA_BETA=1 — вершина и iva.beta", (t) => {
+  const dir = workspace(t);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  const commit = (message: string) => {
+    git(
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      message,
+      "--allow-empty",
+    );
+    return git("rev-parse", "HEAD");
+  };
+  const run = (beta = "") =>
+    spawnSync(
+      "bash",
+      [
+        "-c",
+        `set -euo pipefail\n${shellFunction("checkout_release")}\ncheckout_release "$1"`,
+        "_",
+        dir,
+      ],
+      { encoding: "utf8", env: { ...process.env, IVA_BETA: beta } },
+    );
+  const bare = commit("old");
+  assert.equal(run().status, 0);
+  assert.equal(git("rev-parse", "HEAD"), bare, "no release: the tip");
+  git("tag", "v0.4.8");
+  const oldTip = commit("after 0.4.8");
+  assert.equal(run().status, 0);
+  assert.equal(
+    git("rev-parse", "HEAD"),
+    oldTip,
+    "0.4.8 is older than 0.4.9: the tip",
+  );
+  git("tag", "v0.4.9", commit("0.4.9"));
+  const release = git("rev-parse", "HEAD");
+  git("tag", "v0.4.10-beta.1", commit("beta"));
+  const tip = commit("tip");
+  assert.equal(run().status, 0);
+  assert.equal(git("rev-parse", "HEAD"), release);
+  assert.equal(git("branch", "--show-current"), "main");
+  assert.throws(() => git("config", "--local", "--get", "iva.beta"));
+  git("reset", "-q", "--hard", tip);
+  assert.equal(run("1").status, 0);
+  assert.equal(git("rev-parse", "HEAD"), tip);
+  assert.equal(git("config", "--local", "--get", "iva.beta"), "true");
+});
+
+void test("repair.sh несёт ту же checkout_release, что install.sh, байт в байт", () => {
+  const repair = readFileSync(join(ROOT, "repair.sh"), "utf8");
+  assert.ok(repair.includes(shellFunction("checkout_release")));
+});
+
+// ADR-0018: IVA_BETA=1 — ветка beta, её вершина, iva.updateBranch=beta и iva.beta=true;
+// без неё — main и новейший выпуск. Шаги установщика дословно: шапка, клон, выпуск, ветка.
+void test("IVA_BETA=1: вершина ветки beta и ветка beta; без неё — выпуск main", (t) => {
+  const dir = workspace(t);
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+  const remote = join(dir, "remote.git");
+  const seed = join(dir, "seed");
+  git(dir, "init", "-q", "--bare", "-b", "main", remote);
+  git(dir, "init", "-q", "-b", "main", seed);
+  const commit = (message: string) => {
+    git(
+      seed,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      message,
+      "--allow-empty",
+    );
+    return git(seed, "rev-parse", "HEAD");
+  };
+  git(seed, "tag", "v0.4.9", commit("0.4.9"));
+  const release = git(seed, "rev-parse", "HEAD");
+  commit("after release");
+  git(seed, "switch", "-q", "-c", "beta");
+  const tip = commit("beta tip");
+  git(seed, "push", "-q", "--tags", remote, "main", "beta");
+  const header = /^REPO_URL=[\s\S]*?^UPDATE_CHANNEL=.*$/mu.exec(INSTALLER);
+  assert.ok(header, "install.sh no longer sets REPO_URL … UPDATE_CHANNEL");
+  const install = (name: string, beta: string, branch?: string) => {
+    const target = join(dir, name);
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env.BRANCH;
+    if (branch) env.BRANCH = branch;
+    const run = spawnSync(
+      "bash",
+      [
+        "-c",
+        `set -euo pipefail\n${header[0]}\n${shellFunction("checkout_release")}\ngit clone -q --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"\ncheckout_release "$INSTALL_DIR"\ngit -C "$INSTALL_DIR" config --local iva.updateBranch "$UPDATE_CHANNEL"`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...env, IVA_BETA: beta, REPO_URL: remote, INSTALL_DIR: target },
+      },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    const config = (key: string) =>
+      spawnSync("git", ["-C", target, "config", "--local", "--get", key], {
+        encoding: "utf8",
+      }).stdout.trim();
+    return {
+      head: git(target, "rev-parse", "HEAD"),
+      branch: config("iva.updateBranch"),
+      beta: config("iva.beta"),
+    };
+  };
+  assert.deepEqual(install("beta", "1"), {
+    head: tip,
+    branch: "beta",
+    beta: "true",
+  });
+  assert.deepEqual(install("stable", ""), {
+    head: release,
+    branch: "main",
+    beta: "",
+  });
+});
+
+// Круг 2: IVA_BETA=1 всегда ставит ветку beta; чужой BRANCH — одна строка предупреждения.
+void test("IVA_BETA=1 с BRANCH=dev: ветка beta и строка о том, что dev пропущен", (t) => {
+  const dir = workspace(t);
+  const header = /^REPO_URL=[\s\S]*?^UPDATE_CHANNEL=.*$/mu.exec(INSTALLER);
+  assert.ok(header);
+  const run = spawnSync(
+    "bash",
+    ["-c", `set -euo pipefail\n${header[0]}\necho "$BRANCH $UPDATE_CHANNEL"`],
+    {
+      encoding: "utf8",
+      cwd: dir,
+      env: { ...process.env, IVA_BETA: "1", BRANCH: "dev" },
+    },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout.trim(), "beta beta");
+  assert.match(run.stderr, /BRANCH=dev.*beta/u);
+});
+
+// Повторный запуск над существующей установкой: выбор беты записан в зеркало и в .git до
+// передачи обновлятору — иначе repair.sh на версионной раскладке уходит в current раньше.
+void test("IVA_BETA=1 над существующей установкой: ветка beta и флаг в зеркале и .git", (t) => {
+  const dir = workspace(t);
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+  execFileSync("git", ["init", "-q", "--bare", join(dir, "repo")]);
+  execFileSync("git", ["init", "-q", dir]);
+  git(join(dir, "repo"), "config", "iva.updateBranch", "main");
+  const run = spawnSync(
+    "bash",
+    [
+      "-c",
+      `set -euo pipefail\n${shellFunction("record_beta_choice")}\nrecord_beta_choice`,
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, IVA_BETA: "1", INSTALL_DIR: dir },
+    },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  for (const repo of [join(dir, "repo"), dir]) {
+    assert.equal(git(repo, "config", "--get", "iva.updateBranch"), "beta");
+    assert.equal(git(repo, "config", "--get", "iva.beta"), "true");
+  }
+});

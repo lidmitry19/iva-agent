@@ -13,8 +13,9 @@ import { spawn } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, openSync, closeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { servicePath } from "../../../packages/claude-command/index.ts";
 
 export interface AuthChallenge {
   url: string;
@@ -50,14 +51,35 @@ function textValue(value: unknown): string {
 
 // From gws stdout, pull the Google consent URL and the loopback port it registered.
 // Returns { url, port } once gws has printed them, else null.
+// gws 0.22.5 prints redirect_uri URL-encoded (`http%3A%2F%2Flocalhost%3A41803%2F`), older
+// versions raw; searchParams decodes both.
 export function parseAuthChallenge(logText: unknown): AuthChallenge | null {
   const text = textValue(logText);
   const url = text.match(/https:\/\/accounts\.google\.com\/[^\s]+/)?.[0];
-  const port = text.match(
-    /redirect_uri=http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/,
-  )?.[1];
-  if (!url || !port) return null;
-  return { url, port: Number(port) };
+  if (!url) return null;
+  try {
+    const redirect = new URL(url).searchParams.get("redirect_uri");
+    if (!redirect) return null;
+    const port = loopbackPort(redirect);
+    return port === null ? null : { url, port };
+  } catch {
+    return null;
+  }
+}
+
+// Port of an explicit `http://localhost:<port>` or `http://127.0.0.1:<port>` URL, else null.
+function loopbackPort(redirect: string): number | null {
+  const target = new URL(redirect);
+  if (target.protocol !== "http:") return null;
+  if (target.hostname !== "localhost" && target.hostname !== "127.0.0.1") {
+    return null;
+  }
+  // URL drops the scheme's default port, so an explicit :80 reads as "".
+  const explicit =
+    target.port ||
+    (/^http:\/\/[^/?#]*:0*80(?:[/?#]|$)/i.test(redirect) ? "80" : "");
+  const port = Number(explicit);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
 // Normalize whatever the user pasted back into the raw callback query string (must carry `code`).
@@ -84,20 +106,22 @@ export function extractCallbackQuery(input: unknown): string | null {
 }
 
 // --- Environment: resolve gws + node without relying on the service PATH ---
-// The systemd unit's PATH does not include the nvm bin dir, so `gws` is not on PATH and gws's own
-// `#!/usr/bin/env node` shebang cannot find node. Resolve gws next to the running node and inject
-// that dir into the child PATH so both are found.
+// Prefer the user prefix used by install/update over an older global gws.
+// Keep the old nvm location as a fallback before its first update, and make Node
+// available for the launcher's `#!/usr/bin/env node` shebang.
 const NODE_BIN_DIR = dirname(process.execPath);
 
-export function gwsBin() {
-  const p = join(NODE_BIN_DIR, "gws");
-  return existsSync(p) ? p : "gws";
+export function gwsBin(nodeBinDir = NODE_BIN_DIR, home = homedir()) {
+  for (const dir of [join(home, ".local/bin"), nodeBinDir]) {
+    const candidate = join(dir, "gws");
+    if (existsSync(candidate)) return candidate;
+  }
+  return "gws";
 }
 
 export function childEnv() {
-  const path = process.env.PATH
-    ? `${NODE_BIN_DIR}:${process.env.PATH}`
-    : NODE_BIN_DIR;
+  const bins = servicePath(NODE_BIN_DIR, homedir());
+  const path = process.env.PATH ? `${bins}:${process.env.PATH}` : bins;
   return { ...process.env, PATH: path };
 }
 

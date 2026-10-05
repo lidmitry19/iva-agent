@@ -3,6 +3,13 @@
 // a successful live response. Codex also returns model-specific reasoning levels.
 import { listCodexModelCatalog } from "./codex-oauth.ts";
 import {
+  claudeModelLabel,
+  claudeReasoningLevels,
+  claudeStatus,
+  listClaudeModels,
+  type ClaudeEnv,
+} from "./claude-cli-status.ts";
+import {
   CANONICAL_REASONING_EFFORTS,
   FALLBACK_REASONING_EFFORTS,
 } from "./reasoning-levels.ts";
@@ -10,8 +17,9 @@ import {
 export interface ProviderCatalogEntry {
   label: string;
   // "key" — ключ обязателен; "oauth" — вход по подписке, ключа в .env нет; "key-optional" —
-  // ключ есть, но эндпоинт может работать и без него (свой сервер без авторизации).
-  auth: "key" | "oauth" | "key-optional";
+  // ключ есть, но эндпоинт может работать и без него (свой сервер без авторизации);
+  // "cli" — ключа нет вовсе: вход живёт в чужом CLI на той же машине (claude).
+  auth: "key" | "oauth" | "key-optional" | "cli";
   base?: string;
   // Адрес известен не всегда: у custom его задаёт владелец, и каталог знает только имя
   // переменной. Значение приходит от вызывающего — см. providerBase.
@@ -30,6 +38,8 @@ export interface ProviderCatalogEntry {
 
 export interface ModelOption {
   id: string;
+  /** Подпись кнопки. Нет — кнопка показывает `id`. */
+  label?: string;
   reasoningLevels: string[];
 }
 
@@ -39,6 +49,11 @@ export interface FetchModelOptions {
   // каталога. Значение собирает вызывающий: только он читает свежий .env.
   base?: string;
   listCodexCatalog?: (options?: { dataDir?: string }) => Promise<ModelOption[]>;
+  // Живой список моделей вендора claude (рукопожатие CLI). Подставлен ради теста:
+  // половина CLI не импортирует agent/ и спрашивает CLI сама.
+  listClaudeCatalog?: (env?: ClaudeEnv) => Promise<ModelOption[]>;
+  // Окружение для чужого CLI: у сервиса оно своё, в тестах — своё.
+  claudeEnv?: ClaudeEnv;
   fetchFn?: typeof fetch;
 }
 
@@ -106,7 +121,7 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     // в него <think>, gpt-5.6-luna отвечает 400. Список моделей картинки не гарантирует.
     visionVar: "OPENCODE_VISION_MODEL",
     visionDef: "qwen3.7-plus",
-    // Mirrors OPENCODE_MODELS in scripts/setup/main.ts (bare IDs, no "opencode-go/" prefix).
+    // Mirrors OPENCODE_MODELS in scripts/setup/network.ts (bare IDs, no "opencode-go/" prefix).
     models: [
       "deepseek-v4-pro",
       "deepseek-v4-flash",
@@ -129,7 +144,27 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     // Картинку смотрит выбранная текстовая модель подписки — своей переменной нет.
     visionVar: null,
     visionDef: null,
-    models: ["gpt-5.5", "gpt-5.1", "gpt-5"],
+    // Кнопки экрана берутся из живого /models подписки (listCodexModelCatalog); здесь только
+    // подпись того же списка. Живьём 03.10.2026 (client_version 0.159.2): gpt-6.1-sol, gpt-6-sol,
+    // gpt-6-luna, gpt-6-astra, gpt-5.6-*, gpt-5.5.
+    models: ["gpt-5.5", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"],
+  },
+  claude: {
+    label: "Claude (подписка Pro/Max)",
+    // Ключа в .env нет: вход живёт в Claude Code CLI на той же машине (data/ его не хранит,
+    // а ключ подписки Ива не видит вовсе).
+    auth: "cli",
+    baseVar: null,
+    keyVar: null,
+    modelVar: "CLAUDE_MODEL",
+    def: "claude-fable-5-1",
+    // Картинку смотрит выбранная текстовая модель подписки — своей переменной нет.
+    visionVar: null,
+    visionDef: null,
+    // Вшитый список — запасной путь: живой приходит рукопожатием CLI (fetchModelOptions),
+    // а он может не состояться (нет бинаря, нет входа, чужой вывод). Те же три id,
+    // что у пикера: Haiku в экран не входит.
+    models: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"],
   },
   openrouter: {
     label: "OpenRouter",
@@ -143,10 +178,10 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     visionDef: "google/gemini-2.5-flash",
     // Always static (300+ live models don't fit inline buttons). Curated known-good
     // slugs only: every model here must support tool calling — Iva sends tool
-    // definitions each turn (see the live test in scripts/setup/main.ts for the full check).
+    // definitions each turn (see the live test in scripts/setup/network.ts for the full check).
     models: [
       "openai/gpt-5.1",
-      "anthropic/claude-sonnet-4.5",
+      "anthropic/claude-sonnet-5.5",
       "google/gemini-2.5-pro",
       "google/gemini-2.5-flash",
       "deepseek/deepseek-chat",
@@ -249,7 +284,9 @@ export function providerEnvKeys(provider: ProviderCatalogEntry): string[] {
 // catalog carries a model-specific subset.
 // custom is deliberately absent: an unknown endpoint has promised nothing about
 // reasoning_effort, and sending it blind risks an HTTP 400 on every turn.
-const REASONING_PROVIDERS = new Set(["ollama", "opencode", "codex"]);
+// claude carries levels per model (claudeReasoningLevels): the CLI sends them as
+// output_config.effort, and only to models with adaptive thinking.
+const REASONING_PROVIDERS = new Set(["ollama", "opencode", "codex", "claude"]);
 
 export const providerSupportsReasoning = (provider: string): boolean =>
   REASONING_PROVIDERS.has(provider);
@@ -260,10 +297,17 @@ const optionsFor = (
   provider: string,
   models: readonly string[],
 ): ModelOption[] =>
-  models.map((id) => ({
-    id,
-    reasoningLevels: providerFallbackReasoningLevels(provider),
-  }));
+  models.map((id) => {
+    const claude = provider === "claude";
+    const label = claude ? claudeModelLabel(id) : "";
+    return {
+      id,
+      ...(label && label !== id ? { label } : {}),
+      reasoningLevels: claude
+        ? claudeReasoningLevels(id)
+        : providerFallbackReasoningLevels(provider),
+    };
+  });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object";
@@ -310,16 +354,11 @@ const validOptions = (provider: string, entries: unknown): ModelOption[] => {
 export async function fetchModelOptions(
   provider: string,
   key?: string,
-  {
-    dataDir,
-    base,
-    listCodexCatalog = listCodexModelCatalog,
-    fetchFn = fetch,
-  }: FetchModelOptions = {},
+  options: FetchModelOptions = {},
 ): Promise<ModelOption[]> {
   const cat = CATALOG[provider];
   if (!cat) return [];
-  const endpoint = base ?? cat.base;
+  const endpoint = options.base ?? cat.base;
   // Провайдер, чей адрес задаёт владелец, без адреса не спрашивается вовсе: ходить некуда,
   // и молчаливый пустой список выглядел бы как «у эндпоинта нет моделей».
   if (cat.baseVar && !endpoint) {
@@ -328,63 +367,20 @@ export async function fetchModelOptions(
       `${cat.baseVar} is not set — nowhere to ask for models`,
     );
   }
+  const live = await liveCatalog(provider, key, endpoint, options);
+  return live ?? optionsFor(provider, cat.models); // openrouter и остальные — вшитый список
+}
+
+/** Живой каталог провайдера; null — спрашивать некого или не у кого (openrouter и прочие
+ *  живут вшитым списком). Отказы поднимаются сюда же ошибкой каталога. */
+async function liveCatalog(
+  provider: string,
+  key: string | undefined,
+  endpoint: string | undefined,
+  options: FetchModelOptions,
+): Promise<ModelOption[] | null> {
   try {
-    if (provider === "codex") {
-      const live = await listCodexCatalog(dataDir ? { dataDir } : {});
-      return validOptions(provider, live);
-    }
-    if (endpoint && provider !== "openrouter") {
-      const res = await fetchFn(`${endpoint}/models`, {
-        // Ключа может не быть вовсе (custom на своём сервере) — тогда идём без заголовка,
-        // а не с «Bearer undefined».
-        headers: key ? { Authorization: `Bearer ${key}` } : {},
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-      if (res.status === 401 || res.status === 403) {
-        throw new ModelCatalogError(
-          "auth_rejected",
-          `provider rejected credentials (${res.status})`,
-          {
-            status: res.status,
-          },
-        );
-      }
-      if (!res.ok) {
-        throw new ModelCatalogError(
-          "catalog_unavailable",
-          `model catalog returned HTTP ${res.status}`,
-          {
-            status: res.status,
-          },
-        );
-      }
-      let body: unknown;
-      try {
-        body = await res.json();
-      } catch (cause) {
-        throw new ModelCatalogError(
-          "catalog_invalid",
-          "provider returned invalid catalog JSON",
-          {
-            cause,
-          },
-        );
-      }
-      if (
-        !body ||
-        typeof body !== "object" ||
-        !Array.isArray((body as Record<string, unknown>).data)
-      ) {
-        throw new ModelCatalogError(
-          "catalog_invalid",
-          "provider returned a malformed model catalog",
-        );
-      }
-      return validOptions(
-        provider,
-        (body as Record<string, unknown>).data,
-      ).sort((a, b) => a.id.localeCompare(b.id));
-    }
+    return await liveSource(provider, key, endpoint, options);
   } catch (e) {
     if (e instanceof ModelCatalogError) throw e;
     throw new ModelCatalogError(
@@ -395,7 +391,104 @@ export async function fetchModelOptions(
       },
     );
   }
-  return optionsFor(provider, cat.models); // openrouter and anything else: static curated list
+}
+
+/** У каждого провайдера свой источник списка; null — источника нет вовсе. */
+async function liveSource(
+  provider: string,
+  key: string | undefined,
+  endpoint: string | undefined,
+  options: FetchModelOptions,
+): Promise<ModelOption[] | null> {
+  const {
+    dataDir,
+    listCodexCatalog = listCodexModelCatalog,
+    listClaudeCatalog = listClaudeModels,
+    claudeEnv = process.env,
+    fetchFn = fetch,
+  } = options;
+  if (provider === "codex")
+    return validOptions(
+      provider,
+      await listCodexCatalog(dataDir ? { dataDir } : {}),
+    );
+  // У claude каталога в сети нет: список отдаёт чужой CLI рукопожатием, а когда он не
+  // отвечает (нет бинаря, нет входа, чужой вывод), остаётся вшитый список — это не
+  // ошибка, а запасной путь: модель всё равно надо выбрать во время настройки.
+  if (provider === "claude")
+    return await claudeCatalog(listClaudeCatalog, claudeEnv);
+  if (endpoint && provider !== "openrouter")
+    return await httpCatalog(provider, key, endpoint, fetchFn);
+  return null;
+}
+
+/** Список моделей подписки claude; сбой рукопожатия — не ошибка, а вшитый список. */
+async function claudeCatalog(
+  list: NonNullable<FetchModelOptions["listClaudeCatalog"]>,
+  env: ClaudeEnv,
+): Promise<ModelOption[] | null> {
+  try {
+    return (await list(env)).map((option) => ({
+      id: option.id,
+      ...(option.label ? { label: option.label } : {}),
+      reasoningLevels: [...option.reasoningLevels],
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/** Каталог чужого эндпоинта: GET {base}/models и разбор ответа. */
+async function httpCatalog(
+  provider: string,
+  key: string | undefined,
+  endpoint: string,
+  fetchFn: typeof fetch,
+): Promise<ModelOption[]> {
+  const res = await fetchFn(`${endpoint}/models`, {
+    // Ключа может не быть вовсе (custom на своём сервере) — тогда идём без заголовка,
+    // а не с «Bearer undefined».
+    headers: key ? { Authorization: `Bearer ${key}` } : {},
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (res.status === 401 || res.status === 403) {
+    throw new ModelCatalogError(
+      "auth_rejected",
+      `provider rejected credentials (${res.status})`,
+      { status: res.status },
+    );
+  }
+  if (!res.ok) {
+    throw new ModelCatalogError(
+      "catalog_unavailable",
+      `model catalog returned HTTP ${res.status}`,
+      { status: res.status },
+    );
+  }
+  return validOptions(provider, await catalogData(res)).sort((a, b) =>
+    a.id.localeCompare(b.id),
+  );
+}
+
+/** Тело ответа `{data: [...]}`; всё остальное — недописанный каталог. */
+async function catalogData(res: Response): Promise<unknown[]> {
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (cause) {
+    throw new ModelCatalogError(
+      "catalog_invalid",
+      "provider returned invalid catalog JSON",
+      { cause },
+    );
+  }
+  if (!isRecord(body) || !Array.isArray(body.data)) {
+    throw new ModelCatalogError(
+      "catalog_invalid",
+      "provider returned a malformed model catalog",
+    );
+  }
+  return body.data as unknown[];
 }
 
 // Compatibility for setup or future CLI consumers that only need IDs.
@@ -409,7 +502,7 @@ export async function fetchModels(
   );
 }
 
-// Cheap key validity probe (same lenient policy as scripts/setup/main.ts: network flake ⇒ accept).
+// Cheap key validity probe (same lenient policy as scripts/setup/network.ts: network flake ⇒ accept).
 // Returns null when the key looks fine, or a short human-readable reason.
 export async function checkKey(
   provider: string,
@@ -418,10 +511,23 @@ export async function checkKey(
 ): Promise<string | null> {
   const cat = CATALOG[provider];
   const endpoint = base ?? cat?.base;
+  // У вендора без ключа (claude) в .env проверять нечего: его вход живёт в CLI на этой же
+  // машине, и статус говорит то же, что скажет доктор. Ключ тут не читается вовсе.
+  if (cat?.auth === "cli") return await claudeKeyState();
   if (!cat || !endpoint) return null;
   // OpenRouter has a dedicated auth-only endpoint; the others validate via /models.
   const url =
     provider === "openrouter" ? `${endpoint}/key` : `${endpoint}/models`;
+  return await probeKey(url, key);
+}
+
+async function claudeKeyState(): Promise<string | null> {
+  const status = await claudeStatus(process.env);
+  return status.ready ? null : status.hint;
+}
+
+/** Мягкая политика: 401/403 — отказ ключа, сетевой сбой — «похоже, ключ в порядке». */
+async function probeKey(url: string, key: string): Promise<string | null> {
   try {
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${key}` },

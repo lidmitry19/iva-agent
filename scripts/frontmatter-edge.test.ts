@@ -12,6 +12,7 @@ import {
   FrontmatterParseError,
   formatField,
   parseFrontmatter,
+  renderCardDocument,
   writeFrontmatter,
 } from "../agent/lib/frontmatter.ts";
 
@@ -26,7 +27,7 @@ const corpus = JSON.parse(
   readFileSync(
     join(
       dirname(fileURLToPath(import.meta.url)),
-      "autograph/tests/golden/frontmatter/scalar-corpus.cases.json",
+      "fixtures/frontmatter-scalar-corpus.cases.json",
     ),
     "utf8",
   ),
@@ -219,4 +220,73 @@ test("literal |- сохраняет пустую строку между абз�
   assert.ok(second.fields);
   assert.equal(second.fields.note, first.fields.note);
   assert.equal(second.fields.kind, "note");
+});
+
+test("ночная правка поля сохраняет остальные строки frontmatter и CRLF byte-identical", () => {
+  const safe = fc
+    .stringMatching(/^[a-z]{1,12}$/u)
+    .filter((value) => value !== "true" && value !== "false");
+  fc.assert(
+    fc.property(
+      fc.integer({ min: -10_000, max: 10_000 }),
+      fc.boolean(),
+      fc.array(safe, { maxLength: 5 }),
+      safe,
+      (number, boolean, list, word) => {
+        const lines = [
+          "# owner comment",
+          `tier: ${number}`,
+          `pinned: ${boolean}`,
+          "created: 2026-01-05",
+          `tags: [${list.join(", ")}]`,
+          "meta:",
+          `  source: ${word}`,
+          `  score: ${number}`,
+          "description: >-",
+          `  ${word} first`,
+          "",
+          `  ${word} second`,
+        ];
+        const source = `---\r\n${lines.join("\r\n")}\r\n---\r\n# Card\r\n`;
+        const parsed = parseFrontmatter(source);
+        const output = renderCardDocument(
+          parsed,
+          { ...(parsed.fields ?? {}), truth_date: "2026-09-26" },
+          parsed.body,
+        );
+        assert.ok(output.includes("\r\n"));
+        const frontmatterStart = output.indexOf("\r\n") + 2;
+        const renderedLines = output
+          .slice(frontmatterStart, output.indexOf("\r\n---\r\n"))
+          .split("\r\n")
+          .filter((line) => !line.startsWith("truth_date:"));
+        assert.deepEqual(renderedLines, lines);
+      },
+    ),
+    { seed: 20_260_928, numRuns: 200, endOnFailure: true },
+  );
+});
+
+test("ночная правка удаляет названное поле и не оставляет пустой/BOM frontmatter в теле", () => {
+  const source =
+    '\uFEFF---\r\ntruth_pending: "2026-09-25"\r\n---\r\n# Card\r\n';
+  const parsed = parseFrontmatter(source);
+  const fields = { ...(parsed.fields ?? {}), truth_date: "2026-09-26" };
+  delete (fields as Record<string, string | string[]>).truth_pending;
+  const output = renderCardDocument(parsed, fields, parsed.body, [
+    "truth_pending",
+  ]);
+  assert.ok(output.includes("\r\n"));
+  assert.doesNotMatch(output, /truth_pending/u);
+  assert.equal((output.match(/^---\r?$/gmu) ?? []).length, 2);
+  assert.match(output, /# Card/u);
+
+  const empty = parseFrontmatter("---\n\n---\n# Empty\n");
+  const rendered = renderCardDocument(
+    empty,
+    { updated: "2026-09-28" },
+    empty.body,
+  );
+  assert.equal((rendered.match(/^---$/gmu) ?? []).length, 2);
+  assert.doesNotMatch(rendered, /---\n\n---\n# Empty/u);
 });

@@ -1,6 +1,6 @@
 {
   "name": "iva",
-  "version": "0.4.4",
+  "version": "0.4.12",
   "type": "module",
   "bin": {
     "iva": "bin/iva.mjs"
@@ -19,9 +19,10 @@
     "start": "eve start",
     "init-vault": "node scripts/init-vault.mjs",
     "replica": "node scripts/replica-smoke.ts",
-    "digest": "node scripts/daily-digest.ts",
+    "live-turn": "node scripts/live-turn.ts",
     "poll": "node --env-file=.env scripts/telegram-poll.mjs",
-    "memory": "node --env-file=.env scripts/memory/rollup.ts",
+    "memory": "node --env-file=.env scripts/memory/night.ts",
+    "cleanup": "node scripts/vault-cleanup.ts",
     "brain": "node --env-file=.env scripts/memory/brain.ts",
     "doctor": "npm run brain",
     "typecheck": "tsgo",
@@ -47,7 +48,8 @@
     "croner": "10.0.1",
     "eve": "0.51.1",
     "just-bash": "^3.0.0",
-    "zod": "4.4.3"
+    "zod": "4.5.4",
+    "@iva/opencode-protocol": "file:packages/opencode-protocol"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -93,7 +93,7 @@
           "Веб-поиск: Tavily, Exa, Parallel, Brave",
           "Google Workspace: Gmail, Календарь, Drive, Таблицы, Документы, Задачи",
           "Проверка prompt-инъекций и вычистка секретов",
-          "Задачи, напоминания, утренний дайджест, расписания"
+          "Задачи, напоминания, обзор дня два раза в день, расписания"
         ],
         "author": {
           "@type": "Person",
@@ -885,6 +885,8 @@
         }
       }
     </style>
+    <link rel="stylesheet" href="/analytics.css?v=1" />
+    <script defer src="/analytics.js?v=1"></script>
   </head>
   <body>
     <nav aria-label="Основная навигация">
@@ -1213,9 +1215,9 @@
               </dd>
             </div>
             <div style="--i: 7">
-              <dt>Задачи и дайджест</dt>
+              <dt>Задачи и обзор дня</dt>
               <dd>
-                Приоритеты, сроки, напоминания и утренний дайджест, который
+                Приоритеты, сроки, напоминания и утренний обзор дня, который
                 здоровается с вами раньше кофе.
               </dd>
             </div>
@@ -1406,6 +1408,14 @@
     <footer class="footer">
       <div class="footer-in">
         <div class="fcol">
+          <p><a href="/ru/about/">О создателе Iva</a></p>
+          <p class="footer-majento">
+            Внедрение AI-агентов в компании:
+            <a
+              href="https://majento.ai/ru/?utm_source=iva-agent.com&amp;utm_medium=referral&amp;utm_campaign=ecosystem"
+              >Majento</a
+            >
+          </p>
           <span>Iva</span>
           Open source ·
           <a href="https://github.com/smixs/iva-agent/blob/main/LICENSE">MIT</a

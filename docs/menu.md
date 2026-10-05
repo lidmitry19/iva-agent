@@ -61,9 +61,9 @@ Your raw answers are archived verbatim to `vault/core-interview.md` (overwritten
 
 ## Notices
 
-Everything Iva sends **on her own** — with no message from you — is a Notice, and there are exactly two kinds. A **Report** is a scheduled summary: the nightly memory report and the morning digest. An **Alert** is trouble that needs your hand: memory that is not being backed up, a nightly pass that failed, a new version to install.
+Everything Iva sends **on her own** — with no message from you — is a Notice, and there are four kinds. A **Report** is a scheduled summary: the nightly memory report. **Watch** tells you what you missed in Telegram and mail, and the **Brief** reviews your day at 08:30 and 14:00 ([ADR-0020](adr/0020-watch-and-brief-are-on-by-default.md)). An **Alert** is trouble that needs your hand: memory that is not being backed up, a nightly pass that failed, a new version to install.
 
-The **🔔 Notices** screen switches the two Reports — _Memory reports_ (nightly, 04:00 and Mon 04:15) and _Morning digest_ (08:00). Both are **off by default**, so a fresh installation says nothing in the morning; the vault is still written and `/digest` still works by hand. A tap writes `data/settings.json`: the report switch is read at the end of each nightly run, the digest switch when its schedule fires — no restart, and a switch flipped tonight applies tonight. Both scheduled turns hand their text to the code that delivers it, so a report arrives as exactly one message ([ADR-0007](adr/0007-notices-are-opt-in.md)).
+The **🔔 Notices** screen switches _Memory reports_ (nightly, 04:00 and Mon 04:15) — **off by default**, the vault is still written — and _Writes on her own_ (Watch and the Brief) — **on by default**; off stops both, failures are still reported, and `/digest` gives the Brief by hand any time. The screen shows the Brief times from the settings. A tap writes `data/settings.json`: the report switch is read at the end of each nightly run, the `proactive` key on every half-hourly tick — no restart. These scheduled turns hand their text to the code that delivers it ([ADR-0007](adr/0007-notices-are-opt-in.md)).
 
 Alerts — problems and new versions — cannot be switched off, and the screen says so. The price they pay for that: every Alert names what broke, what it costs and the exact command to fix it, and it repeats at most once a week for the same problem — sooner only if the problem changed or came back after a fix. The reasoning: [ADR-0007](adr/0007-notices-are-opt-in.md).
 
@@ -125,6 +125,7 @@ Three read-only screens.
 - **🧹 Vault cleanup** — the streaming cleaner from 0.3.1 (`cleanup.py --apply`): collapses description bloat, never touches card bodies.
 - **🌙 Brain (nightly care)** — starts the nightly `iva-brain.service` right now instead of 05:00; it runs as the same systemd unit, so it survives bridge restarts.
 - **🔄 Update** — hands off to the existing `/update` flow (check → confirm buttons → an update that survives its own restart).
+- **✨ New menu / ◀︎ Classic menu** — switches where the buttons of the menu and its screens sit: under the message, as before 0.4.2 (the default), or inside the message, which needs a Telegram client from August 2026. Stored as `menuStyle` in `data/settings.json` and read on every render, so it applies at once.
 
 Every command asks for confirmation, then shows live progress in the same message — an animated loader from the same custom-emoji pack the update flow uses (a swirl for doctor, green for cleanup, an orange spinner for the brain; plain ◇ when the bot owner has no Premium), the current step and elapsed time, with a ✖ Cancel button. One command runs at a time, and doctor/cleanup refuse to start while an update is in progress. The final summary is a single line with numbers (files cleaned and MB freed, ok/warn counts) plus the output tail when something failed.
 

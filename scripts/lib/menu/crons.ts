@@ -11,10 +11,14 @@
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
-import { readSettings } from "#lib/settings.ts";
+import { readEnvValues } from "../env-file.ts";
 // Names double as status-file keys — the `name` each schedule passes to runScheduledJob
 // (see scripts/lib/schedule-runner.ts), not the bare period. Display order is table order.
-import { SCHEDULE_CRON } from "#lib/schedule-table.ts";
+import { pendingMemoryNightTime } from "#lib/memory-night-time.ts";
+import {
+  SCHEDULE_CRON,
+  ACTIVE_MEMORY_NIGHT_TIME,
+} from "#lib/schedule-table.ts";
 import { REMINDER_TICK_STALE_MS, readTickPulse } from "#lib/reminder-tick.ts";
 import { list } from "#lib/reminder-store.ts";
 import { resolveTimeZone } from "#lib/timezone.ts";
@@ -29,7 +33,7 @@ type Translate = (english: string, russian: string) => string;
 type RollupEntry = { lastSuccessAt?: unknown };
 type MenuState = { page: number };
 type MenuContext = {
-  deps: { dataDir: string };
+  deps: { dataDir: string; envPath?: string };
   tr: Translate;
 };
 let cache: { at: number; timers: Timer[] | null } = { at: 0, timers: null };
@@ -63,30 +67,27 @@ function formatLastSuccess(entry: RollupEntry | undefined, T: Translate) {
     .replace(/\.\d{3}Z$/, "Z");
 }
 
-function digestEnabled() {
-  // readSettings() resolves data/settings.json from ASSISTANT_DATA_DIR/cwd itself (see
-  // agent/lib/settings.ts) — same file agent/schedules/digest.ts reads at fire time,
-  // so this always reflects the toggle digest.ts itself would see on its next tick.
-  try {
-    const settings = readSettings() as {
-      digestSchedule?: { enabled?: boolean };
-    };
-    return settings.digestSchedule?.enabled === true;
-  } catch {
-    return false;
-  }
-}
-
-function schedulesBlock(dataDir: string, T: Translate) {
+async function schedulesBlock(dataDir: string, T: Translate, envPath?: string) {
   const status = loadRollupStatus(dataDir);
-  const digestOn = digestEnabled();
+  let nightNotice: string | null = null;
+  try {
+    const requested = envPath
+      ? (await readEnvValues(envPath)).MEMORY_NIGHT_TIME
+      : process.env.MEMORY_NIGHT_TIME;
+    const pending = pendingMemoryNightTime(requested, ACTIVE_MEMORY_NIGHT_TIME);
+    if (pending)
+      nightNotice = T(
+        `Night time ${pending} is pending. Apply with iva update --force, or npm run build and iva restart in a development checkout.`,
+        `Время ночи ${pending} ждёт сборки. Примените iva update --force; в чекауте разработчика — npm run build и iva restart.`,
+      );
+  } catch {
+    nightNotice = T(
+      "MEMORY_NIGHT_TIME is invalid; use HH:mm. The compiled schedule stays active.",
+      "MEMORY_NIGHT_TIME невалидно: нужен HH:mm. Действует время текущей сборки.",
+    );
+  }
   const lines = Object.entries(SCHEDULE_CRON).map(([name, cron]) => {
-    // digest fires off by default (agent/schedules/digest.ts) — "never" would be
-    // indistinguishable from "enabled but hasn't run yet"; say so explicitly instead.
-    const last =
-      name === "digest" && !digestOn
-        ? T("disabled", "выключен")
-        : formatLastSuccess(status[name], T);
+    const last = formatLastSuccess(status[name], T);
     return `| ${escapeRichText(name)} | ${escapeRichText(cron)} | ${last} |`;
   });
   return [
@@ -96,6 +97,7 @@ function schedulesBlock(dataDir: string, T: Translate) {
       "| --- | --- | --- |",
       ...lines,
     ].join("\n"),
+    ...(nightNotice ? [nightNotice] : []),
   ].join("\n\n");
 }
 
@@ -269,7 +271,11 @@ export default {
       `Tasks in queue: ${taskCount}`,
       `Задач в очереди: ${taskCount}`,
     );
-    const schedules = schedulesBlock(ctx.deps.dataDir, T);
+    const schedules = await schedulesBlock(
+      ctx.deps.dataDir,
+      T,
+      ctx.deps.envPath,
+    );
     const reminders = await remindersBlock(T);
     const timerBlock =
       timers.length === 0
