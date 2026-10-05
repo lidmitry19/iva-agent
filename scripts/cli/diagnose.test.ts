@@ -560,7 +560,7 @@ await test("таблица фактов расписаний видна в па�
   await recordFact(
     jobFactsFile(data),
     {
-      name: "memory-daily",
+      name: "memory-night",
       startedAt: finishedAt - 1000,
       finishedAt,
       ok: false,
@@ -587,8 +587,8 @@ await test("таблица фактов расписаний видна в па�
     "utf8",
   );
   assert.match(text, /## Schedules \(facts table/u);
-  assert.match(text, /memory-daily: провал \(exited 1\)/u);
-  assert.match(text, /незакрытый провал: memory-daily/u);
+  assert.match(text, /memory-night: провал \(exited 1\)/u);
+  assert.match(text, /незакрытый провал: memory-night/u);
   // Первые три якоря печатает и доктор; хвост запуска с отступом — только секция расписаний.
   // Без этого якоря мутация `schedules: ""` оставляла тест зелёным (T30 v2, §2).
   assert.match(

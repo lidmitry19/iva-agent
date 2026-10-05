@@ -18,6 +18,7 @@ const EXPECTED_IGNORES = [
   "data/",
   ".scratch/",
   ".worktrees/",
+  ".claude/",
   "**/wt/",
   "**/.workflow-data/",
   "**/.iva-update/",

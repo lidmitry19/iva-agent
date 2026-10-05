@@ -172,6 +172,30 @@ void test("core render handles an empty vault and trims an oversized CORE excerp
   assert.equal(populated.text.includes("б"), false);
 });
 
+void test("core toggles the single memory night setting without losing siblings", async () => {
+  const settings = join(statusDir, "settings.json");
+  rmSync(settings, { force: true });
+  writeFileSync(settings, JSON.stringify({ language: "ru" }));
+  const { context, shown } = makeContext("en");
+  const state = makeState();
+
+  await core.on("night", [], state, context);
+  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
+    language: "ru",
+    memory: { night: "off" },
+  });
+  assert.deepEqual(shown, ["core"]);
+  assert.match((await core.render(state, context)).text, /Night: off/u);
+
+  await core.on("night", [], state, context);
+  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
+    language: "ru",
+    memory: { night: "on" },
+  });
+  assert.deepEqual(shown, ["core", "core"]);
+  assert.match((await core.render(state, context)).text, /Night: on/u);
+});
+
 void test("core interview stores the real reply identity and delivers a synthetic threaded distillation update", async (t) => {
   const vault = useVault(t);
   const { context, deliveries, admissions, screens } = makeContext();

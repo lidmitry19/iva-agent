@@ -15,8 +15,20 @@
 import { isEntrypoint } from "../lib/version-layout.ts";
 import { notificationChat } from "../lib/notification-chat.ts";
 import {
+  RUN_STALE_MS,
+  chatKeyOf,
+  getChatStatus,
+  setChatStatusIf,
+} from "#lib/run-status.ts";
+import {
+  chatTakeOverPatch,
+  markTelegramTurnAlive,
+  takeOverTelegramChat,
+} from "#lib/telegram-turn-start.ts";
+import {
   list,
   recordDelivery,
+  recordTurnSession,
   type Reminder,
   type ReminderChat,
 } from "#lib/reminder-store.ts";
@@ -24,9 +36,11 @@ import { resolveTimeZone } from "#lib/timezone.ts";
 import { formatZoned } from "#lib/zoned-time.ts";
 import { noticeTranslator } from "../lib/notice-policy.ts";
 import {
+  isQuietReply,
   reminderClientOptions,
   reminderPrompt,
   runReminderTurn,
+  type TurnWatch,
 } from "../lib/reminder-turn.ts";
 import { sendTelegramHtml } from "../lib/telegram-send.ts";
 
@@ -38,6 +52,7 @@ export type ReminderFireDependencies = {
   readonly recordDelivery?: typeof recordDelivery;
   readonly send?: typeof sendTelegramHtml;
   readonly runTurn?: typeof runReminderTurn;
+  readonly recordSession?: typeof recordTurnSession;
   readonly chat?: (env: NodeJS.ProcessEnv) => string | null;
   readonly translator?: typeof noticeTranslator;
   readonly log?: (...args: unknown[]) => void;
@@ -51,6 +66,7 @@ const DEFAULTS: Wiring = {
   recordDelivery,
   send: sendTelegramHtml,
   runTurn: runReminderTurn,
+  recordSession: recordTurnSession,
   chat: notificationChat,
   translator: noticeTranslator,
   log: (...args: unknown[]) => console.log(...args),
@@ -66,11 +82,138 @@ type Target = {
 /** Либо адресат, либо причина, по которой отправить некуда. */
 type Route = { readonly target: Target } | { readonly reason: string };
 
+/** Факт отмены в строке: владелец сам погасил ход, текста ему не ждать. */
+const CANCELLED_BY_OWNER = "cancelled by owner";
+
 /** Что отправлять и чем кончился ход: причина есть, только если текст хода не дошёл до кода. */
-type Outcome = { readonly text: string; readonly error: string | null };
+type Outcome = {
+  readonly text: string;
+  readonly error: string | null;
+  /** Ход погашен снаружи (⏹ или /stop): отправлять нечего и не нужно. */
+  readonly cancelled?: boolean;
+};
 
 /** Итог отправки: причина есть, только если Telegram отказал. */
 type Sent = { readonly delivered: boolean; readonly error: string | null };
+
+/**
+ * Запись в состояние чата — вспомогательный след хода: её сбой (лок, диск) не должен ронять
+ * срабатывание напоминания, но обязан остаться в журнале.
+ */
+function writeQuietly(
+  log: (...args: unknown[]) => void,
+  label: string,
+  write: () => void,
+): void {
+  try {
+    write();
+  } catch (error) {
+    log(`remind: run-status ${label} failed:`, error);
+  }
+}
+
+/**
+ * Взять чат под ход напоминания — тем же путём, что и канал
+ * (agent/lib/telegram-turn-start.ts). Живой чужой ход не трогаем вовсе: напоминание тогда
+ * идёт без присмотра, зато ⏹ владельца продолжает бить по его же сессии. Не взяли — false.
+ * Запись напоминания — это запись с ЕГО sessionId, другого признака у неё нет: клейм чата
+ * под чужим ходом остался бы в run-status неотличим от чужого.
+ */
+async function claimChat(
+  chatKey: string,
+  row: Reminder,
+  sessionId: string,
+  deps: Wiring,
+): Promise<boolean> {
+  try {
+    return await takeOverTelegramChat({
+      chatKey,
+      patch: chatTakeOverPatch({ sessionId }),
+      staleMs: RUN_STALE_MS,
+      getStatusImpl: getChatStatus,
+      setStatusIfImpl: setChatStatusIf,
+      removeWorkingStatusImpl: (messageId) =>
+        leaveOrphanStatus(row, messageId, deps),
+      onWorkingStatusError: (error) =>
+        deps.log("remind: run-status claim failed:", error),
+    });
+  } catch (error) {
+    deps.log("remind: run-status claim failed:", error);
+    return false;
+  }
+}
+
+/**
+ * Осиротевший индикатор мёртвого хода: канал сам удаляет такое сообщение, а ребёнку удалять
+ * нечем — его Bot API-шов живёт в мосте (scripts/lib/telegram-send.ts только отправляет).
+ * Молча бросить его нельзя, поэтому он остаётся видимым в журнале.
+ */
+function leaveOrphanStatus(
+  row: Reminder,
+  messageId: number,
+  deps: Wiring,
+): Promise<void> {
+  deps.log(
+    `reminders: ${row.id} working status ${messageId} of a dead turn stays in the chat`,
+  );
+  return Promise.resolve();
+}
+
+/** Пульс живого хода: без него долгий ход выглядит протухшим и стоп его не находит. */
+function pulseChat(chatKey: string, sessionId: string): void {
+  markTelegramTurnAlive({
+    chatKey,
+    sessionId,
+    getStatusImpl: getChatStatus,
+    setStatusIfImpl: setChatStatusIf,
+  });
+}
+
+/** Снятие записи — CAS по своей сессии, и только так: чужой ход в том же чате не тронем. */
+function releaseChat(chatKey: string, sessionId: string): void {
+  setChatStatusIf(
+    chatKey,
+    { sessionId },
+    { status: "idle", sessionId: null, turnId: null },
+  );
+}
+
+/**
+ * Сессия хода — в строку напоминания, и до клейма чата: тик снимет запись умершего ребёнка
+ * только по ней. Ребёнок, умерший между этими двумя записями, оставляет нечего снимать.
+ */
+async function stampSession(
+  row: Reminder,
+  sessionId: string,
+  deps: Wiring,
+): Promise<void> {
+  try {
+    await deps.recordSession(
+      row.id,
+      { firedAt: row.firedAt, sessionId },
+      { log: deps.log },
+    );
+  } catch (error) {
+    deps.log(
+      `reminders: ${row.id} turn session not recorded: ${message(error)}`,
+    );
+  }
+}
+
+/** Присмотр чата за ходом срабатывания: чат и тема — из строки. */
+function chatWatch(row: Reminder, target: Target, deps: Wiring): TurnWatch {
+  const chatKey = chatKeyOf(target.chat, target.threadId);
+  return {
+    claim: async (sessionId) => {
+      await stampSession(row, sessionId, deps);
+      return claimChat(chatKey, row, sessionId, deps);
+    },
+    pulse: (sessionId) =>
+      writeQuietly(deps.log, "pulse", () => pulseChat(chatKey, sessionId)),
+    release: (sessionId) =>
+      writeQuietly(deps.log, "release", () => releaseChat(chatKey, sessionId)),
+  };
+}
 
 function message(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
@@ -99,19 +242,53 @@ function route(row: Reminder, deps: Wiring): Route {
   return { target: { token, chat: chat.id, threadId: chat.threadId } };
 }
 
-/** Пустой ответ хода — такой же провал, как упавший ход: владелец получает текст строки. */
+/**
+ * Пустой ответ хода — такой же провал, как упавший ход: владелец получает текст строки. Голое
+ * QUIET (модель спутала ход напоминания или Signal с Watch) — тоже: слово QUIET владельцу не
+ * уходит.
+ */
 function textOrFallback(reply: string | undefined, fallback: string): Outcome {
   const text = (reply ?? "").trim();
-  return text === ""
-    ? { text: fallback, error: "agent turn returned no text" }
-    : { text, error: null };
+  if (text === "")
+    return { text: fallback, error: "agent turn returned no text" };
+  if (isQuietReply(text))
+    return { text: fallback, error: "agent turn returned QUIET" };
+  return { text, error: null };
+}
+
+/**
+ * Ход встал на лимит токенов сессии eve: задача не выполнена, и владелец узнаёт об этом
+ * прямо, а не получает промежуточный текст хода под видом результата.
+ */
+function sessionLimitText(
+  text: string,
+  tr: (en: string, ru: string) => string,
+): string {
+  const note = tr(
+    "Not done: the turn hit the eve session token limit.",
+    "Не выполнено: ход упёрся в лимит токенов сессии eve.",
+  );
+  return `${text}\n\n${note}`;
 }
 
 /** status "waiting" — нормальный конец хода у eve (T40), провалом остаётся только "failed". */
 function replyOf(
-  turn: { readonly status: string; readonly message?: string },
+  turn: {
+    readonly status: string;
+    readonly message?: string;
+    readonly cancelled?: boolean;
+    readonly sessionLimit?: boolean;
+  },
   fallback: string,
+  limitText: string,
 ): Outcome {
+  if (turn.cancelled === true)
+    return { text: fallback, error: CANCELLED_BY_OWNER, cancelled: true };
+  if (turn.sessionLimit === true)
+    return {
+      text: limitText,
+      error: `agent turn failed: ${turn.message ?? "session limit"}`,
+    };
   if (turn.status === "failed")
     return {
       text: fallback,
@@ -121,7 +298,11 @@ function replyOf(
 }
 
 /** Один ход агента по тексту напоминания. Любой его провал отдаётся текстом строки. */
-async function agentOutcome(row: Reminder, deps: Wiring): Promise<Outcome> {
+async function agentOutcome(
+  row: Reminder,
+  target: Target,
+  deps: Wiring,
+): Promise<Outcome> {
   const tz = resolveTimeZone(deps.env.ASSISTANT_TIMEZONE);
   const tr = await deps.translator(deps.env);
   const prompt = reminderPrompt(
@@ -135,8 +316,10 @@ async function agentOutcome(row: Reminder, deps: Wiring): Promise<Outcome> {
   try {
     const turn = await deps.runTurn(prompt, reminderClientOptions(deps.env), {
       log: deps.log,
+      // Пока ход идёт, чат и тема строки видят его сессию: по ней ⏹ и /stop гасят её.
+      watch: chatWatch(row, target, deps),
     });
-    return replyOf(turn, row.text);
+    return replyOf(turn, row.text, sessionLimitText(row.text, tr));
   } catch (error) {
     return { text: row.text, error: `agent turn failed: ${message(error)}` };
   }
@@ -213,8 +396,19 @@ async function fireRow(row: Reminder, deps: Wiring): Promise<void> {
     );
     return;
   }
-  const outcome = await agentOutcome(row, deps);
+  const outcome = await agentOutcome(row, routed.target, deps);
   noteTurnFailure(row, outcome, deps);
+  if (outcome.cancelled === true) {
+    // Владелец погасил ход сам: дословный текст напоминания ему не отправляем, в строке —
+    // факт отмены (повторного срабатывания у сработавшей строки нет).
+    await recordFact(
+      row,
+      { delivered: false, error: null },
+      outcome.error,
+      deps,
+    );
+    return;
+  }
   const sent = await deliver(row, routed.target, outcome.text, deps);
   await recordFact(row, sent, reason(outcome, sent), deps);
 }

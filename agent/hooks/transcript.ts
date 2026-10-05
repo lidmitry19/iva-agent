@@ -11,7 +11,9 @@ export default defineHook({
     "message.completed": (event) => {
       if (event.data.finishReason === "tool-calls") return;
       const text = (event.data.message ?? "").trim();
-      if (!text) return;
+      // QUIET — ответ планового хода Watch или Brief «писать не о чем»: в чат он не уходит
+      // и в дневной файл не пишется (ADR-0020).
+      if (!text || text === "QUIET") return;
       appendDaily("[iva]", text);
     },
   },

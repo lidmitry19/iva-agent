@@ -46,7 +46,7 @@ The first question is your language — English or Russian — before anything t
 
 Five steps. Each key comes with a direct link to where it lives, and each is validated live — a bad key is rejected on the spot, not discovered at runtime. Enter keeps the current value, so re-running the wizard (`iva config`) changes only what you want.
 
-1. **Provider and model.** Ollama Cloud or OpenCode Go ([comparison](providers.md)); the key is checked against the API, then you pick a model from the provider's live list.
+1. **Provider and model.** Ollama Cloud, OpenCode Go, an OpenAI (ChatGPT) subscription, OpenRouter or your own OpenAI-compatible endpoint ([comparison](providers.md)); the key (or the subscription sign-in) is checked, then you pick a model.
 2. **Voice, search, hybrid memory.** Deepgram key (free starter credit) — Enter skips it, voice notes stay untranscribed until you add the key in `/menu` → 🎤 Voice; recognition language `multi` auto-detects ru/uz/en. The same step picks a web-search provider — Tavily, Exa, Parallel or Brave; Enter skips and search stays off — and offers optional hybrid memory with an embedding key.
 3. **Telegram bot.** Paste the token from @BotFather; the wizard validates it via `getMe` and detects the bot's username itself.
 4. **Access.** Send your new bot any message — "hi" works. The wizard reads `getUpdates`, shows who wrote, and you pick yourself. Iva answers only these IDs; an empty list means it answers nobody.
@@ -59,11 +59,13 @@ Five steps. Each key comes with a direct link to where it lives, and each is val
 - 🟢 **Node 24 via nvm** — no root needed; 24 is a hard floor because memory search uses the built-in `node:sqlite`.
 - 🌐 **agent-browser + Chromium** — headless browser for web tasks; the longest step, 1–3 minutes of visible download output.
 - 🗂️ **Vault init** — your memory is created from `vault-template/` as a separate git repo, so personal data never enters the code repo.
-- ⚙️ **Background runtime** — two systemd user services, two systemd watchdog timers and five in-process eve schedules, with linger enabled so they survive logout. Details: [deploy.md](deploy.md).
+- ⚙️ **Background runtime** — two systemd user services, two systemd watchdog timers and seven in-process eve schedules, with linger enabled so they survive logout. Details: [deploy.md](deploy.md).
 - 🧰 **The `iva` command** — installed into `~/.local/bin`: `iva status`, `iva doctor`, `iva update`. Full reference: [cli.md](cli.md).
 - ✅ **Telegram confirmation** — the last thing the installer does is message you from your own bot: "Iva is installed and online. Send me a message — I'll reply." That's the success signal.
 
 Re-running the same command later is safe: over an installation that already exists the installer updates nothing itself — it hands the installation to the one updater, exactly as `iva update` and `repair.sh` do. A checkout is put back onto its release first (edits to Iva's own code are removed, `.env`, `data/` and the vault are not touched), a versioned installation goes straight to its own updater, and a checkout you marked with `.iva-dev` is refused.
+
+**Google Workspace CLI (`gws`)** is installed and updated under `~/.local` without sudo. Services prefer `~/.local/bin` over older global copies. Existing binaries are left in place; Google configuration and authorization stay under the same user account.
 
 Every stage checks whether its work is already done and skips it, so a run after a failure costs seconds instead of minutes:
 

@@ -32,7 +32,7 @@ function main(): void {
 
   if (isEmpty(VAULT)) {
     // Copy the skeleton (schema.json, CORE/MOC seeds, empty directories). Code and prompts
-    // are NOT part of the vault — they live in the repo (scripts/autograph, scripts/memory).
+    // are NOT part of the vault — they live in the repo (scripts/memory).
     cpSync(TEMPLATE, VAULT, { recursive: true });
 
     // Pick the memory core language by AGENT_LANGUAGE: en → CORE.en.md overwrites CORE.md.

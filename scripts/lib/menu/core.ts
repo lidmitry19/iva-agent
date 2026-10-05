@@ -24,6 +24,7 @@ import {
   resolveVaultDir,
 } from "../../../packages/vault-dir/index.ts";
 import { button, escapeRichText } from "./buttons.ts";
+import { readSettings, writeSettings } from "#lib/settings.ts";
 
 const SID = "core";
 const PARENT = "r";
@@ -397,6 +398,10 @@ export default {
       : excerpt.text
         ? `${T("Current core:", "Текущее ядро:")}\n\n${escapeRichText(excerpt.text)}`
         : T("The memory core is empty.", "Ядро памяти пусто.");
+    const configured = (
+      readSettings().memory as { night?: unknown } | undefined
+    )?.night;
+    const nightOn = configured !== "off";
     const text = [
       `# ${T("💾 Memory core", "💾 Ядро памяти")}`,
       body,
@@ -404,18 +409,33 @@ export default {
         "the interview asks 6 questions; Iva turns your answers into the core.",
         "интервью — 6 вопросов; ответы ива сама превратит в ядро.",
       )}`,
+      `${button(
+        nightOn
+          ? T("🌙 Night: on", "🌙 Ночь: вкл")
+          : T("🌙 Night: off", "🌙 Ночь: выкл"),
+        `iva_menu:${SID}:night`,
+      )} — ${T("toggle code-driven nightly memory.", "включить или остановить ночную память.")}`,
       backLine(ctx),
     ].join("\n\n");
     return { text };
   },
 
   async on(
-    verb: string,
-    _args: string[],
-    st: MenuState,
-    ctx: MenuContext,
-    event?: CallbackIdentity,
+    ...input: [string, string[], MenuState, MenuContext, CallbackIdentity?]
   ) {
+    const [verb, _args, st, ctx, event] = input;
+    void _args;
+    if (verb === "night") {
+      const current = readSettings();
+      const memory =
+        typeof current.memory === "object" && current.memory !== null
+          ? (current.memory as Record<string, unknown>)
+          : {};
+      writeSettings({
+        memory: { ...memory, night: memory.night === "off" ? "on" : "off" },
+      });
+      return ctx.show(st, SID);
+    }
     if (verb === "go") {
       st.data.iv = { i: 0, qa: [], chat: null, from: null, threadId: null };
       return renderInterviewQuestion(st, ctx);

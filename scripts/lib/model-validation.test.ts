@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await */
 import { test } from "node:test";
+import { ClaudeCliError } from "./claude-cli-status.ts";
 import {
   ModelValidationError,
   validateModelSelection,
@@ -306,4 +307,124 @@ test("empty and malformed selections are rejected before provider I/O", async ()
       error.code === "invalid_selection",
   );
   assert.equal(calls, 0);
+});
+
+// ─── claude: ключа нет, проверка — живой запрос через чужой CLI ──────────────────────
+// В .env у вендора одна строка (имя модели), поэтому «ключ принят» тут не проверяется
+// вовсе: проверяется, что модель вообще есть у подписки. Проба ходит через
+// scripts/lib/claude-cli-status.ts, а рантайм — своей рукой.
+test("the claude selection is probed through the CLI, not through a catalog", async () => {
+  const seen: string[] = [];
+  const selected = await validateModelSelection(
+    { provider: "claude", model: "  claude-fable-5-1  " },
+    {
+      fetchFn: () => {
+        throw new Error("сеть не при чём: у этого вендора её нет");
+      },
+      probeClaude: async (model) => {
+        seen.push(model);
+        return { id: model, reasoningLevels: [], answered: true };
+      },
+    },
+  );
+  assert.deepEqual(seen, ["claude-fable-5-1"]);
+  assert.equal(selected.id, "claude-fable-5-1");
+  assert.equal(selected.answered, true);
+});
+
+test("a CLI refusal becomes the matching selection error", async () => {
+  const cases = [
+    ["not_logged_in", "auth_rejected"],
+    ["not_installed", "not_installed"],
+    ["model_unavailable", "model_unavailable"],
+    ["timeout", "timeout"],
+  ] as const;
+  for (const [code, expected] of cases) {
+    await assert.rejects(
+      validateModelSelection(
+        { provider: "claude", model: "claude-fable-5-1" },
+        {
+          probeClaude: () => {
+            throw new ClaudeCliError(code, "the CLI said no");
+          },
+        },
+      ),
+      (error) =>
+        error instanceof ModelValidationError &&
+        error.code === expected &&
+        error.message === "the CLI said no",
+      code,
+    );
+  }
+});
+
+test("OpenCode Responses validation probes selected wire with session and tool contract", async () => {
+  const requests: { url: string; init?: RequestInit }[] = [];
+  const result = await validateModelSelection(
+    {
+      provider: "opencode",
+      model: "muse",
+      key: "secret",
+      opencodeProtocol: "responses",
+    },
+    {
+      fetchFn: async (input, init) => {
+        const url = input instanceof Request ? input.url : input.toString();
+        requests.push({ url, init });
+        return response(
+          url.endsWith("/models") ? { data: [{ id: "muse" }] } : { output: [] },
+        );
+      },
+    },
+  );
+  assert.equal(result.id, "muse");
+  assert.deepEqual(result.reasoningLevels, []);
+  assert.deepEqual(
+    requests.map((request) => request.url.split("/").at(-1)),
+    ["models", "responses"],
+  );
+  const request = requests[1];
+  const headers = new Headers(request.init?.headers);
+  assert.equal(headers.get("authorization"), "Bearer secret");
+  assert.match(headers.get("user-agent") ?? "", /^iva\//);
+  assert.match(headers.get("x-opencode-session") ?? "", /^iva-probe-/);
+  const body = JSON.parse(
+    typeof request.init?.body === "string" ? request.init.body : "",
+  ) as {
+    tools: { type: string; name: string }[];
+    input: unknown;
+  };
+  assert.equal(body.tools[0].name, "ping");
+  assert.equal(body.tools[0].type, "function");
+  assert.ok(body.input);
+});
+
+test("OpenCode Responses validation rejects protocol errors instead of falling back", async () => {
+  for (const status of [400, 401, 403, 429, 500]) {
+    await assert.rejects(
+      validateModelSelection(
+        { provider: "opencode", model: "muse", opencodeProtocol: "responses" },
+        {
+          fetchFn: async (input) =>
+            (input instanceof Request ? input.url : input.toString()).endsWith(
+              "/models",
+            )
+              ? response({ data: [{ id: "muse" }] })
+              : response({}, status),
+        },
+      ),
+      /OpenCode rejected muse over Responses/,
+    );
+  }
+  await assert.rejects(
+    validateModelSelection(
+      { provider: "opencode", model: "muse", opencodeProtocol: "messages" },
+      {
+        fetchFn: async () => {
+          throw new Error("network must not be called");
+        },
+      },
+    ),
+    /Invalid OPENCODE_PROTOCOL/,
+  );
 });

@@ -414,6 +414,9 @@ async function runWizard(
         IVA_CONFIG_OUTPUT: candidate,
       },
       stdio: ["pipe", "pipe", "pipe"],
+      // Своя сессия без управляющего терминала: иначе мастер открывает /dev/tty того, кто
+      // запустил тесты, ждёт ответов оттуда, а ответы из pipe не читает.
+      detached: true,
     },
   );
   let output = "";
@@ -442,7 +445,11 @@ test("the setup wizard treats an invalid provider as unconfigured, not as comple
   // статус и апдейт его отвергают, а мастер с `||` схлопывал его в ollama и объявлял
   // сломанный .env настроенным — то есть ровно в починке и молчал.
   for (const value of ["ollmaa", "OLLAMA", ""]) {
-    const { output } = await runWizard(t, value, /Provider \(1\/2\/3\/4\/5\)/u);
+    const { output } = await runWizard(
+      t,
+      value,
+      /Provider \(1\/2\/3\/4\/5\/6\)/u,
+    );
 
     assert.doesNotMatch(output, /already configured/u, value);
     assert.doesNotMatch(output, /Reconfigure from scratch/u, value);
@@ -452,7 +459,7 @@ test("the setup wizard treats an invalid provider as unconfigured, not as comple
       value,
     );
     // И он именно СПРАШИВАЕТ провайдера, а не проходит мимо шага.
-    assert.match(output, /Provider \(1\/2\/3\/4\/5\)/u, value);
+    assert.match(output, /Provider \(1\/2\/3\/4\/5\/6\)/u, value);
   }
 });
 
@@ -490,10 +497,12 @@ test("the setup wizard writes grep without leaking host secrets", async (t) => {
     "invalid",
     /Ready — settings validated for apply/u,
     [
-      "2", // Provider (1/2/3/4/5) -> OpenCode
+      "2", // Provider (1/2/3/4/5/6) -> OpenCode
       "test-key", // Paste the OpenCode API key
       "", // Model number -> default (deepseek-v4-pro)
+      "", // Text protocol -> chat-completions
       "", // Vision model (photos) -> default from the same live list
+      "", // Vision protocol -> chat-completions
       "", // Paste the Deepgram API key -> keep fixture dg
       "", // Recognition language (multi = auto ru/uz/en) -> default (multi)
       "", // Search provider (number) -> default (tavily)
@@ -523,7 +532,7 @@ test("the setup wizard writes grep without leaking host secrets", async (t) => {
   // ищутся дольше, чем правятся.
   assert.match(
     candidateText,
-    /^OPENCODE_MODEL=.*\nOPENCODE_VISION_MODEL=.+$/mu,
+    /^OPENCODE_MODEL=.*\nOPENCODE_PROTOCOL=chat-completions\nOPENCODE_VISION_MODEL=.+$/mu,
     output,
   );
   assert.match(
@@ -539,13 +548,13 @@ test("the setup wizard sees the key the agent process will get, not the file tex
   const { output } = await runWizard(
     t,
     "ollama",
-    /Provider \(1\/2\/3\/4\/5\)|Reconfigure from scratch/u,
+    /Provider \(1\/2\/3\/4\/5\/6\)|Reconfigure from scratch/u,
     [],
     (text) => text.replace("OLLAMA_API_KEY=key", "OLLAMA_API_KEY=#secret"),
   );
 
   assert.doesNotMatch(output, /Iva is already configured/u, output);
-  assert.match(output, /Provider \(1\/2\/3\/4\/5\)/u, output);
+  assert.match(output, /Provider \(1\/2\/3\/4\/5\/6\)/u, output);
 });
 
 // Полный прогон: владелец вставляет ключ с решёткой — сервис и команда прочитали бы
@@ -557,11 +566,13 @@ test("the setup wizard re-asks on an unstorable answer instead of losing the run
     "invalid",
     /Ready — settings validated for apply/u,
     [
-      "2", // Provider (1/2/3/4/5) -> OpenCode
+      "2", // Provider (1/2/3/4/5/6) -> OpenCode
       "ab#cd", // Paste the OpenCode API key -> hash: .env cannot hold it, ask again
       "sk-live_ABC-123.xyz", // …and this one both parsers read the same way
       "", // Model number -> default (deepseek-v4-pro)
+      "", // Text protocol -> chat-completions
       "", // Vision model (photos) -> default from the same live list
+      "", // Vision protocol -> chat-completions
       "", // Paste the Deepgram API key -> keep fixture dg
       "", // Recognition language (multi = auto ru/uz/en) -> default (multi)
       "", // Search provider (number) -> default (tavily)
@@ -622,7 +633,9 @@ for (const [what, patch] of [
         "2", // Provider -> OpenCode
         "sk-opencode-1", // its key
         "", // Model number -> default
+        "", // Text protocol -> chat-completions
         "", // Vision model -> default
+        "", // Vision protocol -> chat-completions
         "", // Deepgram key -> keep fixture
         "", // Recognition language -> default
         "", // Search provider -> default
@@ -663,7 +676,9 @@ for (const [what, patch, key] of [
         "2", // Provider -> OpenCode
         "sk-opencode-1", // its key
         "", // Model number -> default
+        "", // Text protocol -> chat-completions
         "", // Vision model -> default
+        "", // Vision protocol -> chat-completions
         "", // Deepgram key -> keep fixture
         "", // Recognition language -> default
         "", // Search provider -> default

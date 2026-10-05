@@ -1,5 +1,9 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; the async request double preserves the wizard boundary. */
+import "../fixtures/no-host-anthropic.ts";
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { ContextWindowConfigurationError } from "../../agent/lib/context-window.ts";
 import { MODEL_PROVIDER_NAMES } from "#lib/model-provider.ts";
@@ -19,6 +23,7 @@ import {
   selectableWizardOptions,
   validateAndSaveWizard,
   wizardActionAllowed,
+  wizardPickProvider,
 } from "./wizards.ts";
 
 test("reset copy rejects an invalid context window with the typed error", () => {
@@ -384,4 +389,312 @@ test("/think still works on a provider the runtime accepts", async (t) => {
   const texts = sent.map((call) => call.text).join("\n");
   assert.doesNotMatch(texts, /invalid \(/u);
   assert.match(texts, /Loading thinking levels|deepseek-v4-pro/u);
+});
+
+// ─── claude: вендор без ключа, вход живёт в чужом CLI ────────────────────────────────
+// Мастер не может ни поставить npm-пакет, ни войти в подписку за владельца, поэтому
+// вместо экрана ключа он называет команду для фактической причины и даёт перечитать статус.
+// CLI подменён скриптом с тем же контрактом: `auth status` читает ответ из файла.
+
+function fakeClaudeForWizard(t: TestContext): {
+  command: string;
+  authFile: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "iva-wizard-claude-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const command = join(dir, "claude");
+  const authFile = join(dir, "auth.json");
+  writeFileSync(authFile, JSON.stringify({ loggedIn: false }));
+  writeFileSync(
+    command,
+    [
+      "#!/usr/bin/env node",
+      'import { readFileSync } from "node:fs";',
+      "const args = process.argv.slice(2);",
+      'if (args[0] === "auth") { process.stdout.write(readFileSync(process.env.FAKE_CLAUDE_AUTH_FILE, "utf8"), () => process.exit(0)); }',
+      'let input = "";',
+      'process.stdin.on("data", (chunk) => { input += chunk; });',
+      'process.stdin.on("end", () => {',
+      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ value: "default", resolvedModel: "claude-opus-5-5[1m]" }, { value: "claude-fable-5-1[1m]", resolvedModel: "claude-fable-5-1" }, { value: "sonnet", resolvedModel: "claude-sonnet-5-5" }, { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
+      "});",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(command, 0o755);
+  return { command, authFile };
+}
+
+function useWizardClaude(t: TestContext): {
+  command: string;
+  authFile: string;
+} {
+  const fake = fakeClaudeForWizard(t);
+  const previous = {
+    CLAUDE_COMMAND: process.env.CLAUDE_COMMAND,
+    FAKE_CLAUDE_AUTH_FILE: process.env.FAKE_CLAUDE_AUTH_FILE,
+  };
+  process.env.CLAUDE_COMMAND = fake.command;
+  process.env.FAKE_CLAUDE_AUTH_FILE = fake.authFile;
+  t.after(() => {
+    process.env.CLAUDE_COMMAND = previous.CLAUDE_COMMAND;
+    process.env.FAKE_CLAUDE_AUTH_FILE = previous.FAKE_CLAUDE_AUTH_FILE;
+  });
+  return fake;
+}
+
+test("the provider screen offers claude, and /model walks it to the CLI commands", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  const st = flows.start(4102050, "9104220", "model") as unknown as {
+    step: string;
+    msgId: number | null;
+    plan?: string | null;
+  };
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const screen = sent.map((call) => call.text).join("\n");
+  // CLI стоит, входа нет: команда входа, без команды установки, и кнопка перечитать статус.
+  assert.doesNotMatch(screen, /npm install/u);
+  assert.match(screen, /claude auth login/u);
+  // Кнопка «Проверить снова» живёт ровно на этом шаге: иначе тап по ней молча ничего
+  // не сделал бы (wizardActionAllowed).
+  assert.match(screen, /Проверить снова|Check again/u);
+  assert.equal(wizardActionAllowed({ step: "cli_status" }, "retry"), true);
+  assert.equal(wizardActionAllowed({ step: "model_error" }, "retry"), true);
+  assert.equal(wizardActionAllowed({ step: "models" }, "retry"), false);
+  assert.equal(
+    /Выбери модель/u.test(screen),
+    false,
+    "модели показаны без входа",
+  );
+  assert.equal(
+    st.plan ?? null,
+    null,
+    "план подписки при отказе не выдумывается",
+  );
+
+  // Владелец вошёл в CLI и нажал «Проверить снова» — тот же шаг читает статус заново.
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const before = sent.length;
+  await wizardPickProvider(st as never, "claude");
+  const after = sent
+    .slice(before)
+    .map((call) => call.text)
+    .join("\n");
+  assert.match(after, /План: max|Plan: max/u, "план подписки не назван");
+  assert.match(after, /Выбери модель:|Choose a model:/u);
+  assert.doesNotMatch(after, /живого каталога|Choose a live model/u);
+});
+
+// Живой список моделей — пикер самого CLI, а не вшитый список каталога: у подписки
+// набор зависит от плана. Здесь показан план из `claude auth status`.
+test("the claude model screen asks the CLI picker", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const st = flows.start(4102051, "9104221", "model") as unknown as {
+    step: string;
+    modelOptions: { id: string; label?: string }[];
+    plan?: string | null;
+  };
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const screen = sent.map((call) => call.text).join("\n");
+  // Модели — кнопки: в тексте экрана стоят план подписки и приглашение выбрать.
+  assert.match(screen, /План: max|Plan: max/u);
+  assert.deepEqual(
+    st.modelOptions.map((option) => option.id),
+    ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"],
+  );
+  assert.deepEqual(
+    st.modelOptions.map((option) => option.label),
+    ["Fable 5.1", "Opus 5.5", "Sonnet 5.5"],
+  );
+  assert.doesNotMatch(screen, /haiku|\[1m\]/u);
+});
+
+// Уровни рассуждения Claude: экран моделей несёт их у каждой модели, выбор модели ведёт на
+// шаг уровня, а не сохраняет сразу с пустым усилием, — и выбранный уровень уезжает в .env.
+// Раньше пустой список уровней стирал THINKING_EFFORT при каждой смене модели Claude.
+test("picking a claude model asks the thinking level, and saving writes THINKING_EFFORT", async (t) => {
+  telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const st = flows.start(
+    4102052,
+    "9104222",
+    "model",
+  ) as unknown as WizardStateForTest;
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const levels = ["low", "medium", "high", "xhigh", "max"];
+  for (const option of st.modelOptions)
+    assert.deepEqual(option.reasoningLevels, levels, option.id);
+
+  const option = selectWizardModel(st, "1");
+  assert.equal(option?.id, "claude-opus-5-5");
+  assert.deepEqual(st.efforts, levels);
+  assert.equal(wizardActionAllowed({ step: "effort" }, "eff:xhigh"), true);
+  assert.equal(selectWizardEffort(st, "minimal"), false);
+  assert.equal(selectWizardEffort(st, "xhigh"), true);
+
+  let written: Record<string, string | null> = {};
+  await validateAndSaveWizard(st as never, {
+    readEnv: async () => ({ THINKING_EFFORT: "high" }),
+    validate: () =>
+      Promise.resolve({ id: "claude-opus-5-5", reasoningLevels: levels }),
+    write: (updates: Record<string, string | null>) => {
+      written = updates;
+      return Promise.resolve();
+    },
+  });
+  assert.deepEqual(written, {
+    THINKING_EFFORT: "xhigh",
+    MODEL_PROVIDER: "claude",
+    CLAUDE_MODEL: "claude-opus-5-5",
+  });
+});
+
+// Прошлая модель Claude в .env (Sonnet 5, Opus 5): новый CLI её в кнопки не отдаёт — место
+// заняла новая, — но ход на ней идёт, и /think обязан дать сменить уровень, а не отвечать
+// «нет в каталоге». Пикер фейка отдаёт Sonnet 5.5 и Opus 5.5.
+for (const [index, model] of [
+  "claude-sonnet-5-5",
+  "claude-sonnet-5",
+  "claude-opus-5",
+].entries()) {
+  test(`/think on claude shows the thinking levels and the current one for ${model}`, async (t) => {
+    const sent = telegramSpy(t);
+    const fake = useWizardClaude(t);
+    writeFileSync(
+      fake.authFile,
+      JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+    );
+    const chatId = 4102053 + index * 10;
+    const userId = String(9104223 + index * 10);
+
+    await handleThinkCmd(chatId, userId, {
+      readEnv: async () => ({
+        MODEL_PROVIDER: "claude",
+        CLAUDE_MODEL: model,
+        THINKING_EFFORT: "max",
+      }),
+    });
+
+    const texts = sent.map((call) => call.text).join("\n");
+    assert.doesNotMatch(texts, /unavailable for|недоступны для/u);
+    assert.doesNotMatch(texts, /live catalog/u);
+    assert.match(texts, new RegExp(`${model}: max`, "u"));
+    // Кнопки уровней рисуются из st.efforts: шаг «effort» и есть экран с ними.
+    const st = getWizard(chatId, userId) as unknown as WizardStateForTest;
+    assert.equal(st.step, "effort");
+    assert.deepEqual(st.efforts, ["low", "medium", "high", "xhigh", "max"]);
+
+    // Уровень с этого экрана пишет только THINKING_EFFORT: модель владельца остаётся прежней.
+    assert.equal(selectWizardEffort(st, "high"), true);
+    let validated = "";
+    let written: Record<string, string | null> = {};
+    await validateAndSaveWizard(st as never, {
+      readEnv: async () => ({
+        MODEL_PROVIDER: "claude",
+        CLAUDE_MODEL: model,
+        THINKING_EFFORT: "max",
+      }),
+      validate: (selection) => {
+        validated = selection.model ?? "";
+        return Promise.resolve({ id: validated, reasoningLevels: [] });
+      },
+      write: (updates: Record<string, string | null>) => {
+        written = updates;
+        return Promise.resolve();
+      },
+    });
+    assert.equal(validated, model);
+    assert.deepEqual(written, { THINKING_EFFORT: "high" });
+  });
+}
+
+// Незнакомый id Claude — не прошлая модель, а опечатка или чужой аккаунт: экран уровней не
+// рисуется, остаётся ошибка каталога.
+test("/think on claude with an unknown model keeps the catalog error", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+
+  await handleThinkCmd(4102093, "9104263", {
+    readEnv: async () => ({
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-mystery-9",
+      THINKING_EFFORT: "max",
+    }),
+  });
+
+  const texts = sent.map((call) => call.text).join("\n");
+  assert.match(texts, /claude-mystery-9 is not in the live catalog/u);
+  // Экрана уровней нет: ни строки текущего уровня, ни кнопок, — только повтор и выход.
+  assert.doesNotMatch(texts, /claude-mystery-9: max/u);
+  assert.doesNotMatch(texts, /Thinking level for|Уровень размышлений для/u);
+  assert.match(texts, /Retry|Повторить/u);
+  const st = getWizard(4102093, "9104263") as unknown as WizardStateForTest;
+  assert.notEqual(st?.step, "effort");
+  assert.deepEqual(st?.modelOptions ?? [], []);
+});
+
+test("Go Responses config offers no chat-specific thinking level", async () => {
+  const config = await currentConfig({
+    readEnv: async () => ({
+      MODEL_PROVIDER: "opencode",
+      OPENCODE_PROTOCOL: "responses",
+      THINKING_EFFORT: "high",
+    }),
+  });
+  assert.equal(config.adjustableThinking, false);
+  assert.equal(config.effort, "");
+});
+
+test("model changes validate Go Responses and preserve the owner’s transport setting", async () => {
+  const st = {
+    flow: "model",
+    provider: "opencode",
+    model: "muse",
+    effort: null,
+  };
+  let selected: { opencodeProtocol?: string } | undefined;
+  let written: Record<string, string | null> | undefined;
+  await validateAndSaveWizard(st as never, {
+    readEnv: async () => ({
+      OPENCODE_PROTOCOL: "responses",
+      OPENCODE_API_KEY: "test",
+    }),
+    validate: (selection) => {
+      selected = selection;
+      return Promise.resolve({ id: "muse", reasoningLevels: [] });
+    },
+    write: (updates) => {
+      written = updates;
+      return Promise.resolve();
+    },
+  });
+  assert.equal(selected?.opencodeProtocol, "responses");
+  assert.equal(written?.OPENCODE_MODEL, "muse");
+  assert.equal(
+    written?.OPENCODE_PROTOCOL,
+    undefined,
+    "upsert leaves the configured protocol intact",
+  );
 });

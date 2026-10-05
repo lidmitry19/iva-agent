@@ -133,6 +133,9 @@ function escapes(): string[] {
   return [...found].sort();
 }
 
+// OpenCode has two runtime consumers of the same protocol resolver: model-provider
+// selects reasoning controls, and provider selects the transport factory. Sharing the
+// validated vocabulary with setup prevents the UI and runtime accepting different values.
 test("the authored tree has only its explicit shared-package edges", () => {
   assert.deepEqual(
     escapes(),
@@ -142,21 +145,24 @@ test("the authored tree has only its explicit shared-package edges", () => {
       "agent/instructions/25-persona.ts -> @iva/vault-dir",
       "agent/instructions/now.ts -> @iva/data-dir",
       "agent/instructions/now.ts -> @iva/timezone",
+      "agent/lib/claude-cli.ts -> ../../packages/claude-command/index.ts",
       "agent/lib/context-window.ts -> ../../packages/context-window/index.ts",
       "agent/lib/data-dir.ts -> ../../packages/data-dir/index.ts",
       "agent/lib/job-facts.ts -> ../../packages/secret-redaction/index.ts",
+      "agent/lib/model-provider.ts -> @iva/opencode-protocol",
       "agent/lib/telegram-media-cache.ts -> @iva/vault-dir",
       "agent/lib/telegram-media.ts -> @iva/vault-dir",
       "agent/lib/telegram-turn-start.ts -> @iva/vault-dir",
       "agent/lib/timezone.ts -> @iva/timezone",
       "agent/lib/vault-daily.ts -> @iva/vault-dir",
       "agent/lib/vault-error.ts -> @iva/vault-dir",
+      "agent/lib/vault-file-search.ts -> @iva/vault-dir",
+      "agent/provider.ts -> @iva/opencode-protocol",
       "agent/tools/memory_search.ts -> @iva/vault-dir",
-      "agent/tools/read_file.ts -> @iva/vault-dir",
       "agent/tools/write_card.ts -> @iva/vault-dir",
       "agent/tools/write_file.ts -> @iva/vault-dir",
     ],
-    "agent/ may leave its tree only for the shared packages Eve bundles: @iva/data-dir, @iva/vault-dir, @iva/timezone and @iva/context-window, plus the one rule that cuts secrets for both `iva diagnose` and the schedule log tail the agent reads (a second copy of that rule is how a token inside `bot<token>` stayed in data/jobs.json)",
+    "agent/ may leave its tree only for the shared packages Eve bundles: @iva/data-dir, @iva/vault-dir, @iva/timezone, @iva/context-window and @iva/opencode-protocol, plus the one rule that cuts secrets for both `iva diagnose` and the schedule log tail the agent reads (a second copy of that rule is how a token inside `bot<token>` stayed in data/jobs.json), and the one rule that finds the claude CLI for both the runtime and `iva doctor` (two copies let the doctor pass a command the runtime could not start)",
   );
 });
 
@@ -309,7 +315,7 @@ test("the CLI loads without the authored tree present", () => {
   assert.deepEqual(
     cliEdgesIntoAuthoredTree(),
     [],
-    "iva repair/doctor run on installs whose agent/ is missing or half-written — reach the authored tree through a dynamic import inside the call that needs it",
+    "iva update and iva doctor run on installs whose agent/ is missing or half-written — reach the authored tree through a dynamic import inside the call that needs it",
   );
 });
 

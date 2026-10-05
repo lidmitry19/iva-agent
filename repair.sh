@@ -84,6 +84,25 @@ node -e 'const p=require(process.argv[1]); if(p.name!=="iva") process.exit(1)' \
 top="$(git -C "$INSTALL_DIR" rev-parse --show-toplevel)"
 [ "$(cd "$top" && pwd -P)" = "$INSTALL_DIR" ] || die "invalid Iva checkout"
 
+# Новая установка и ремонт ставят новейший выпуск (метку vX.Y.Z на ветке, ADR-0017), если
+# он не старше первого выпуска с бета-обновлениями, иначе вершину ветки; IVA_BETA=1 или
+# iva.beta=true — вершину. Ветка остаётся той же: за ней следит обновлятор. Та же функция
+# стоит в install.sh и repair.sh: оба запускаются через curl | bash и самодостаточны.
+checkout_release() {
+  local first="0.4.9" tag target="${3:-HEAD}"
+  if [ "${IVA_BETA:-}" = 1 ]; then git -C "$1" config --local iva.beta true; fi
+  # Бета - ветка beta или прежний флаг (ADR-0018): вершина. Иначе новейший выпуск.
+  if [ "$(git -C "$1" config --local --get iva.beta || true)" != true ] \
+    && [ "$(git -C "$1" config --local --get iva.updateBranch || true)" != beta ]; then
+    tag="$(git -C "$1" tag --list 'v*' --merged "$target" --sort=-v:refname \
+      | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -n 1 || true)"
+    if [ -n "$tag" ] && [ "$(printf '%s\n%s\n' "$first" "${tag#v}" | sort -V | head -n 1)" = "$first" ]; then target="$tag"; fi
+  fi
+  # $2 - коммит, стоявший до ремонта: новее цели (её потомок) - он и остаётся.
+  if [ -n "${2:-}" ] && git -C "$1" merge-base --is-ancestor "$target" "$2" 2>/dev/null; then target="$2"; fi
+  git -C "$1" reset -q --hard "$target"
+}
+
 # Ремонт запускает код, который сам же и притянул: тянуть его можно только из репозитория
 # проекта. Локальный bare-репозиторий - фикстура теста, всё прочее чужое.
 is_official_remote() {
@@ -101,16 +120,32 @@ if ! is_official_remote "$origin_url"; then
     || die "origin is not github.com/smixs/iva-agent"
 fi
 
-# Тот же канал, на котором сидит установка: `iva rollback` пишет его в git config, и
+# Та же ветка, на которой сидит установка: `iva rollback` пишет её в git config, и
 # ремонт не имеет права молча вернуть человека на main.
 branch="$(git -C "$INSTALL_DIR" config --get iva.updateBranch || true)"
+# IVA_BETA=1 и прежний флаг при main или без ветки (как у обновлятора) - ветка beta.
+if [ "${IVA_BETA:-}" = 1 ] || { [ "$(git -C "$INSTALL_DIR" config --get iva.beta || true)" = true ] && [ "${branch:-main}" = main ]; }; then branch=beta; fi
 [ -n "$branch" ] || branch="main"
 
 say "Getting Iva $branch..." "Получаю Iva ($branch)..."
-# FETCH_HEAD, не `origin/<ветка>`: remote-tracking ref у установки может не существовать
-# (клон без него, свёрнутый refspec), и тогда reset падал бы, оставив дерево как было.
-git -C "$INSTALL_DIR" fetch --quiet origin "$branch"
-git -C "$INSTALL_DIR" reset --quiet --hard FETCH_HEAD
+installed="$(git -C "$INSTALL_DIR" rev-parse -q --verify HEAD || true)"
+# Вся сеть - до сброса: головы всех веток origin, своя ветка, метки. Не ответил origin -
+# ничего не сброшено. FETCH_HEAD, не `origin/<ветка>`: remote-tracking ref может не быть.
+no_origin() { fail "can't check origin, repair cancelled: nothing changed" "не могу проверить origin, ремонт отменён: ничего не изменено"; }
+heads="$(git -C "$INSTALL_DIR" ls-remote --heads origin | cut -f1)" || no_origin
+git -C "$INSTALL_DIR" fetch --quiet origin $heads || no_origin
+git -C "$INSTALL_DIR" fetch --quiet origin "$branch" || no_origin
+tip="$(git -C "$INSTALL_DIR" rev-parse FETCH_HEAD)"
+git -C "$INSTALL_DIR" fetch --quiet --prune origin "+refs/tags/*:refs/tags/*" || no_origin
+# Коммит до ремонта в счёт только на main и только из origin (любая его ветка): правку
+# владельца ремонт затирает, а своя ветка (release/<v>) ставится как есть.
+keep=""
+if [ "$branch" = main ] && [ -n "$installed" ]; then
+  for head in $heads; do git -C "$INSTALL_DIR" merge-base --is-ancestor "$installed" "$head" && { keep="$installed"; break; }; done
+fi
+# Ветка пишется до сброса: не записалась - ничего не сброшено.
+git -C "$INSTALL_DIR" config --local iva.updateBranch "$branch"
+checkout_release "$INSTALL_DIR" "$keep" "$tip"
 say "Local changes to Iva's code were removed." "Локальные правки в коде удалены."
 say "Your .env, data/, vault/ and attachments/ stay in place." "Ваши .env, data/, vault/ и attachments/ остались на месте."
 

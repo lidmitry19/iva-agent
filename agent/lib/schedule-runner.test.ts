@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
+import { readFacts } from "./job-facts.ts";
 import {
   ScheduleStatusError,
   readStatus,
@@ -245,6 +246,8 @@ void test("lockPath given: the spawned command is flock-wrapped in the documente
     "weekly",
   ]);
   assert.equal(seen!.opts.cwd, root);
+  // Ребёнок под flock раннера знает, что замок уже взят, и не берёт его второй раз.
+  assert.equal(seen!.opts.env?.IVA_MEMORY_LOCK_HELD, "1");
   assert.equal(result.ok, true);
 });
 
@@ -253,16 +256,18 @@ void test("no lockPath: the spawned command invokes nodeBin directly (digest cas
   await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
   const statusPath = join(root, "data/rollup-status.json");
 
-  let seen: Pick<SeenSpawn, "cmd" | "args"> | null = null;
+  let seen: SeenSpawn | null = null;
   await runScheduledJob({
-    name: "digest",
-    argv: ["--import", "./scripts/lib/ts-esm-hooks.ts", "scripts/daily-digest.ts"],
+    name: "proactive",
+    argv: ["scripts/proactive/tick.ts"],
     root,
     nodeBin: process.execPath,
     statusPath,
+    // Признак замка из окружения сервиса ребёнку без flock не достаётся.
+    env: { ...process.env, IVA_MEMORY_LOCK_HELD: "1" },
     log: () => {},
     spawnImpl: (cmd, args, opts) => {
-      seen = { cmd, args };
+      seen = { cmd, args, opts };
       return realSpawn(process.execPath, [join(root, "ok.ts")], opts);
     },
   });
@@ -270,10 +275,9 @@ void test("no lockPath: the spawned command invokes nodeBin directly (digest cas
   assert.equal(seen!.cmd, process.execPath);
   assert.deepEqual(seen!.args, [
     "--env-file-if-exists=.env",
-    "--import",
-    "./scripts/lib/ts-esm-hooks.ts",
-    "scripts/daily-digest.ts",
+    "scripts/proactive/tick.ts",
   ]);
+  assert.equal(seen!.opts.env?.IVA_MEMORY_LOCK_HELD, undefined);
 });
 
 void test("root без .env: ребёнок стартует, и node говорит об этом одной честной строкой", async () => {
@@ -869,4 +873,152 @@ void test("damaged status file: the attempt is deferred, nothing is spawned, and
     lines.some((l) => l.includes(statusPath)),
     "the journal must name the file the owner has to fix",
   );
+});
+
+// T50c: напоминание запускается без срока (timeoutMs: null) — ход живёт, пока идут события.
+void test("no deadline (timeoutMs: null): a working child runs to completion, nothing kills it", async () => {
+  const root = await scaffold();
+  const marker = join(root, "done");
+  await writeFile(
+    join(root, "slow.ts"),
+    [
+      "import { writeFileSync } from 'node:fs';",
+      `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(0); }, 400);`,
+    ].join("\n"),
+  );
+  const { log, lines } = collectLogs();
+
+  const result = await runScheduledJob({
+    name: "reminder-r1",
+    argv: ["slow.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: null,
+    log,
+  });
+
+  assert.equal(result.ok, true, "ребёнок без срока доходит до конца сам");
+  assert.equal(existsSync(marker), true, "ребёнку дали доработать");
+  assert.equal(
+    lines.some((l) => l.includes("SIGTERM") || l.includes("exceeded")),
+    false,
+    "срока нет — убивать нечего",
+  );
+});
+
+void test("the child reads its stop time from the runner, never from a stale service environment", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  let seen: SpawnOptions | null = null;
+  await runScheduledJob({
+    name: "memory-daily",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: 5000,
+    killGraceMs: 1000,
+    now: () => 1_000_000,
+    // Снимок окружения сервиса со старым числом: ребёнок обязан видеть число раннера.
+    env: { ...process.env, IVA_JOB_STOP_AT: "1" },
+    log: () => {},
+    spawnImpl: (cmd, args, opts) => {
+      seen = opts;
+      return realSpawn(cmd, args, opts);
+    },
+  });
+  // Работа кончается за срок остановки до SIGTERM: сводка успевает погасить ход сама.
+  assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 5000 - 1000));
+});
+
+void test("a throwing log still settles the run as a failure", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  const result = await runScheduledJob({
+    name: "digest",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    log: () => {
+      throw new Error("log is broken");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.error instanceof Error);
+  assert.equal(result.error.message, "log is broken");
+});
+
+void test("a job without its own stop grace keeps the short SIGKILL grace", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  let seen: SpawnOptions | null = null;
+  await runScheduledJob({
+    name: "digest",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: 60_000,
+    now: () => 1_000_000,
+    log: () => {},
+    spawnImpl: (cmd, args, opts) => {
+      seen = opts;
+      return realSpawn(cmd, args, opts);
+    },
+  });
+  // 90 с на остановку нужны только сводке; остальным заданиям — прежние 10 с.
+  assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 60_000 - 10_000));
+});
+
+// factOnSuccess: "after-failure" (тик Watch): успех пишется фактом только после провала
+// этого имени — он и закрывает провал; провал пишется всегда; остальные расписания (без
+// опции) пишут успех как прежде.
+void test("factOnSuccess after-failure: a success is written only to close a failure of the same name", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  await writeFile(join(root, "fail.ts"), "process.exit(3);\n");
+  const statusPath = join(root, "data/rollup-status.json");
+  const factsPath = join(root, "data/jobs.json");
+  await mkdir(join(root, "data"), { recursive: true });
+  const run = (script: string, name = "proactive") =>
+    runScheduledJob({
+      name,
+      argv: [script],
+      root,
+      nodeBin: process.execPath,
+      statusPath,
+      factsPath,
+      guardMs: 0,
+      wake: false,
+      factOnSuccess: name === "proactive" ? "after-failure" : undefined,
+      log: () => {},
+    });
+  const shape = async () =>
+    (await readFacts(factsPath)).map((fact) => `${fact.name}:${fact.ok}`);
+
+  assert.equal((await run("ok.ts")).ok, true);
+  assert.deepEqual(await shape(), [], "a success after nothing leaves no row");
+  assert.equal((await run("fail.ts")).ok, false);
+  assert.deepEqual(await shape(), ["proactive:false"]);
+  assert.equal((await run("ok.ts")).ok, true);
+  assert.deepEqual(await shape(), ["proactive:false", "proactive:true"]);
+  assert.equal((await run("ok.ts")).ok, true);
+  assert.deepEqual(
+    await shape(),
+    ["proactive:false", "proactive:true"],
+    "the closed failure is not closed twice",
+  );
+  // Чужой провал не открывает запись успеха этому имени; расписание без опции пишет всегда.
+  assert.equal((await run("fail.ts", "digest")).ok, false);
+  assert.equal((await run("ok.ts")).ok, true);
+  assert.equal((await run("ok.ts", "digest")).ok, true);
+  assert.deepEqual(await shape(), [
+    "proactive:false",
+    "proactive:true",
+    "digest:false",
+    "digest:true",
+  ]);
+  const status = JSON.parse(await readFile(statusPath, "utf8")) as Record<
+    string,
+    { lastSuccessAt?: number }
+  >;
+  assert.ok(typeof status.proactive?.lastSuccessAt === "number");
 });

@@ -2,6 +2,8 @@
 
 Known gaps and deferred decisions, tracked so they don't get lost between releases.
 
+`agent/lib/repeat-guard.ts` temporarily stops repeated failed tool calls at the model boundary; remove it when eve itself stops a turn on a repeated invalid tool call.
+
 ## 1. Approval prompts (eve `tools.approval` + Telegram HITL)
 
 eve ships a native tool-approval flow (human-in-the-loop confirmation before a tool
@@ -22,8 +24,9 @@ a parallel bespoke UI layer.
 eve rebuilds `agent/` at service start, so a specifier there that resolves into
 `scripts/` drags operational code into the bundle — the failure behind the 0.3.14 crash
 loop (issue #176). RESOLVED: there are none left. `scripts/authored-tree-guard.test.ts`
-asserts an empty set and carries no list to add to, so a new specifier out of `agent/` is
-red on sight. The guard scans production files only: tests never reach the bundle eve
+asserts the exact list of edges out of `agent/`, and every one of them leads into the shared
+`packages/` (`@iva/*` or a relative path there), so a new specifier out of `agent/` is red
+on sight. The guard scans production files only: tests never reach the bundle eve
 rebuilds, so a specifier in a `*.test.ts` cannot drag `scripts/` into it.
 
 Moved to their canonical home in `agent/lib`: `telegram-acceptance`, `run-status`,
@@ -34,7 +37,7 @@ Moved to their canonical home in `agent/lib`: `telegram-acceptance`, `run-status
 consumers reach them through the `#lib/` alias instead of the other way around.
 
 What made the last ten closable is the seam, not a move. `iva` has to work on an install
-whose `agent/` is missing or half-written — that is the state `iva repair` exists for
+whose `agent/` is missing or half-written — that is the state `repair.sh` exists for
 (ADR-0003) — so every module those processes **load** stays in `scripts/`, every module the
 authored tree needs lives in `agent/lib`, and neither side reaches the other while loading.
 "Those processes" is wider than `scripts/cli/*`: the guard's load-time walk stops at a
@@ -75,7 +78,7 @@ builds the tree. Three shapes, in descending order of preference:
   while `agent/lib/codex-auth.ts` owns refreshing the token and signing requests with it.
   Each pair is pinned by a test that imports both halves
   (`scripts/lib/{timezone,reasoning-levels,health-probe,codex-auth-seam}.test.ts`,
-  `agent/lib/schedule-migration.test.ts`), the way `usage` shares only its log path and
+  `agent/lib/schedule-paths.test.ts`), the way `usage` shares only its journal path and
   `scripts/lib/usage.test.ts` round-trips it. A pair without such a test is drift waiting
   to happen; add the test before adding the pair.
 
@@ -95,9 +98,7 @@ update` and the `/menu` screens load without the authored tree, so they cannot i
 
 ## 4. Evals
 
-One file, `scripts/autograph/docs/evals/evals.json`, contains Autograph documentation
-evals; it is not attached to Iva's bundled skills and has no runner wired up. The
-`#evals/*` import alias is declared in `package.json` but unused. eve ships a native
+The `#evals/*` import alias is declared in `package.json` but unused. eve ships a native
 `eve/evals` module — adopt it before adding product-level skill evals.
 
 ## 5. Discovery guardrails are not part of the release check
@@ -126,13 +127,13 @@ existing self-hosted installs with long-lived Telegram/rollup sessions, but it o
 out of a framework-owned cleanup mechanism. Revisit deliberately once Iva has its own
 session-retirement story, rather than leaving the override in place indefinitely.
 
-## 7. Opt-in UI for the digest cron — CLOSED
+## 7. Opt-in UI for the scheduled Notices — CLOSED
 
-`/menu` → **🔔 Notices** (`scripts/lib/menu/notices.ts`) switches both scheduled Reports —
-the morning digest (`digestSchedule.enabled`) and the nightly memory reports
-(`memoryReports.enabled`) — so neither needs a raw `settings.json` edit. Both keys are read
-at fire time, so a tap applies on the next tick with no restart. The rule the screen
-enforces: ADR-0007.
+`/menu` → **🔔 Notices** (`scripts/lib/menu/notices.ts`) switches the nightly memory reports
+(`memoryReports.enabled`) and **Writes on her own** — Watch and the Brief, which replaced the
+morning digest (`proactive.enabled`, ADR-0020) — so neither needs a raw `settings.json` edit.
+Both keys are read at fire time, so a tap applies on the next tick with no restart. The rules
+the screen enforces: ADR-0007 and ADR-0020.
 
 ## 8. TypeScript-only Node source
 
@@ -150,19 +151,17 @@ filing as a feature request against `vercel/eve`.
 
 **Workaround implemented here**: `agent/lib/schedule-migration.ts`, run fire-and-forget
 from `agent/instrumentation.ts` on every server start, replaces `Persistent=true` for the
-four memory-rollup schedules (`agent/schedules/memory-*.ts`). It compares each period's
-last recorded success (`data/rollup-status.json`) against its most recent
-timezone-aware scheduled point and runs it once if stale and still within a grace window
-(20h daily / 3d weekly / 7d monthly / 14d yearly) — home-grown, and specific to this app's
-four schedules, not a general answer other eve apps could reuse. Superseded if/when eve
+single `memory-night` schedule. It compares the last recorded success
+(`data/rollup-status.json`) against the most recent timezone-aware scheduled point and
+runs it once when stale and still inside the 20-hour grace window — home-grown and
+specific to this app, not a general answer other eve apps could reuse. Superseded if/when eve
 grows a native catch-up story.
 
 ## 10. Rollup-turn workarounds for vercel/eve#1450
 
-`scripts/lib/rollup-turn.ts` and the timeout/safety-net logic in
-`scripts/memory/rollup.ts` work around an open upstream bug
-([vercel/eve#1450](https://github.com/vercel/eve/issues/1450)). Once that's fixed
-upstream, remove the workarounds rather than leaving them as permanent scaffolding.
+Closed (T96). A parked session no longer resumes: every night turn creates its own
+session, and the turn's deadline is the abort signal of its model request
+(`scripts/memory/night-call.ts`), not a timer race. The `Promise.race` timeout is gone.
 
 ## 11. Cron/name metadata duplicated across schedules, migration, and the menu
 
@@ -183,36 +182,18 @@ where a recorded success stops counting as stale and checking that instant again
 — and fails if any cron expression reappears in another source file, so the copies cannot
 silently grow back.
 
-## 12. scripts/autograph is a deliberate fork of smixs/autograph
+## 12. Bundled Autograph was removed
 
-Since the 0.3.12 round the bundled engine (`scripts/autograph/`) and the standalone
-[smixs/autograph](https://github.com/smixs/autograph) skill have intentionally diverged:
-iva's copy resolves wiki-links before the embed exemption and knows the rollup calendar
-(managed-card health, `expected_future_link`, `--as-of`), while the standalone skill got a
-generic `raw_dirs` mechanism and its own newer `cleanup.py` (schema-driven
-`description_max_chars`, symlink guard, mtime race check). Owner's decision: this is a
-fork under iva's vault contract, not drift to be merged back. Consequence to remember:
-a contributor fix landing in one repo does NOT automatically apply to the other — when
-touching graph/enforce/cleanup in either repo, check whether the sibling needs the same
-fix by hand.
+The non-night Autograph engine now lives in the standalone Autograph repository. Iva
+keeps only the TypeScript seams its product uses: frontmatter, card sections, the nightly
+graph and the streaming description cleanup. Fixes to the standalone engine do not ship
+with Iva automatically.
 
-## 13. Two dual-language parser pairs lack shared golden fixtures
+## 13. Markdown parsing has one implementation
 
-Two Markdown-parsing contracts are implemented twice, once in TypeScript and once in
-Python, and must stay semantically identical: (a) frontmatter — `agent/lib/frontmatter.ts`
-vs `scripts/autograph/common.py`; (b) the fence-aware H1/H2 section scanner added in
-0.3.12 — `agent/lib/card-store.ts` (`outsideFences`/`h2Sections`) vs
-`scripts/autograph/enforce.py` (`_outside_fences`/`_sections`). Pair (a) already broke
-once in both parsers simultaneously (blank line inside a folded block, fixed in 0.3.11).
-RESOLVED after 0.3.12: shared golden fixtures live in
-`scripts/autograph/tests/golden/` (input Markdown + expected normalized JSON per case);
-both `scripts/golden-parsers.test.ts` (picked up by `node --test`) and
-`scripts/autograph/tests/test_autograph.py` assert against the same expectations. The
-result shapes differ (TS returns fields, Python returns a tuple), so fixtures compare a
-normalized form only: fields+body for frontmatter, outside[] plus [start,end) section
-ranges for the scanner. Known dialect divergences deliberately NOT covered (quoted commas
-inside flow-list items, mixed-quote stripping) — fixtures encode the shared contract;
-extending it means adding a fixture first.
+`agent/lib/frontmatter.ts` and `agent/lib/card-store.ts` are the canonical parsers. Their
+edge corpus lives under `scripts/fixtures/` and the TypeScript property tests pin quoting,
+folded blocks, fenced headings and round trips.
 
 Pair (a) had two more implementations until then, one per half of memory search:
 `agent/tools/memory_search.ts` (BM25 columns) and `scripts/memory/embed-index.ts` (the
@@ -224,9 +205,7 @@ every card written with CRLF. Worse, the copies were not identical, so in
 Both are gone: `agent/lib/card-index.ts` is now the single seam turning a card into
 indexable text (canonical `parseFrontmatter`, one `META_FIELDS` list, lists flattened),
 and both halves call it. `scripts/memory-search-index.test.ts` pins the FTS columns and
-the dense text side by side per card shape, and checks the halves still agree. Two
-implementations remain, and by design: the cross-language pair is the price of a Python
-night pipeline, a second copy inside TypeScript is not.
+the dense text side by side per card shape, and checks the halves still agree.
 
 ## 14. The inbound gate cannot replace Telegram message text
 
@@ -280,17 +259,9 @@ Until then the workaround in a group is to reply to one of Iva's messages.
 
 ## 16. Rollup stale-cursor workaround for vercel/eve#2461
 
-`scripts/lib/rollup-stale-cursor.ts` and the drain/ownership checks in
-`scripts/memory/rollup.ts` work around an open upstream bug
-([vercel/eve#2461](https://github.com/vercel/eve/issues/2461)): on a resumed
-session, eve's client `result()` reads from the saved stream cursor and stops at
-the first turn boundary without correlating it with the message just sent. Once
-the cursor lags, the nightly report is a replay of an old turn.
+Closed (T96). The bug ([vercel/eve#2461](https://github.com/vercel/eve/issues/2461))
+needs a resumed session: `result()` read from a lagging cursor. The night now
+creates a fresh session per turn and reads its stream from index 0, so the drain,
+the prompt nonce and the foreign-result check are removed.
 
-The Iva-side workaround is two small layers around eve, not a second session
-system: drain `stream({ follow: false })` before every send into the parked
-session, and refuse a result whose `message.received` is not this Turn's prompt
-(per-execution nonce, `sentNotBefore` at send time). Remove both when a released
-eve correlates `result()` with the sent turn.
-
-eve 0.51.1 wants peer `ai ^7.0.82`, but Iva overrides `ai` to 7.0.39; eve also bundles Workflow SDK 5.0.0-beta and Zod 4.5, and its bundled `@ai-sdk/code-mode` imports `experimental_toolCaller`, which 7.0.39 lacks, so that module does not link. This is harmless while Iva enables no Workflow/code-mode tool, but any such tool would crash server start; revisit this dependency separately by upgrading `ai` to at least 7.0.82. Until that upgrade, the workflow-tool route for Reminders (variant C) stays deferred: ADR-0013 rejects it partly on this pin, because enabling such a tool would crash server start.
+The `ai` pin is gone: Iva used to override `ai` to 7.0.39 against eve 0.51.1's peer `ai ^7.0.82`, so eve's bundled `@ai-sdk/code-mode` (it imports `experimental_toolCaller`) did not link and any Workflow/code-mode tool would crash server start. `package.json` now asks for `ai ^7.0.82` with no override. ADR-0013 rejected the workflow-tool route for Reminders (variant C) partly on that pin; the pin no longer stands in its way, the rest of the ADR's reasoning does.

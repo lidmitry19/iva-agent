@@ -1,9 +1,0 @@
-{
-  "fields": {
-    "description": "однострочный старт и продолжение",
-    "note": "хвост после маркера",
-    "url": "https://example.com/a:b",
-    "count": "42"
-  },
-  "body": ""
-}

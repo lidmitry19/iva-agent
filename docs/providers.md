@@ -1,6 +1,6 @@
 # Providers & cost
 
-Iva runs on your server with your keys. Here is every external service it talks to, with real prices: one paid model subscription, one paid box — everything else fits a free tier. Total: about $9/mo.
+Iva runs on your server with your keys. Here is every external service it talks to, with real prices: one paid model subscription, one paid box — everything else fits a free tier. Total: about $9/mo. A subscription you already pay for (ChatGPT Plus/Pro, Claude Pro/Max) works too — then the model line costs nothing extra.
 
 ## Model providers
 
@@ -9,26 +9,42 @@ Iva runs on your server with your keys. Here is every external service it talks 
 | **OpenCode Go** (ex-Zen)          | ~$5/mo                       | ~23 models fetched live at setup — `deepseek-v4-pro` (default), `kimi-k3`, `kimi-k2.7-code`, `glm-5.2`, `minimax-m3`, `qwen3.7-max`, `grok-4.5`… | `qwen3.7-plus`, override with `OPENCODE_VISION_MODEL`              |
 | **Ollama Cloud**                  | ~$20/mo                      | ~19 models fetched live — `deepseek-v4-pro` (default), `kimi-k3`, `glm-5.2`, `minimax-m3`, `gpt-oss:120b`…                                       | `gemma4:31b`, override with `OLLAMA_VISION_MODEL`                  |
 | **OpenRouter**                    | pay-as-you-go                | 300+ models across vendors — pick any slug (`vendor/model`)                                                                                      | `google/gemini-2.5-flash`, override with `OPENROUTER_VISION_MODEL` |
-| **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team  | the models your plan exposes (`gpt-5.x`, `-codex`), fetched live                                                                                 | same subscription (multimodal), no variable                        |
+| **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team  | the models your plan exposes (`gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.x`), fetched live                                                 | same subscription (multimodal), no variable                        |
+| **Claude (Pro/Max subscription)** | your existing Pro/Max plan   | Fable 5.1, Opus 5.5, Sonnet 5.5 (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`), the ones the plan's picker has                     | same subscription (multimodal), no variable                        |
 | **Custom (OpenAI-compatible)**    | whatever your endpoint costs | whatever your endpoint serves — the wizard reads `GET {base}/models` when there is one, otherwise you type the id                                | the chat model itself, or a slug in `CUSTOM_VISION_MODEL`          |
 
-The first three are plain API keys, `codex` rides your personal OpenAI subscription, and `custom` is an address you supply:
+The first three are plain API keys, `codex` and `claude` ride subscriptions you already pay for, and `custom` is an address you supply:
 
 - 🔌 **OpenAI-compatible** — Go, Ollama and OpenRouter share the same wire format, so switching is one line in `.env`
 - 🌍 **Any IP** — all answer from any server location, no region blocks
 - 💸 **No markup** — you pay the provider directly; Iva adds nothing on top
 
 ```bash
-MODEL_PROVIDER=opencode   # or ollama / openrouter / codex / custom, then `iva restart`
+MODEL_PROVIDER=opencode   # or ollama / openrouter / codex / claude / custom, then `iva restart`
 ```
 
-Those five names, spelled exactly. Anything else — `ollmaa`, `OLLAMA` — stops the agent at startup with the list of accepted names, instead of running Ollama under a name nobody configured ([troubleshooting.md](troubleshooting.md)).
+Those six names, spelled exactly. Anything else — `ollmaa`, `OLLAMA` — stops the agent at startup with the list of accepted names, instead of running Ollama under a name nobody configured ([troubleshooting.md](troubleshooting.md)).
 
 OpenCode Go only serves clients that identify themselves: every request carries Iva's own `User-Agent` (`iva/<version>`) and a stable conversation id in `x-opencode-session` — the eve session id, or one id per process where there is no session (planner, vision). Without them Go answers `MissingSessionID` on every turn ([Go docs](https://opencode.ai/docs/go/#where-can-i-use-it)). Other providers get neither header.
 
 Start with Go: a quarter of the price, ~23 models to switch between (the wizard pulls the live list, so new ones like `kimi-k3` appear on their own). Keys, model pick and context-window settings live in [configuration.md](configuration.md).
 
 Two things about the live lists. Both catalogs churn — Ollama Cloud retired `gemma3:12b` on 2026-07-15 and Go dropped `gemini-3-flash`, so a hand-written model id in `.env` can start failing without you touching anything; if the bot goes quiet after weeks of silence on your side, re-run `iva config` and re-pick from the live list. And on Ollama Cloud the frontier tags (`kimi-k3` among them) bill as **extra usage** on top of the plan: with an empty extra-usage balance the API answers `402`, so top it up at [ollama.com/settings](https://ollama.com/settings) or stay on `deepseek-v4-pro`.
+
+### OpenCode Go protocols (`opencode`)
+
+Go's catalog includes models served over different endpoints. Select the wire explicitly from [Go's endpoint table](https://opencode.ai/docs/go/#endpoints), without changing provider or adding a key:
+
+```bash
+MODEL_PROVIDER=opencode
+OPENCODE_MODEL=muse-spark-1.3-contributor
+OPENCODE_PROTOCOL=responses
+iva restart
+```
+
+`chat-completions` remains the default. Responses models include Muse Spark, Grok 4.6/4.7 and GPT 5.6/6 Luna. `iva config` asks for the protocol and probes Responses with tools before saving; `/model` retains the selected protocol and validates Responses selections over that wire. Session headers, usage and night use the same factory. Thinking levels are unavailable for Go Responses until its reasoning contract is verified.
+
+Vision falls back through its own `OPENCODE_VISION_PROTOCOL` (also `chat-completions` by default); set it to `responses` for a compatible image-capable Responses model. The selected text model is tested for image understanding over its actual wire first. Go `/messages` models are unsupported, including the current documented endpoint for the old `qwen3.7-plus` vision default. Choose a compatible fallback instead; Iva reports a protocol refusal and continues without a fabricated image description. Existing installs retain their previous defaults.
 
 ### OpenAI by ChatGPT subscription (`codex`)
 
@@ -43,12 +59,25 @@ iva restart
 
 Notes: the model list is pulled from your subscription at setup time, so you always see exactly what your plan allows. Set `CODEX_CONTEXT_WINDOW` to the real window of the model you picked (compaction derives its threshold from it). Routing a self-hosted assistant through the ChatGPT subscription backend is a grey area under OpenAI's terms — you are using your own subscription on your own server, but weigh that yourself.
 
+### Claude by Pro/Max subscription (`claude`)
+
+Use the Claude subscription you already pay for — no API key, no per-token bill, nothing to paste into `.env`. Iva calls the `claude` CLI (Claude Code) installed and signed in on the same server, so the CLI's own login is what pays for the requests.
+
+```bash
+npm install -g --prefix ~/.local @anthropic-ai/claude-code   # as the service user, no root: lands in ~/.local/bin
+claude auth login      # one sign-in on the server (a link + code)
+iva config             # pick the provider (option 4) and a model from the subscription's live list
+iva restart
+```
+
+Notes: the screen offers three models — Fable 5.1, Opus 5.5 and Sonnet 5.5 — and only those the CLI picker actually has. `.env` stores the canonical id (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`), never a picker alias. `claude auth status` names the plan, and `iva doctor` prints it next to the model. Requests are billed by the CLI — they count as `claude -p` (Agent SDK) usage on your plan. `CLAUDE_CONTEXT_WINDOW` for these three is 1000000. The service's `PATH` is the node directory, then `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`; `iva doctor` looks for `claude` on that same `PATH`, not on your shell's. If the CLI lives elsewhere, point `CLAUDE_COMMAND` at the binary. `/model` → Claude checks the CLI and repeats the check after you sign in there.
+
 ### OpenRouter (`openrouter`)
 
 One key for [300+ models](https://openrouter.ai/models) (Anthropic, OpenAI, Google, DeepSeek, Meta…), billed pay-as-you-go. Too many to list, so setup takes the model **slug** from you:
 
 1. Key at [openrouter.ai/keys](https://openrouter.ai/keys) (`sk-or-…`).
-2. Copy a slug from [openrouter.ai/models](https://openrouter.ai/models) — the `vendor/model` id under the name (e.g. `anthropic/claude-sonnet-4.5`). The model must support **tool/function calling**: Iva sends tools every turn, so chat-only or image models won't work.
+2. Copy a slug from [openrouter.ai/models](https://openrouter.ai/models) — the `vendor/model` id under the name (e.g. `anthropic/claude-sonnet-5.5`). The model must support **tool/function calling**: Iva sends tools every turn, so chat-only or image models won't work.
 3. `iva config` → provider `4` → paste the key, then the slug. Setup fires a live test **with a tool call** and continues only once the model answers — a mistyped slug or a no-tools model is rejected on the spot, not later as a silent bot.
 
 Set `OPENROUTER_CONTEXT_WINDOW` to the model's real window. Vision runs through `google/gemini-2.5-flash` regardless of your text model (billed to your OpenRouter credit); `OPENROUTER_VISION_MODEL` takes any other image-capable slug.

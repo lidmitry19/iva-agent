@@ -22,16 +22,21 @@ import {
   deliverMemoryReport,
   memoryReportTail,
   memoryReportsEnabled,
+  nightReport,
   noticeLang,
   ownerKnowsTheSwitch,
   noticeTranslator,
+  recordAlert,
   rollupRanBefore,
   settleReportsOffNotice,
+  updateAlertState,
   type ReportsOffNotice,
   type Translate,
 } from "./notice-policy.ts";
+import fc from "fast-check";
 import { sendTelegramHtml } from "./telegram-send.ts";
 import { runScheduledJob } from "#lib/schedule-runner.ts";
+import { acquireFileLockSync, releaseFileLock } from "#lib/fs-atomic.ts";
 
 const EN: Translate = (english) => english;
 const RU: Translate = (_english, russian) => russian;
@@ -131,7 +136,7 @@ test("a rollup that ran here before leaves a trace that survives its own cleanup
   writeFileSync(join(data, "rollup-session-weekly.json"), "{}");
   assert.equal(rollupRanBefore(data, vault), true);
 
-  // dropHungSession снёс курсор — статус расписаний остаётся.
+  // Файл сессии живёт только пока идёт ход — статус расписаний остаётся.
   rmSync(join(data, "rollup-session-weekly.json"));
   // Бронь текущего прогона (спавнер пишет её ДО запуска) следом не считается.
   writeFileSync(
@@ -501,6 +506,19 @@ function alertState(dir: string): Record<string, unknown> {
     readFileSync(join(dir, "alert-state.json"), "utf8"),
   ) as Record<string, unknown>;
 }
+
+test("recordAlert: the one throttle writer says whether the mark was written (the Watch claim needs it)", (t) => {
+  const dir = dataDir(t);
+  const now = Date.UTC(2026, 9, 5, 12);
+  assert.equal(recordAlert(dir, "failure:backup.service", "1", now), true);
+  assert.equal(alertDue(dir, "failure:backup.service", "1", now + 1), false);
+  assert.equal(alertDue(dir, "failure:backup.service", "2", now + 1), true);
+  // Каталог данных — файл: записать некуда, отметки нет, отказ виден вызывающему.
+  const file = join(dir, "not-a-dir");
+  writeFileSync(file, "");
+  t.mock.method(console, "error", () => {});
+  assert.equal(recordAlert(file, "failure:backup.service", "1", now), false);
+});
 
 test("an alert speaks once, then keeps quiet for a week", async (t) => {
   const dir = dataDir(t);
@@ -884,6 +902,61 @@ test("the very first scheduled run is not mistaken for a run that happened befor
   assert.equal(rollupRanBefore(data, vault), true);
 });
 
+// ── Дроссель: несколько писателей ─────────────────────────────────────────────────────────
+// alert-state.json пишут тик проактивности, мост, ночь и апдейтер. Чтение-правка-запись без замка
+// теряла чужую отметку: оба читают {}, первый пишет {A}, второй {B} — A пропала, хотя оба
+// ответили «записано».
+
+test("alert state: a writer that read first does not erase what another wrote after its read (barrier after the read)", (t) => {
+  const dir = dataDir(t);
+  let inner: boolean | undefined;
+  const outer = updateAlertState(
+    dir,
+    (state) => {
+      state.a = { essence: "x", lastSentAt: 1 };
+      return true;
+    },
+    () => {
+      // Второй писатель приходит ровно между чтением и записью первого.
+      inner = recordAlert(dir, "b", "y", 2);
+    },
+  );
+  const state = JSON.parse(
+    readFileSync(join(dir, "alert-state.json"), "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(outer, true);
+  assert.ok("a" in state);
+  assert.ok(
+    !(inner === true && !("b" in state)),
+    "a writer told «recorded» must not be lost",
+  );
+});
+
+test("alert state: recordAlert and alertResolved wait for the lock and refuse while it is held", (t) => {
+  const dir = dataDir(t);
+  recordAlert(dir, "old", "e", 1);
+  const lock = acquireFileLockSync(join(dir, "alert-state.lock"));
+  assert.ok(lock);
+  try {
+    assert.equal(recordAlert(dir, "k", "e", 2), false);
+    alertResolved(dir, "old");
+  } finally {
+    releaseFileLock(lock);
+  }
+  const state = JSON.parse(
+    readFileSync(join(dir, "alert-state.json"), "utf8"),
+  ) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(state), ["old"]);
+  assert.equal(recordAlert(dir, "k", "e", 2), true);
+  alertResolved(dir, "old");
+  assert.deepEqual(
+    Object.keys(
+      JSON.parse(readFileSync(join(dir, "alert-state.json"), "utf8")) as object,
+    ),
+    ["k"],
+  );
+});
+
 // ── Дроссель без authored tree ───────────────────────────────────────────────────────────
 // Установка со сломанным agent/ — ровно та, которой алерт нужен каждую ночь; если состояние
 // дросселя писать через #lib/fs-atomic.ts, оно бы там не писалось вовсе. Модуль копируется в
@@ -950,4 +1023,108 @@ test("the weekly throttle works on an installation whose agent/ is gone", (t) =>
       .lastSentAt,
     "number",
   );
+});
+
+// Report ночи: при любых фактах 2–5 строк, провал — одна строка, дат ISO и служебного
+// текста нет. Провал печатает seed; повтор: IVA_NIGHT_REPORT_SEED=<seed>.
+const REPORT_SEED = Number(process.env.IVA_NIGHT_REPORT_SEED ?? 20_260_928);
+
+test(`nightReport: форма при любых фактах (seed ${REPORT_SEED})`, () => {
+  const date = fc
+    .date({
+      min: new Date("2020-01-01T00:00:00Z"),
+      max: new Date("2030-12-31T00:00:00Z"),
+      noInvalidDate: true,
+    })
+    .map((value) => value.toISOString().slice(0, 10));
+  const facts = fc.record({
+    days: fc.array(
+      fc.record({ date, gist: fc.constantFrom("", "Запуск Авроры", "Week") }),
+      { minLength: 1, maxLength: 6 },
+    ),
+    created: fc.nat(30),
+    updated: fc.nat(30),
+    failedDays: fc.nat(4),
+    problems: fc.boolean(),
+  });
+  fc.assert(
+    fc.property(facts, fc.constantFrom(EN, RU), (value, tr) => {
+      const lines = nightReport(tr, value).split("\n");
+      assert.ok(lines.length >= 2 && lines.length <= 5, lines.join("|"));
+      assert.equal(
+        lines.filter((line) => /\d{4}-\d{2}-\d{2}/u.test(line)).length,
+        0,
+      );
+      const failure = /Not everything|Не всё|Some small|Часть мелких/u;
+      const failures = lines.filter((line) => failure.test(line)).length;
+      assert.equal(failures, value.failedDays || value.problems ? 1 : 0);
+    }),
+    { seed: REPORT_SEED, numRuns: 300 },
+  );
+});
+
+// Выжимка дня — слова модели: переводы строк и пробелы в ней не раздувают Report. В Report она
+// одна строка, повторные пробелы схлопнуты, Report остаётся в 2–5 строках.
+test(`nightReport: выжимка дня — одна строка при любом тексте (seed ${REPORT_SEED})`, () => {
+  const piece = fc.oneof(
+    fc.string({ maxLength: 12 }),
+    fc.constantFrom(
+      "\n",
+      "\r\n",
+      "\r",
+      "  ",
+      "\t",
+      "\u2028",
+      "\u2029",
+      "\n\n\n",
+    ),
+  );
+  const gist = fc.array(piece, { maxLength: 8 }).map((parts) => parts.join(""));
+  const facts = fc.record({
+    days: fc.array(fc.record({ date: fc.constant("2026-09-26"), gist }), {
+      minLength: 1,
+      maxLength: 4,
+    }),
+    created: fc.nat(3),
+    updated: fc.nat(3),
+    failedDays: fc.nat(2),
+    problems: fc.boolean(),
+  });
+  fc.assert(
+    fc.property(facts, fc.constantFrom(EN, RU), (value, tr) => {
+      const report = nightReport(tr, value);
+      const lines = report.split("\n");
+      assert.ok(lines.length >= 2 && lines.length <= 5, lines.join("|"));
+      assert.doesNotMatch(report, /[\r\t\u2028\u2029]| {2}/u);
+      const gists = value.days
+        .slice(-2)
+        .map((day) => day.gist.replace(/\s+/gu, " ").trim())
+        .filter(Boolean);
+      for (const one of gists)
+        assert.ok(
+          lines.some((line) => line.endsWith(`: ${one}`)),
+          `${JSON.stringify(one)} в Report`,
+        );
+    }),
+    { seed: REPORT_SEED, numRuns: 300 },
+  );
+});
+
+test("nightReport: русские склонения дней", () => {
+  const facts = (n: number, failed: number) => ({
+    days: Array.from({ length: n }, () => ({ date: "2026-09-26", gist: "" })),
+    created: 0,
+    updated: 0,
+    failedDays: failed,
+    problems: false,
+  });
+  assert.match(
+    nightReport(RU, facts(1, 0)),
+    /^Ночью я разобрала 1 день памяти/u,
+  );
+  assert.match(nightReport(RU, facts(3, 0)), /разобрала 3 дня памяти/u);
+  assert.match(nightReport(RU, facts(5, 0)), /разобрала 5 дней памяти/u);
+  assert.match(nightReport(RU, facts(11, 0)), /разобрала 11 дней памяти/u);
+  assert.match(nightReport(RU, facts(1, 2)), /2 дня не разобраны/u);
+  assert.match(nightReport(EN, facts(2, 1)), /1 day was not processed/u);
 });

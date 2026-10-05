@@ -209,6 +209,28 @@ const baseTurnId = (turnId: string | undefined): string =>
 const turnKey = (entry: UsageRecord): string =>
   `${entry.sessionId}:${baseTurnId(entry.turnId)}`;
 
+// Строки вызовов мимо шага хода (agent/lib/usage-tap.ts): компактация eve и зрение. Их
+// вход — пересказываемый транскрипт или картинка, а не окно контекста сессии.
+const TAP_SOURCES: ReadonlySet<unknown> = new Set(["compaction", "vision"]);
+const isTapRow = (entry: UsageRecord): boolean => TAP_SOURCES.has(entry.source);
+
+// У строки нет хода, если часть ключа до "#" пуста: зрение идёт в канале до хода, а
+// компактация planner — вне шага (turnId "#vision"/"#compaction", sessionId ""). Такой
+// расход входит в итог окна, но ходом не считается: иначе все такие строки за жизнь лога
+// склеились бы в один ложный ход с ключом ":".
+const hasTurn = (entry: UsageRecord): boolean =>
+  baseTurnId(entry.turnId) !== "";
+
+// Последний ход — ход последнего шага модели. Строка компактации или зрения в конце лога
+// ход не открывает: компактация нового хода войдёт в него, когда дойдёт его первый шаг.
+function lastStep(entries: UsageRecord[]): UsageRecord | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (hasTurn(entry) && !isTapRow(entry)) return entry;
+  }
+  return undefined;
+}
+
 const blank = (): Accumulator => ({
   in: 0,
   out: 0,
@@ -244,7 +266,7 @@ function add(accumulator: Accumulator, entry: UsageRecord): void {
   accumulator.cacheWrite = sum(accumulator.cacheWrite, entry.cacheWrite);
   accumulator.total = sum(accumulator.total, entry.total);
   accumulator.steps += 1;
-  accumulator.turns.add(turnKey(entry));
+  if (hasTurn(entry)) accumulator.turns.add(turnKey(entry));
 }
 
 const finalize = (accumulator: Accumulator): Totals => ({
@@ -287,97 +309,137 @@ export function summarize(
   entries: UsageRecord[],
   { window = "last", now = Date.now(), tz }: LegacySummarizeOptions = {},
 ): UsageSummary | Record<string, unknown> {
-  if (window === "last") {
-    if (!entries.length) return { window, last: null };
-    const lastEntry = entries[entries.length - 1];
-    const key = turnKey(lastEntry);
-    const accumulator = blank();
-    let model = lastEntry.model;
-    const source = lastEntry.source;
-    let subagent: string | null = null;
-    const when = lastEntry.ts;
-    // Вход по шагам хода складывать нельзя: каждый шаг заново отправляет весь контекст,
-    // и сумма (104 632 + 105 537 = 210 169) выглядит как «контекст вырос вдвое». Решение
-    // «пора ли /new» принимают по актуальному размеру контекста — это вход ПОСЛЕДНЕГО
-    // шага основной сессии. Выход суммируется честно: эти токены сгенерированы все.
-    //
-    // Инвариант ключа (agent/hooks/usage.ts): запись субагента несёт turnId вида
-    // "<ход родителя>#<субагент>". Поэтому ход собирается по части до "#" (расход субагента
-    // входит в итог хода), а контекст берётся из записи БЕЗ суффикса — это шаг основной
-    // сессии. Поле subagent проверяем заодно, но лечит оно не всё: довинвариантная запись
-    // субагента несла turnId ребёнка, и если ИМЕННО она оказалась последней, ход определится
-    // по её номеру — то есть, возможно, по давнему одноимённому ходу родителя. Поле спасает
-    // только когда шаг основной сессии попал в ту же группу. В проде таких записей нет.
-    //
-    // Оговорка про кэш: у провайдеров с anthropic-семантикой cacheRead не входит в inputTokens,
-    // и тогда context занижен на величину cacheRead. Оба живых провайдера ивы включают кэш в in,
-    // надёжно отличить одну семантику от другой по логу нельзя — не усложняем.
-    let mainContext: number | undefined;
-    let anyContext: number | undefined;
-    for (const entry of entries) {
-      if (turnKey(entry) !== key) continue;
-      add(accumulator, entry);
-      model = entry.model;
-      anyContext = entry.in || 0;
-      if (entry.subagent || String(entry.turnId ?? "").includes("#"))
-        subagent = entry.subagent ?? subagent;
-      else mainContext = entry.in || 0;
-    }
-    // Ход целиком из субагентских записей (шаг основной сессии не дошёл до лога) — показываем
-    // что есть, но помечаем: это не размер контекста основной сессии.
-    const context = mainContext ?? anyContext ?? 0;
-    return {
-      window,
-      last: {
-        ...finalize(accumulator),
-        in: context,
-        contextFromSubagent:
-          mainContext === undefined && anyContext !== undefined,
-        model,
-        source,
-        subagent,
-        when,
-      },
-    };
+  if (window === "last") return summarizeLast(entries);
+  if (window === "by-model" || window === "by-source")
+    return summarizeLifetime(entries, window, tz);
+  return summarizeWindow(entries, window, now, tz);
+}
+
+interface TurnRows {
+  readonly accumulator: Accumulator;
+  readonly model: string;
+  readonly subagent: string | null;
+  readonly mainContext: number | undefined;
+  readonly anyContext: number | undefined;
+}
+
+// Вход по шагам хода складывать нельзя: каждый шаг заново отправляет весь контекст,
+// и сумма (104 632 + 105 537 = 210 169) выглядит как «контекст вырос вдвое». Решение
+// «пора ли /new» принимают по актуальному размеру контекста — это вход ПОСЛЕДНЕГО
+// шага основной сессии. Выход суммируется честно: эти токены сгенерированы все.
+//
+// Инвариант ключа (agent/hooks/usage.ts): запись субагента несёт turnId вида
+// "<ход родителя>#<субагент>". Поэтому ход собирается по части до "#" (расход субагента
+// входит в итог хода), а контекст берётся из записи БЕЗ суффикса — это шаг основной
+// сессии. Поле subagent проверяем заодно, но лечит оно не всё: довинвариантная запись
+// субагента несла turnId ребёнка, и если ИМЕННО она оказалась последней, ход определится
+// по её номеру — то есть, возможно, по давнему одноимённому ходу родителя. Поле спасает
+// только когда шаг основной сессии попал в ту же группу. В проде таких записей нет.
+// Строка компактации того же хода входит в итог, но контекстом не бывает никогда.
+//
+// Оговорка про кэш: у провайдеров с anthropic-семантикой cacheRead не входит в inputTokens,
+// и тогда context занижен на величину cacheRead. Оба живых провайдера ивы включают кэш в in,
+// надёжно отличить одну семантику от другой по логу нельзя — не усложняем.
+function collectTurn(
+  entries: UsageRecord[],
+  key: string,
+  model: string,
+): TurnRows {
+  const turn = {
+    accumulator: blank(),
+    model,
+    subagent: null as string | null,
+    mainContext: undefined as number | undefined,
+    anyContext: undefined as number | undefined,
+  };
+  for (const entry of entries) {
+    if (turnKey(entry) !== key) continue;
+    add(turn.accumulator, entry);
+    if (isTapRow(entry)) continue;
+    turn.model = entry.model;
+    turn.anyContext = entry.in || 0;
+    if (entry.subagent || String(entry.turnId ?? "").includes("#"))
+      turn.subagent = entry.subagent ?? turn.subagent;
+    else turn.mainContext = entry.in || 0;
   }
-  if (window === "by-model" || window === "by-source") {
-    const keyOf =
-      window === "by-model"
-        ? (entry: UsageRecord): string => entry.model || "?"
-        : (entry: UsageRecord): string => entry.source || "?";
-    const groups = new Map<string, Accumulator>();
-    const total = blank();
-    for (const entry of entries) {
-      const key = keyOf(entry);
-      if (!groups.has(key)) groups.set(key, blank());
-      const group = groups.get(key);
-      if (group) add(group, entry);
-      add(total, entry);
-    }
-    // Записи ложатся в лог по времени, так что первая разбираемая ts — самая старая.
-    const oldest = entries.find((entry) => !Number.isNaN(Date.parse(entry.ts)));
-    return {
-      window,
-      rows: rowsOf(groups),
-      totals: finalize(total),
-      since: oldest ? localDate(oldest.ts, tz) : null,
-    };
+  return turn;
+}
+
+function summarizeLast(entries: UsageRecord[]): LastSummary {
+  const lastEntry = lastStep(entries);
+  if (!lastEntry) return { window: "last", last: null };
+  const turn = collectTurn(entries, turnKey(lastEntry), lastEntry.model);
+  const { mainContext, anyContext } = turn;
+  // Ход целиком из субагентских записей (шаг основной сессии не дошёл до лога) — показываем
+  // что есть, но помечаем: это не размер контекста основной сессии.
+  return {
+    window: "last",
+    last: {
+      ...finalize(turn.accumulator),
+      in: mainContext ?? anyContext ?? 0,
+      contextFromSubagent:
+        mainContext === undefined && anyContext !== undefined,
+      model: turn.model,
+      source: lastEntry.source,
+      subagent: turn.subagent,
+      when: lastEntry.ts,
+    },
+  };
+}
+
+function summarizeLifetime(
+  entries: UsageRecord[],
+  window: "by-model" | "by-source",
+  tz: string | undefined,
+): ByModelSummary | BySourceSummary {
+  const keyOf =
+    window === "by-model"
+      ? (entry: UsageRecord): string => entry.model || "?"
+      : (entry: UsageRecord): string => entry.source || "?";
+  const groups = new Map<string, Accumulator>();
+  const total = blank();
+  for (const entry of entries) {
+    const key = keyOf(entry);
+    if (!groups.has(key)) groups.set(key, blank());
+    const group = groups.get(key);
+    if (group) add(group, entry);
+    add(total, entry);
   }
-  // today / week / month — итог + разбивка по источникам и моделям
+  // Записи ложатся в лог по времени, так что первая разбираемая ts — самая старая.
+  const oldest = entries.find((entry) => !Number.isNaN(Date.parse(entry.ts)));
+  return {
+    window,
+    rows: rowsOf(groups),
+    totals: finalize(total),
+    since: oldest ? localDate(oldest.ts, tz) : null,
+  };
+}
+
+function addTo(
+  groups: Map<string, Accumulator>,
+  key: string,
+  entry: UsageRecord,
+): void {
+  const group = groups.get(key) ?? blank();
+  groups.set(key, group);
+  add(group, entry);
+}
+
+// today / week / month — итог + разбивка по источникам и моделям
+function summarizeWindow(
+  entries: UsageRecord[],
+  window: string,
+  now: number,
+  tz: string | undefined,
+): WindowSummary {
   const matching = entries.filter((entry) => inWindow(entry, window, now, tz));
   const total = blank();
   const bySource = new Map<string, Accumulator>();
   const byModel = new Map<string, Accumulator>();
   for (const entry of matching) {
     add(total, entry);
-    const source = entry.source || "?";
-    if (!bySource.has(source)) bySource.set(source, blank());
-    const sourceGroup = bySource.get(source);
-    if (sourceGroup) add(sourceGroup, entry);
-    const model = entry.model || "?";
-    if (!byModel.has(model)) byModel.set(model, blank());
-    const modelGroup = byModel.get(model);
-    if (modelGroup) add(modelGroup, entry);
+    addTo(bySource, entry.source || "?", entry);
+    addTo(byModel, entry.model || "?", entry);
   }
   // Лог не достаёт до начала окна — значит всё, что было раньше, подрезано, и отчёт
   // обязан назвать дату, с которой посчитал. Сравниваем ДАТЫ, а не мгновения: отчёт
@@ -391,7 +453,7 @@ export function summarize(
         : `${localDate(now, tz).slice(0, 7)}-01`;
   const oldestDate = oldest ? localDate(oldest.ts, tz) : null;
   return {
-    window,
+    window: window as AggregateWindow,
     totals: finalize(total),
     bySource: rowsOf(bySource),
     byModel: rowsOf(byModel),

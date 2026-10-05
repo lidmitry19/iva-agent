@@ -131,6 +131,9 @@ export function createConfigCommand(
           nextText,
           selection: {
             provider,
+            ...(provider === "opencode"
+              ? { opencodeProtocol: nextEnv.OPENCODE_PROTOCOL }
+              : {}),
             model: nextEnv[selected[0]],
             key: selected[1] ? nextEnv[selected[1]] : undefined,
             dataDir: dataDirAbs(nextEnv),

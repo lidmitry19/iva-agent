@@ -349,3 +349,87 @@ test("data dir defaults to <cwd>/data for a relative ASSISTANT_DATA_DIR", () => 
     { language: "en" },
   );
 });
+
+test("updateSettings: two processes changing one nested object lose no update", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "iva-settings-update-race-"));
+  const gate = join(dataDir, "go");
+  const updatesPerProcess = 40;
+  const source = [
+    "const { existsSync } = await import('node:fs');",
+    "const { updateSettings } = await import(process.env.SETTINGS_URL);",
+    'process.stdout.write("ready\\n");',
+    "while (!existsSync(process.env.GATE))",
+    "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);",
+    "for (let i = 0; i < Number(process.env.UPDATES); i++)",
+    "  updateSettings((s) => ({ ...s, proactive: { ...s.proactive, n: (s.proactive?.n ?? 0) + 1 } }));",
+  ].join("\n");
+  const children = ["a", "b"].map(() => {
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", source],
+      {
+        env: {
+          ...process.env,
+          ASSISTANT_DATA_DIR: dataDir,
+          SETTINGS_URL,
+          GATE: gate,
+          UPDATES: String(updatesPerProcess),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    assert.ok(child.stdout);
+    return child;
+  });
+  try {
+    writeFileSync(
+      join(dataDir, "settings.json"),
+      JSON.stringify({ language: "ru", proactive: { staleMinutes: 30 } }),
+    );
+    await Promise.all(children.map((child) => once(child.stdout, "data")));
+    writeFileSync(gate, "go");
+    const exits = await Promise.all(
+      children.map((child) => once(child, "exit") as Promise<[number | null]>),
+    );
+    assert.deepEqual(
+      exits.map(([code]) => code),
+      [0, 0],
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(dataDir, "settings.json"), "utf8")),
+      {
+        language: "ru",
+        proactive: { staleMinutes: 30, n: updatesPerProcess * 2 },
+      },
+    );
+  } finally {
+    for (const child of children) child.kill("SIGKILL");
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("updateSettings on an explicit path refuses corrupt bytes and keeps them", async () => {
+  const { updateSettings } = await import("./settings.ts");
+  const dir = mkdtempSync(join(tmpdir(), "iva-settings-path-"));
+  try {
+    const file = join(dir, "settings.json");
+    writeFileSync(file, "[1,2]");
+    assert.throws(
+      () => updateSettings((s) => ({ ...s, a: 1 }), file),
+      (error: unknown) =>
+        (error as { code?: unknown }).code === "ESETTINGS_WRITE_REFUSED",
+    );
+    assert.equal(readFileSync(file, "utf8"), "[1,2]");
+    writeFileSync(file, '{"keep":true}');
+    assert.deepEqual(
+      updateSettings((s) => ({ ...s, a: 1 }), file),
+      { keep: true, a: 1 },
+    );
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
+      keep: true,
+      a: 1,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

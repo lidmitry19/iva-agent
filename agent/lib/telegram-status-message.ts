@@ -1,9 +1,8 @@
 // Статус-сообщение хода: «Работаю…» с кнопкой [⏹ Стоп] и его уборка в терминале.
 // Это UI самого канала, не текст модели, поэтому мимо Outbox.
 //
-// Статус — rich message (sendRichMessage, Bot API 10.3): кнопка <tg-button> стоит
-// прямо в строке текста рядом с «Работаю…», а не клавиатурой под сообщением, поэтому
-// и текст, и кнопку несёт одна markdown-строка и правит их один editMessageText.
+// Статус — rich message (sendRichMessage): лоадер и кнопка <tg-button>
+// стоят в одной строке текста. Стиль меню на статус не влияет.
 //
 // turn.started шлёт статус и пишет running+sessionId+turnId в run-status.
 // Нажатие кнопки (и /stop) ловит Bridge: он берёт sessionId и зовёт cancel-роут
@@ -12,7 +11,6 @@
 //
 // Про eve модуль не знает: канал передаёт хендл Bot API структурно.
 import { tr } from "./i18n.ts";
-import { readSettings } from "./settings.ts";
 import { chatKeyOf, getChatStatus, setChatStatusIf } from "./run-status.ts";
 import { isPrivateTelegramChatHandle } from "./telegram-private-chat.ts";
 
@@ -32,7 +30,9 @@ export type TelegramStatusHandle = {
 
 // Функция, а не const: перевод выбирается в момент вызова (правило репо — module-level
 // const не должна захватывать tr(), иначе язык замерзает до рестарта).
-function stoppedText(): string {
+// Экспорт нужен мосту: сообщение «ход не остановился» переписывается тем же текстом, когда
+// подтверждение всё-таки приходит.
+export function stoppedText(): string {
   return tr(
     "⏹ Stopped. I'll hold new messages and handle them together with the next one.",
     "⏹ Остановлено. Новые сообщения накоплю и обработаю вместе со следующим.",
@@ -48,28 +48,22 @@ const WORK_LOADER = {
   customEmojiId: "5818797194127346654",
   fallback: "⏳",
 };
+const FALLBACK_STATUS_SUFFIX = " …";
 let workLoaderSupported = true;
 // Рич-путь целиком: старый Bot API не знает sendRichMessage. Один отказ — и статус
 // уходит обычным текстом, как до rich; повторять отказ на каждом ходу незачем.
 let richStatusSupported = true;
 
-// Строка статуса. Кнопка — inline-элемент rich-разметки, поэтому её место в этой же
-// строке; loader падает на ⏳, когда Telegram отверг custom emoji.
+// Строка статуса. Лоадер падает на ⏳, когда Telegram отверг custom emoji.
 function workingMarkdown({
-  animated = workLoaderSupported,
   withStop = true,
-}: {
-  animated?: boolean;
-  withStop?: boolean;
-} = {}): string {
-  const loader = animated
+}: { withStop?: boolean } = {}): string {
+  const loader = workLoaderSupported
     ? `<tg-emoji emoji-id="${WORK_LOADER.customEmojiId}">${WORK_LOADER.alt}</tg-emoji>`
     : WORK_LOADER.fallback;
-  const line = `${loader} ${tr("Working", "Работаю")}`;
-  // Кнопка рядом-блоком, не в строке: inline-кнопки Android-клиент рисует криво (13.09.2026).
   return withStop
-    ? `${line}\n<tg-button-row><tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">${tr("⏹ Stop", "⏹ Стоп")}</tg-button></tg-button-row>`
-    : line;
+    ? `${loader} <tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">⏹</tg-button>`
+    : loader;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -84,72 +78,23 @@ function messageIdFromResponse(response: { body: unknown }): number | null {
   return typeof result?.message_id === "number" ? result.message_id : null;
 }
 
+/** Builds the shared Telegram request body for a quiet temporary status message. */
 function statusBody(tg: TelegramStatusHandle): Record<string, unknown> {
   return {
     chat_id: tg.chatId,
+    disable_notification: true,
     ...(tg.messageThreadId !== undefined
       ? { message_thread_id: tg.messageThreadId }
       : {}),
   };
 }
 
-// Кнопку показываем только там, где она сработает: её колбэк принимают лишь в личке
-// (scripts/poller/control.ts, ./telegram-stop.ts). В группе мёртвый контрол хуже
-// отсутствующего, поэтому кнопка в текст не попадает вовсе. Текстовая /stop в группе
-// работает по-прежнему — она через этот путь не ходит.
-// Стиль меню владельца (settings.json menuStyle): classic = обычный текст с клавиатурой
-// под ним, rich = кнопка в rich message. Читается на каждую отправку.
-const classicMenu = () => readSettings().menuStyle !== "rich";
-
-const stopKeyboard = () => ({
-  inline_keyboard: [
-    [
-      {
-        text: tr("⏹ Stop", "⏹ Стоп"),
-        callback_data: TELEGRAM_STOP_CALLBACK,
-        style: "danger",
-      },
-    ],
-  ],
-});
-
-async function sendClassicWorkingStatus(
-  tg: TelegramStatusHandle,
-  withStop: boolean,
-): Promise<number | null> {
-  const base = {
-    ...statusBody(tg),
-    ...(withStop ? { reply_markup: stopKeyboard() } : {}),
-  };
-  if (workLoaderSupported) {
-    const res = await tg.request("sendMessage", {
-      ...base,
-      text: `${WORK_LOADER.alt} ${tr("Working", "Работаю")}`,
-      entities: [
-        {
-          type: "custom_emoji",
-          offset: 0,
-          length: WORK_LOADER.alt.length,
-          custom_emoji_id: WORK_LOADER.customEmojiId,
-        },
-      ],
-    });
-    if (res.ok) return messageIdFromResponse(res);
-    workLoaderSupported = false;
-  }
-  const res = await tg.request("sendMessage", {
-    ...base,
-    text: `${WORK_LOADER.fallback} ${tr("Working", "Работаю")}`,
-  });
-  return res.ok ? messageIdFromResponse(res) : null;
-}
-
 export async function sendWorkingStatus(
   tg: TelegramStatusHandle,
   { canStop = true } = {},
 ): Promise<number | null> {
+  // Кнопку показываем только в личке, где Bridge примет её callback.
   const withStop = canStop && isPrivateTelegramChatHandle(tg);
-  if (classicMenu()) return sendClassicWorkingStatus(tg, withStop);
   const base = statusBody(tg);
   if (richStatusSupported) {
     const res = await tg.request("sendRichMessage", {
@@ -176,27 +121,18 @@ export async function sendWorkingStatus(
   // но «Работаю…» в чате есть.
   const fallback = await tg.request("sendMessage", {
     ...base,
-    text: workingMarkdown({ animated: false, withStop: false }),
+    text: WORK_LOADER.fallback + FALLBACK_STATUS_SUFFIX,
   });
   return fallback.ok ? messageIdFromResponse(fallback) : null;
 }
 
 // Ранний статус уходит без кнопки: ход ещё не начался, отменять нечего. Начался — кнопку
-// дорисовываем в то же сообщение и по тому же правилу личного чата: кнопка это часть
-// текста, поэтому переписывается весь текст, а не клавиатура под ним.
+// дорисовываем в то же сообщение и по тому же правилу личного чата.
 export async function enableWorkingStatusStop(
   tg: TelegramStatusHandle,
   messageId: number,
 ): Promise<void> {
   if (!isPrivateTelegramChatHandle(tg)) return;
-  if (classicMenu()) {
-    await tg.request("editMessageReplyMarkup", {
-      chat_id: tg.chatId,
-      message_id: messageId,
-      reply_markup: stopKeyboard(),
-    });
-    return;
-  }
   if (!richStatusSupported) return;
   await tg.request("editMessageText", {
     chat_id: tg.chatId,
@@ -226,6 +162,7 @@ export async function finishTelegramStatus(
       status: "idle",
       sessionId: null,
       turnId: null,
+      compacting: null,
       statusMessageId: null,
       ingressId: null,
       ingressAt: null,

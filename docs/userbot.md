@@ -58,6 +58,13 @@ proxy's `/healthz` route, which reads authorization from the proxy's one live
 Telethon client and never opens another session. Diagnostics expose only fixed
 state/reason values; bearer tokens and transport errors are not returned.
 
+For tool parameter errors, Iva's [userbot skill](../agent/skills/telegram-userbot/SKILL.md)
+instructs it to omit unused optional fields, use actual account labels from `list_accounts`
+when a label is needed, and pass JSON booleans rather than strings. It repairs the named
+field instead of repeating the same failing call. A generic `GEN-ERR-328` response does
+not identify the cause; account discovery and health diagnostics help narrow it down,
+but the skill cannot restore error details hidden by the upstream Telegram MCP server.
+
 ## Safety knobs
 
 - `TELEGRAM_EXPOSED_TOOLS=read-only` in `.env` — the agent can read/search but physically

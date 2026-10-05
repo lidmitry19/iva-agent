@@ -7,14 +7,11 @@ import test, { type TestContext } from "node:test";
 
 const MODULE_URL = new URL("./schedule-paths.ts", import.meta.url).href;
 const PROBE_PROGRAM = `
-  const { resolvePaths, memoryRollupJob } =
+  const { resolvePaths, memoryNightJob } =
     await import(process.env.SCHEDULE_PATHS_URL);
-  const period = process.env.SCHEDULE_PATHS_PERIOD;
-  const result = period ? memoryRollupJob(period) : resolvePaths();
+  const result = process.env.SCHEDULE_PATHS_JOB === "night" ? memoryNightJob() : resolvePaths();
   process.stdout.write(JSON.stringify(result));
 `;
-
-type MemoryPeriod = "daily" | "weekly" | "monthly" | "yearly";
 
 function temporaryDirectory(t: TestContext): string {
   const directory = realpathSync(
@@ -27,19 +24,19 @@ function temporaryDirectory(t: TestContext): string {
 function probe(options: {
   readonly cwd: string;
   readonly dataDir?: string;
-  readonly period?: MemoryPeriod;
+  readonly job?: "night";
 }): unknown {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     SCHEDULE_PATHS_URL: MODULE_URL,
   };
   delete env.ASSISTANT_DATA_DIR;
-  delete env.SCHEDULE_PATHS_PERIOD;
+  delete env.SCHEDULE_PATHS_JOB;
   if (options.dataDir !== undefined) {
     env.ASSISTANT_DATA_DIR = options.dataDir;
   }
-  if (options.period !== undefined) {
-    env.SCHEDULE_PATHS_PERIOD = options.period;
+  if (options.job !== undefined) {
+    env.SCHEDULE_PATHS_JOB = options.job;
   }
 
   const stdout = execFileSync(
@@ -87,24 +84,20 @@ await test("resolvePaths preserves an absolute data directory without moving the
   });
 });
 
-await test("memoryRollupJob returns the exact command contract for every period", (t) => {
+await test("memoryNightJob returns the exact command contract", (t) => {
   const root = temporaryDirectory(t);
-  const periods: readonly MemoryPeriod[] = [
-    "daily",
-    "weekly",
-    "monthly",
-    "yearly",
-  ];
-
-  for (const period of periods) {
-    assert.deepEqual(probe({ cwd: root, dataDir: "schedule-data", period }), {
-      name: `memory-${period}`,
-      argv: ["scripts/memory/rollup.ts", period],
+  assert.deepEqual(
+    probe({ cwd: root, dataDir: "schedule-data", job: "night" }),
+    {
+      name: "memory-night",
+      argv: ["scripts/memory/night.ts"],
       root,
       nodeBin: process.execPath,
       lockPath: join(root, ".memory.lock"),
       statusPath: join(root, "schedule-data", "rollup-status.json"),
       factsPath: join(root, "schedule-data", "jobs.json"),
-    });
-  }
+      killGraceMs: 90_000,
+      wake: false,
+    },
+  );
 });

@@ -26,6 +26,7 @@ import {
   rmSync,
   rmdirSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { mkdir, open, realpath, rename, rm, stat } from "node:fs/promises";
@@ -69,7 +70,11 @@ export type FileLock = {
 export type FileLockOptions = {
   /** Сколько ждать освобождения, прежде чем сдаться. */
   timeoutMs?: number;
-  /** Возраст лока, после которого он считается брошенным упавшим процессом. */
+  /**
+   * Возраст лока, после которого он считается брошенным упавшим процессом. Один путь —
+   * один staleMs: период сердцебиения держателя берётся из его staleMs, протухание —
+   * из staleMs претендента.
+   */
   staleMs?: number;
   /** Пауза между попытками захвата. */
   retryMs?: number;
@@ -755,7 +760,9 @@ const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
 /**
  * Захват лока без освобождения event loop. Возвращает держателя или null, если
  * таймаут истёк: что значит «не досталось» — ошибка или работа без лока — решает
- * вызывающий, у которого есть слова для своего пользователя.
+ * вызывающий, у которого есть слова для своего пользователя. Сердцебиения нет:
+ * секция под этим локом синхронная и обязана быть много короче staleMs, иначе лок
+ * живого держателя сочтут брошенным и заберут (specs/FileLock-sync-slow.cfg).
  */
 export function acquireFileLockSync(
   path: string,
@@ -766,6 +773,7 @@ export function acquireFileLockSync(
     mode,
   }: FileLockOptions = {},
 ): FileLock | null {
+  checkStaleMs(path, staleMs);
   // Свежая установка: каталога данных может ещё не быть — лок не должен падать ENOENT.
   const parent = dirname(path);
   const firstCreated = mkdirSync(parent, { recursive: true });
@@ -781,7 +789,13 @@ export function acquireFileLockSync(
   }
 }
 
-/** То же, что acquireFileLockSync, но ждёт, отпуская event loop. */
+/**
+ * То же, что acquireFileLockSync, но ждёт, отпуская event loop, и держатель бьётся:
+ * раз в staleMs/3 обновляет mtime каталога лока. Контракт: секция под локом конечна и
+ * много короче LOCK_MAX_HOLD_MS; сердцебиение держит лок, пока event loop держателя
+ * свободен хотя бы раз в 2/3 staleMs (между двумя срабатываниями таймера). Остановленный
+ * процесс (SIGSTOP, сон VM, долгий GC) могут обокрасть, как и раньше.
+ */
 export async function acquireFileLock(
   path: string,
   {
@@ -791,24 +805,78 @@ export async function acquireFileLock(
     mode,
   }: FileLockOptions = {},
 ): Promise<FileLock | null> {
+  checkStaleMs(path, staleMs);
   const parent = dirname(path);
   const firstCreated = await mkdir(parent, { recursive: true });
   await syncCreatedDirectories(parent, firstCreated);
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const attempt = attemptLock(path, staleMs, mode);
-    if (typeof attempt !== "string") return attempt;
+    if (typeof attempt !== "string") return startHeartbeat(attempt, staleMs);
     if (Date.now() > deadline) return null;
     if (attempt === "busy")
       await new Promise((resolve) => setTimeout(resolve, retryMs));
   }
 }
 
+/** Предохранитель: после стольких мс удержания сердцебиение гаснет, лок протухает. */
+export const LOCK_MAX_HOLD_MS = 600_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
+const heartbeats = new Map<string, () => void>();
+
+function checkStaleMs(path: string, staleMs: number): void {
+  // staleMs ≤ 0 делал любой лок брошенным сразу (два писателя), < 3 — период 1 мс.
+  if (!Number.isFinite(staleMs) || staleMs <= 0)
+    throw new TypeError(
+      `file lock ${path}: staleMs ${staleMs} is not positive`,
+    );
+}
+
+function startHeartbeat(lock: FileLock, staleMs: number): FileLock {
+  // Не чаще 100 мс: staleMs в единицы мс — тестовый, горячий цикл ему не положен.
+  const period = Math.min(Math.max(staleMs / 3, 100), MAX_TIMER_MS);
+  const say = (what: string) =>
+    process.stderr.write(`file lock ${lock.path}: heartbeat ${what}\n`);
+  let warned = false;
+  const stop = () => {
+    clearInterval(beat);
+    clearTimeout(fuse);
+    heartbeats.delete(lock.token);
+  };
+  const beat = setInterval(() => {
+    try {
+      lstatSync(lockOwnerPath(lock.path, lock.token));
+      // Между lstat и utimes каталог могут сменить: касание преемника безвредно.
+      utimesSync(lock.path, new Date(), new Date());
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? String(error);
+      if (code === "ENOENT" || code === "ENOTDIR") return stop();
+      // Прочие ошибки (EACCES, EIO…) — попытка на следующем тике, одна строка stderr.
+      // Постоянный отказ защиту не сохраняет: каталог стареет, через staleMs его заберут.
+      if (!warned) say(`${code}, still running`);
+      warned = true;
+    }
+  }, period);
+  // Предохранитель — свой таймер: срабатывает и при периоде дольше предела.
+  const fuse = setTimeout(() => {
+    stop();
+    say(`off: held longer than ${LOCK_MAX_HOLD_MS} ms, the lock will expire`);
+  }, LOCK_MAX_HOLD_MS);
+  beat.unref();
+  fuse.unref();
+  heartbeats.set(lock.token, stop);
+  return lock;
+}
+
 /**
  * Снятие лока. Owner-entry содержит токен владельца, а rmdir сработает только для
- * пустого каталога. Поэтому поздний release не может удалить преемника.
+ * пустого каталога. Поэтому поздний release не удалит owner-entry преемника и его
+ * каталог с owner-entry. Пустой каталог претендента, ещё не записавшего owner-entry,
+ * путевой rmdir снести может: претендент это видит и повторяет попытку (контракт 3
+ * в specs/FileLock.tla).
  */
 export function releaseFileLock({ path, token }: FileLock): void {
+  heartbeats.get(token)?.();
   try {
     removeOwnedLockName(path, token);
     removeEmptyLockDirectory(path);

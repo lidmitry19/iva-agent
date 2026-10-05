@@ -1,3 +1,4 @@
+import { resolveOpenCodeProtocol } from "@iva/opencode-protocol";
 // Единственный резолвер MODEL_PROVIDER: имя провайдера, текстовая модель, vision-модель
 // (её зовёт agent/vision.ts на картинке) и поддержка OpenAI-совместимого reasoning_effort
 // решаются РАЗ и одинаково для рантайма (agent/provider.ts) и учёта расхода
@@ -17,16 +18,19 @@
 // могут — их сверяет scripts/lib/model-catalog.test.ts. Зеркало несёт ОБЕ модели
 // провайдера: и текстовую, и vision.
 //
-// Зависимостей у модуля нет намеренно: он читает env и больше ничего.
+// Модуль читает env; пределы имён берёт из общих констант проводного формата.
+import { CLAUDE_TOOL_NAME_MAX } from "./claude-cli.ts";
+import { TOOL_NAME_MAX } from "./tool-wire-name.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-// Порядок — тот же, что у кнопок мастера (scripts/setup/main.ts: 1-4) и ключей CATALOG,
+// Порядок — тот же, что у кнопок мастера (scripts/setup/wizard.ts: 1-4) и ключей CATALOG,
 // поэтому список в ошибке читается как список в интерфейсе.
 export const MODEL_PROVIDER_NAMES = [
   "ollama",
   "opencode",
   "codex",
+  "claude",
   "openrouter",
   "custom",
 ] as const;
@@ -56,6 +60,10 @@ export const MODEL_PROVIDERS = {
     modelVar: "OLLAMA_MODEL",
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
+    // Рассуждение прошлых шагов обратно не шлём, как и у остальных OpenAI-совместимых:
+    // вернулось бы полем reasoning_content, а принимает ли его бэкенд, живьём не доказано.
+    replaysReasoning: false,
+    toolNameMax: TOOL_NAME_MAX,
     // Дешёвая мультимодалка того же провайдера (проверено на проде: принимает image_url,
     // http 200). Ollama Cloud снимает теги с раздачи: gemma3:12b отвечает
     // 410 "retired at 2026-07-15" — заменён на gemma4:31b (проверено 2026-07-28).
@@ -68,6 +76,8 @@ export const MODEL_PROVIDERS = {
     modelVar: "OPENCODE_MODEL",
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
+    replaysReasoning: false,
+    toolNameMax: TOOL_NAME_MAX,
     // Живая проверка 2026-08-18, картинка через POST /chat/completions: qwen3.7-plus
     // отвечает 200 и кладёт в message.content чистое описание с OCR (4-6 с) — он и дефолт.
     // minimax-m3 картинку тоже видит, но течёт <think>…</think> прямо в content, а vision.ts
@@ -82,18 +92,40 @@ export const MODEL_PROVIDERS = {
     modelVar: "CODEX_MODEL",
     defaultModel: "gpt-5.5",
     compatibleReasoning: false,
+    // Бэкенд подписки принимает рассуждение прошлых шагов обратно (reasoning-item с
+    // encrypted_content, store:false): живой многошаговый ход gpt-6-sol 23.09.2026.
+    replaysReasoning: true,
+    toolNameMax: TOOL_NAME_MAX,
     // gpt-5* мультимодальны — картинки идут через ту же подписку (agent/vision.ts гонит их
     // по Responses API), поэтому отдельной переменной нет вовсе: vision-модель подписки —
     // это и есть выбранная текстовая.
     visionModelVar: null,
     defaultVisionModel: null,
   },
+  claude: {
+    // Ключа нет: модель — установленный и залогиненный Claude Code CLI на той же машине
+    // (agent/lib/claude-cli.ts). Имя модели — то, которое вернул живой список аккаунта
+    // (scripts/lib/model-catalog.ts просит его рукопожатием CLI), поэтому здесь кандидаты, а
+    // не единственно верное имя: fable, opus, sonnet — 1M контекста, haiku — 200k.
+    modelVar: "CLAUDE_MODEL",
+    defaultModel: "claude-fable-5-1",
+    compatibleReasoning: false,
+    // Подписка отвергает рассуждение без подписи, а сборка промпта CLI его и так пропускает.
+    replaysReasoning: false,
+    toolNameMax: CLAUDE_TOOL_NAME_MAX,
+    // Подписка мультимодальна — как у codex, отдельной vision-модели нет: картинку смотрит
+    // та же модель, что ведёт ход (agent/vision.ts гонит её через тот же CLI).
+    visionModelVar: null,
+    defaultVisionModel: null,
+  },
   openrouter: {
-    // Слаг модели вида vendor/model (напр. anthropic/claude-sonnet-4.5) — задаётся мастером.
+    // Слаг модели вида vendor/model (напр. anthropic/claude-sonnet-5.5) — задаётся мастером.
     // Дефолт — лишь заглушка на случай ручного .env; мастер всегда перезапишет живой проверкой.
     modelVar: "OPENROUTER_MODEL",
     defaultModel: "openai/gpt-5.1",
     compatibleReasoning: false,
+    replaysReasoning: false,
+    toolNameMax: TOOL_NAME_MAX,
     // Дешёвая гарантированно-мультимодальная модель для картинок: vision работает независимо
     // от выбранной текстовой (та может быть text-only). Сюда вписывается любой слаг
     // OpenRouter с поддержкой картинок. Переопределяется OPENROUTER_VISION_MODEL.
@@ -110,6 +142,8 @@ export const MODEL_PROVIDERS = {
     // reasoning_effort незнакомому эндпоинту не шлём: OpenAI-совместимость этого поля не
     // обещает, а лишний параметр — HTTP 400 на каждом ходу.
     compatibleReasoning: false,
+    replaysReasoning: false,
+    toolNameMax: TOOL_NAME_MAX,
     // Vision-модель необязательна: с 0.3.34 картинку сначала предлагают самой модели чата
     // (ADR-0012). Пусто — дефолта нет, и картинку смотрит выбранная текстовая модель.
     visionModelVar: "CUSTOM_VISION_MODEL",
@@ -122,6 +156,11 @@ export const MODEL_PROVIDERS = {
     // null = обязательная переменная: у провайдера нет модели, которую можно подставить молча.
     defaultModel: string | null;
     compatibleReasoning: boolean;
+    // Рассуждение прошлых шагов возвращается модели в истории хода. false — вырезается и из
+    // вывода, и из промпта: вендор его не принимает или это не доказано живьём.
+    replaysReasoning: boolean;
+    // Максимальная длина имени до обращения к провайдеру; у claude зарезервирован префикс.
+    toolNameMax: number;
     visionModelVar: string | null;
     defaultVisionModel: string | null;
   }
@@ -219,6 +258,9 @@ export function resolveModelProvider(
       visionModelVar === null ? undefined : env[visionModelVar],
       model,
     ),
-    compatibleReasoning,
+    compatibleReasoning:
+      compatibleReasoning &&
+      (name !== "opencode" ||
+        resolveOpenCodeProtocol(env.OPENCODE_PROTOCOL) === "chat-completions"),
   };
 }

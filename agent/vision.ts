@@ -4,8 +4,16 @@ import {
   providerName,
   providerRequestHeaders,
   makeCodexModel,
+  makeOpenCodeModel,
   makeTextModel,
 } from "./provider.ts";
+import { makeClaudeCliModel } from "./lib/claude-cli.ts";
+import {
+  chatCompletionsUsageTokens,
+  recordVisionStreamUsage,
+  recordVisionUsage,
+  sdkUsageTokens,
+} from "./lib/usage-tap.ts";
 
 const PROMPT =
   "Опиши изображение детально и по делу: что на нём, дословный текст (OCR), важные детали и цифры. " +
@@ -14,21 +22,33 @@ const PROMPT =
 // Распознаёт картинку vision-моделью ТОГО ЖЕ провайдера (на существующем доступе, без доп-подписок).
 // Возвращает текстовое описание, либо "" если распознать нечем (нет ключа/vision-модели).
 // Сетевые/HTTP-ошибки бросает — вызывающий ловит и продолжает ход без зрения (graceful).
+// question — вопрос модели к картинке (read_file); без него описание общее.
 export async function describeImage(
   bytes: ArrayBuffer,
   mimeType?: string,
+  question?: string,
 ): Promise<string> {
-  // codex-подписка: Responses API мультимодален — гоним картинку через ту же модель/токен.
-  // ВАЖНО: бэкенд подписки принимает ТОЛЬКО stream:true → streamText, не generateText (иначе 400).
-  if (providerName === "codex") {
-    const result = streamText({
-      model: makeCodexModel(providerConfig.visionModel),
+  const prompt = question?.trim()
+    ? `${PROMPT}\n\nВопрос к изображению: ${question.trim()}`
+    : PROMPT;
+  // Подписки (codex, claude) мультимодальны — гоним картинку через ту же модель, что ведёт
+  // ход: у codex это Responses API подписки, у claude — тот же Claude Code CLI.
+  if (providerName === "codex" || providerName === "claude")
+    return await describeWithSubscription(bytes, mimeType, prompt);
+
+  const { baseURL, apiKey, visionModel } = providerConfig;
+  if (!apiKey || !visionModel) return "";
+  if (
+    providerName === "opencode" &&
+    providerConfig.opencodeVisionProtocol === "responses"
+  ) {
+    const result = await generateText({
+      model: makeOpenCodeModel(visionModel, "responses"),
       messages: [
         {
           role: "user",
           content: [
-            { type: "text", text: PROMPT },
-            // file-part (не устаревший image-part): AI SDK кодирует его в input_image для Responses.
+            { type: "text", text: prompt },
             {
               type: "file",
               data: new Uint8Array(bytes),
@@ -37,35 +57,46 @@ export async function describeImage(
           ],
         },
       ],
+      maxOutputTokens: 700,
+      maxRetries: 0,
     });
-    let out = "";
-    for await (const chunk of result.textStream) out += chunk;
-    return out.trim();
+    recordVisionUsage(visionModel, sdkUsageTokens(result.usage));
+    return result.text.trim();
   }
+  return await describeWithCompatible(bytes, mimeType, prompt, {
+    baseURL,
+    apiKey,
+    visionModel,
+  });
+}
 
-  const { baseURL, apiKey, visionModel } = providerConfig;
-  if (!apiKey || !visionModel) return "";
-  const b64 = Buffer.from(bytes).toString("base64");
-  const res = await fetch(`${baseURL}/chat/completions`, {
+/** OpenAI-совместимый chat/completions: картинка уходит data-URL в поле image_url. */
+async function describeWithCompatible(
+  bytes: ArrayBuffer,
+  mimeType: string | undefined,
+  prompt: string,
+  target: { baseURL: string; apiKey: string; visionModel: string },
+): Promise<string> {
+  const res = await fetch(`${target.baseURL}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${target.apiKey}`,
       "Content-Type": "application/json",
       // Go без ID диалога и User-Agent отвечает 4xx; у остальных провайдеров тут пусто.
       ...(providerRequestHeaders() ?? {}),
     },
     body: JSON.stringify({
-      model: visionModel,
+      model: target.visionModel,
       max_tokens: 700,
       messages: [
         {
           role: "user",
           content: [
-            { type: "text", text: PROMPT },
+            { type: "text", text: prompt },
             {
               type: "image_url",
               image_url: {
-                url: `data:${mimeType || "image/jpeg"};base64,${b64}`,
+                url: `data:${mimeType || "image/jpeg"};base64,${Buffer.from(bytes).toString("base64")}`,
               },
             },
           ],
@@ -75,12 +106,51 @@ export async function describeImage(
   });
   if (!res.ok)
     throw new Error(
-      `vision HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`,
+      `vision HTTP ${res.status}: ${(await res.text()).slice(0, 200)}${providerName === "opencode" ? "; set OPENCODE_VISION_PROTOCOL to the model’s documented wire; Go /messages is unsupported" : ""}`,
     );
   const json = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
   };
+  // Зрение тратит токены того же провайдера мимо шага хода — пишем их в usage.jsonl.
+  recordVisionUsage(target.visionModel, chatCompletionsUsageTokens(json));
   return (json.choices?.[0]?.message?.content ?? "").trim();
+}
+
+/**
+ * Картинка моделью подписки: у codex это Responses API, у claude — тот же CLI, что ведёт ход.
+ * ВАЖНО: бэкенд подписок принимает ТОЛЬКО stream:true → streamText, не generateText (иначе 400).
+ */
+async function describeWithSubscription(
+  bytes: ArrayBuffer,
+  mimeType: string | undefined,
+  prompt: string,
+): Promise<string> {
+  const model =
+    providerName === "codex"
+      ? makeCodexModel(providerConfig.visionModel)
+      : makeClaudeCliModel(providerConfig.visionModel);
+  const result = streamText({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          // file-part (не устаревший image-part): AI SDK кодирует его для провайдера сам.
+          {
+            type: "file",
+            data: new Uint8Array(bytes),
+            mediaType: mimeType || "image/jpeg",
+          },
+        ],
+      },
+    ],
+  });
+  let out = "";
+  for await (const chunk of result.textStream) out += chunk;
+  // Текст уже дочитан, значит и расход стрима готов; сбой учёта описание не отнимает.
+  await recordVisionStreamUsage(providerConfig.visionModel, result.usage);
+  return out.trim();
 }
 
 // --- Видит ли картинки САМА модель чата -----------------------------------------------------
@@ -204,13 +274,16 @@ const probe = makeVisionProbe(
         },
       ],
     });
+    // Пробник — тоже вызов модели чата: его токены идут в учёт как зрение.
+    recordVisionUsage(providerConfig.textModel, sdkUsageTokens(result.usage));
     return { text: result.text, finishReason: result.finishReason };
   },
   () => providerConfig.textModel,
 );
 
-/** Принимает ли текстовая модель картинки. codex — да без сети: подписка мультимодальна. */
+/** Принимает ли текстовая модель картинки. codex и claude — да без сети: подписки мультимодальны. */
 export function chatModelSeesImages(): Promise<boolean> {
-  if (providerName === "codex") return Promise.resolve(true);
+  if (providerName === "codex" || providerName === "claude")
+    return Promise.resolve(true);
   return probe();
 }

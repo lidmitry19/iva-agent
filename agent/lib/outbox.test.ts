@@ -609,3 +609,38 @@ await test("Trace: отправка вне хода журнал не трога
 
   assert.equal(traceEvents().length, before);
 });
+
+await test("a button the model wrote without type reaches Telegram with the type its attributes mean", async () => {
+  // Случай c1: `<tg-button data=…>` без type — Telegram отверг rich message (400), части Watch
+  // ушли HTML-путём, и вместо кнопок владелец получил жирные слова.
+  const { sent, transport } = stub({ rich: () => ({ ok: true }) });
+
+  await sendThroughOutbox(
+    [
+      "Кто-то ждёт ответа",
+      '<tg-button-row><tg-button data="В задачи: Иван">В задачи</tg-button></tg-button-row>',
+      '<tg-button-row><tg-button url="https://iva-agent.com">Сайт</tg-button></tg-button-row>',
+      '<tg-button-row><tg-button text="ssh c1">Скопировать</tg-button></tg-button-row>',
+      '<tg-button-row><tg-button type="callback_data" style="danger" data="Нет">Нет</tg-button></tg-button-row>',
+    ].join("\n"),
+    transport,
+  );
+
+  assert.deepEqual(
+    sent.map((one) => one.kind),
+    ["rich"],
+  );
+  assert.match(
+    sent[0].text,
+    /<tg-button type="callback_data" data="В задачи: Иван">/u,
+  );
+  assert.match(
+    sent[0].text,
+    /<tg-button type="url" url="https:\/\/iva-agent\.com">/u,
+  );
+  assert.match(sent[0].text, /<tg-button type="copy_text" text="ssh c1">/u);
+  assert.match(
+    sent[0].text,
+    /<tg-button type="callback_data" style="danger" data="Нет">/u,
+  );
+});

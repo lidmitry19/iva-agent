@@ -78,14 +78,26 @@ export type PluginCliOptions = {
   /** Откуда разрешается относительный локальный источник: shell владельца, не ROOT. */
   readonly cwd: () => string;
   readonly log: (...args: unknown[]) => void;
+  /** Человек ли у терминала: без него `add` не ставит плагин с кодом или MCP. */
+  readonly interactive: () => boolean;
   readonly buildVersion?: (options: {
     readonly requirePlugins: boolean;
   }) => Promise<PluginVersionBuild>;
 };
 
 export function createPluginCliContext(options: PluginCliOptions) {
-  const { runtime, core, argv, git, translate, now, cwd, log, buildVersion } =
-    options;
+  const {
+    runtime,
+    core,
+    argv,
+    git,
+    translate,
+    now,
+    cwd,
+    log,
+    interactive,
+    buildVersion,
+  } = options;
   const { warn, step } = runtime;
   const { findPlugin, pluginsDir } = core.store;
 
@@ -242,6 +254,7 @@ export function createPluginCliContext(options: PluginCliOptions) {
     now,
     cwd,
     log,
+    interactive,
     components,
     absolute,
     locked,

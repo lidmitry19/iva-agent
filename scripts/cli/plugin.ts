@@ -1,8 +1,9 @@
-// `iva plugin` — the owner's only way to install, remove and inspect plugins.
+// `iva plugin` — the way to install, remove and inspect plugins.
 //
-// Only the owner, only the terminal (ADR-0009): a plugin is code in the agent's
-// process with the installation's tokens, so an injected message must never be
-// able to install one. There is no model tool and no Telegram command by design.
+// A plugin with code or MCP is code in the agent's process with the installation's
+// tokens, so it is installed from the owner's terminal or by the owner's tap (ADR-0009):
+// without a terminal `add` refuses it, and the model asks with `propose` instead
+// (`plugin-cli-proposal.ts`). There is no model tool and no Telegram command by design.
 //
 // A plugin that only ships skills needs no build and no restart: the live resolver
 // (agent/lib/custom-skills.ts) re-reads `data/custom/plugins/` on every turn. A plugin
@@ -33,6 +34,10 @@ import {
 } from "./plugin-cli-context.ts";
 import { createPluginInstallCommands } from "./plugin-cli-install.ts";
 import { createPluginMarketplaceCommands } from "./plugin-cli-marketplace.ts";
+import {
+  createPluginProposalCommands,
+  type ProposalSends,
+} from "./plugin-cli-proposal.ts";
 import { createPluginTrustCommands } from "./plugin-cli-trust.ts";
 import type { createCliRuntime } from "./runtime.ts";
 import type { PluginVersionBuild } from "./version-update-command.ts";
@@ -53,6 +58,13 @@ type PluginDependencies = {
   readonly buildVersion?: (options: {
     readonly requirePlugins: boolean;
   }) => Promise<PluginVersionBuild>;
+  /**
+   * Is a person at this terminal. Without one, `add` refuses a plugin with code or MCP and
+   * names `iva plugin propose`: that is how the model's `bash` reaches it (ADR-0009).
+   */
+  readonly interactive?: () => boolean;
+  /** Telegram sends of `propose` and `install-proposal`. */
+  readonly sends?: ProposalSends;
 };
 
 export function createPluginCommands(
@@ -63,6 +75,8 @@ export function createPluginCommands(
   const now = dependencies.now ?? (() => new Date());
   const cwd = dependencies.cwd ?? (() => process.cwd());
   const buildVersion = dependencies.buildVersion;
+  const interactive =
+    dependencies.interactive ?? (() => process.stdin.isTTY === true);
   const log =
     dependencies.log ?? ((...args: unknown[]) => console.log(...args));
   // `GIT_TERMINAL_PROMPT=0` только здесь, для плагинов и Marketplace: приватный или
@@ -96,6 +110,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
   ${C.c}iva plugin remove${C.x} <name>  ${translate("remove the plugin; its data is kept", "удалить плагин; данные плагина остаются")}
   ${C.c}iva plugin sync${C.x}           ${translate("repair: rebuild plugins.json and reinstall what is missing", "починка: пересобрать plugins.json и доставить недостающее")}
   ${C.c}iva plugin marketplace${C.x} add <source> | remove <name> | list  ${translate("lists of plugins to install by name", "списки плагинов, которые ставятся по имени")}
+  ${C.c}iva plugin propose${C.x} <folder> ${translate("ask the owner in Telegram to install a plugin with code or MCP", "попросить владельца в Telegram поставить плагин с кодом или MCP")}
 
   ${C.d}${translate("Skills of an installed plugin work from the next turn: no build, no restart.", "Скиллы поставленного плагина работают со следующего хода: без сборки и рестарта.")}${C.x}
   ${C.d}${translate(`Marketplace by default: ${DEFAULT_MARKETPLACE}.`, `Marketplace по умолчанию: ${DEFAULT_MARKETPLACE}.`)}${C.x}
@@ -104,11 +119,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
 `);
   }
 
-  async function run(
-    core: PluginCore,
-    sub: string,
-    argv: readonly string[],
-  ): Promise<void> {
+  function commandsFor(core: PluginCore, argv: readonly string[]) {
     const context = createPluginCliContext({
       runtime,
       core,
@@ -118,6 +129,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       now,
       cwd,
       log,
+      interactive,
       ...(buildVersion ? { buildVersion } : {}),
     });
     const marketplace = createPluginMarketplaceCommands(context);
@@ -126,6 +138,20 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       marketplace,
       trust,
     });
+    const proposal = createPluginProposalCommands(
+      context,
+      trust,
+      dependencies.sends,
+    );
+    return { context, marketplace, trust, install, proposal };
+  }
+
+  async function run(
+    core: PluginCore,
+    sub: string,
+    argv: readonly string[],
+  ): Promise<void> {
+    const { context, marketplace, trust, install } = commandsFor(core, argv);
     const { components } = context;
     const { readPlugin } = core.reader;
     const { pluginRoot, pluginsDir, readPluginsState } = core.store;
@@ -203,7 +229,7 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
         return marketplace.cmdMarketplace();
       default:
         throw new Error(
-          `unknown: iva plugin ${sub} — add, list, update, enable, disable, trust, untrust, remove, sync, marketplace`,
+          `unknown: iva plugin ${sub} — add, list, update, enable, disable, trust, untrust, remove, sync, marketplace, propose`,
         );
     }
   }
@@ -218,7 +244,26 @@ ${C.b}iva plugin${C.x} — ${translate("install and manage plugins", "устан
       throw new Error(
         "plugins are not available: the agent tree is missing — run: iva update",
       );
+    if (sub === "propose" || sub === "install-proposal")
+      return runProposal(core, sub, rest);
     return run(core, sub, rest);
+  }
+
+  async function runProposal(
+    core: PluginCore,
+    sub: "propose" | "install-proposal",
+    argv: readonly string[],
+  ): Promise<void> {
+    const { proposal } = commandsFor(core, argv);
+    if (sub === "propose") return proposal.propose();
+    // Только из Bridge, по тапу владельца: `add` копии одним вызовом, с доверием.
+    return proposal.installProposal((folder, digest12, source) =>
+      commandsFor(core, [folder, "--trust"]).install.add({
+        fromProposal: true,
+        expectDigest12: digest12,
+        source,
+      }),
+    );
   }
 
   return { cmdPlugin };

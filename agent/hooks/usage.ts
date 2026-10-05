@@ -1,12 +1,28 @@
 import { defineHook } from "eve/hooks";
 import { resolveModelProvider } from "../lib/model-provider.js";
-import { appendUsage, subagentTurnId } from "../lib/usage.js";
+import {
+  appendUsage,
+  parentFields,
+  readUsageTokens,
+  stepInputTokens,
+  subagentTurnId,
+  usageRecord,
+  type ParentLike,
+} from "../lib/usage.js";
+import {
+  beginIdleCompaction,
+  completeIdleCompaction,
+  recordStepInput,
+} from "../lib/idle-compaction.js";
 
 // Учёт фактического расхода токенов. ОДИН хук ловит весь расход одного eve-агента без
 // двойного счёта: основной Telegram Channel и фоновые джобы через eve/client —
-// daily-digest, memory rollup (kind="http"). Шаги субагента (planner) приходят завёрнутыми
+// ход Watch и Brief, memory rollup (kind="http"). Шаги субагента (planner) приходят завёрнутыми
 // в "subagent.event" → слушаем оба события. Пишем по строке на шаг в data/usage.jsonl;
 // читают мост (/usage) и CLI (`iva usage`).
+//
+// Вызовы модели мимо шага хода (компактация eve, зрение) пишет agent/lib/usage-tap.ts с
+// source "compaction" и "vision". Шаг ребёнка встроенного `agent` несёт поля родителя.
 //
 // ВАЖНО: в отличие от transcript.ts НЕ фильтруем finishReason="tool-calls" — расход есть на
 // КАЖДОМ шаге модели, включая tool-call раунды.
@@ -25,67 +41,68 @@ interface StepData {
   };
 }
 
-/**
- * Одно число расхода: конечное неотрицательное целое. Отсутствующее значение — ноль, как
- * и раньше; всё остальное (1e308, отрицательное, «12», NaN) — `null`, то есть мусор
- * провайдера. Такая строка в лог не пишется: сумма такого числа теряет конечность,
- * `JSON.stringify` пишет Infinity как null, а /usage печатает «0 tokens (in Infinity/out
- * Infinity)» — и лечится это только у источника (PBT-DS1-P F1).
- */
-function usageTokens(value: unknown): number | null {
-  if (value === undefined || value === null) return 0;
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : null;
+/** Чей шаг: сессия, канал, имя инлайн-субагента и родитель сессии-ребёнка. */
+interface StepOwner {
+  readonly sessionId: string;
+  readonly source: string;
+  readonly subagent?: string;
+  readonly parent?: ParentLike;
 }
 
-function record(
-  data: StepData,
-  sessionId: string,
-  source: string,
-  subagent?: string,
-): void {
+function record(data: StepData, owner: StepOwner): void {
+  const { sessionId, source, subagent, parent } = owner;
   const u = data.usage;
   if (!u) return;
-  const inT = usageTokens(u.inputTokens);
-  const outT = usageTokens(u.outputTokens);
-  const cacheRead = usageTokens(u.cacheReadTokens);
-  const cacheWrite = usageTokens(u.cacheWriteTokens);
-  if (
-    inT === null ||
-    outT === null ||
-    cacheRead === null ||
-    cacheWrite === null
-  ) {
+  const tokens = readUsageTokens({
+    in: u.inputTokens,
+    out: u.outputTokens,
+    cacheRead: u.cacheReadTokens,
+    cacheWrite: u.cacheWriteTokens,
+  });
+  if (!tokens) {
     // Пропуск не молчаливый: журнал называет шаг и что именно пришло.
     console.error(
       `[usage] расход шага пропущен: turn=${data.turnId ?? "?"} step=${data.stepIndex ?? 0} in=${String(u.inputTokens)} out=${String(u.outputTokens)} cacheRead=${String(u.cacheReadTokens)} cacheWrite=${String(u.cacheWriteTokens)}`,
     );
     return;
   }
-  if (inT + outT + cacheRead + cacheWrite === 0) return; // нет usage — не пишем нулевую строку
-  appendUsage({
-    ts: new Date().toISOString(),
-    source,
-    provider: PROVIDER,
-    model: MODEL,
-    sessionId,
-    turnId: data.turnId ?? "",
-    step: data.stepIndex ?? 0,
-    subagent, // undefined для top-level — JSON.stringify его опускает
-    in: inT,
-    out: outT,
-    cacheRead,
-    cacheWrite,
-    total: inT + outT,
-  });
+  const row = usageRecord(
+    {
+      source,
+      provider: PROVIDER,
+      model: MODEL,
+      sessionId,
+      turnId: data.turnId ?? "",
+      step: data.stepIndex ?? 0,
+      subagent, // undefined для top-level — JSON.stringify его опускает
+      ...parentFields(parent),
+    },
+    tokens,
+  );
+  if (row) appendUsage(row); // нет usage — не пишем нулевую строку
 }
 
 export default defineHook({
   events: {
     "step.completed": (event, ctx) => {
-      record(event.data, ctx.session.id, ctx.channel.kind ?? "unknown");
+      // Ребёнок встроенного `agent` пишет свои шаги сам (channel.kind = subagent) под своей
+      // сессией; связь с ходом родителя eve отдаёт в ctx.session.parent.
+      // Вход шага для свёртки между ходами — до записи расхода: сбой файла расхода не
+      // отменяет решение о свёртке. Счёт ведётся только у сессии, открытой Telegram-каналом;
+      // ребёнок встроенного agent идёт под своей сессией.
+      recordStepInput(ctx.session.id, stepInputTokens(event.data.usage));
+      record(event.data, {
+        sessionId: ctx.session.id,
+        source: ctx.channel.kind ?? "unknown",
+        parent: ctx.session.parent,
+      });
     },
+    // eve начал свёртку: между ходами чат на это время должен быть занят.
+    "compaction.requested": (_event, ctx) =>
+      beginIdleCompaction(ctx.session.id),
+    // eve довёл свёртку до конца (канал Telegram этого события не получает).
+    "compaction.completed": (_event, ctx) =>
+      completeIdleCompaction(ctx.session.id),
     // Шаги инлайн-субагента (planner) — иначе его токены потерялись бы.
     //
     // turnId субагента брать НЕЛЬЗЯ: eve нумерует ходы как turn_<sequence> внутри каждой
@@ -106,9 +123,11 @@ export default defineHook({
               inner.data.turnId,
             ),
           },
-          ctx.session.id,
-          ctx.channel.kind ?? "unknown",
-          event.data.subagentName,
+          {
+            sessionId: ctx.session.id,
+            source: ctx.channel.kind ?? "unknown",
+            subagent: event.data.subagentName,
+          },
         );
       }
     },

@@ -36,7 +36,7 @@ The rest — for business owners, specialists, executives and everyday life: **[
 
 <img src="assets/iva-flow.webp" alt="How Iva works: voice, text, photos and PDFs fly from Telegram into the willow-tree agent, wired to memory, nightly rollup, cron, reminders, search, web, workspace and docs" width="100%">
 
-The bridge long-polls Telegram, so no public HTTPS, domain or webhook is needed. Iva runs as two systemd user services, two systemd watchdog timers and five in-process eve schedules — operations live in [docs/deploy.md](docs/deploy.md).
+The bridge long-polls Telegram, so no public HTTPS, domain or webhook is needed. Iva runs as two systemd user services, two systemd watchdog timers and seven in-process eve schedules — operations live in [docs/deploy.md](docs/deploy.md).
 
 **Wondering what you'd actually use an agent for?** → [25+ real scenarios — business, work, everyday life](docs/use-cases.md).
 
@@ -55,7 +55,7 @@ The bridge long-polls Telegram, so no public HTTPS, domain or webhook is needed.
 - **Personal CRM** — who your people are, what you agreed, when to follow up.
 - **Search by meaning** — BM25 plus link-graph rerank, any language; optional vector mode with one key.
 - **Decision cards** — what you chose, when and why; old versions stay in a dated History.
-- **Tasks & reminders** — priorities, due dates and a morning digest.
+- **[Tasks](docs/tasks.md) & reminders** — priorities, due dates and a daily brief.
 - **Web search** — four pluggable providers: Tavily, Exa, Parallel or Brave.
 - **Google Workspace** — Gmail, Calendar, Drive, Sheets, Docs and Tasks from chat via the `gws` CLI; installed for you, with a guided key setup right in the conversation.
 - **Skills & MCP** — drop one file to add a procedure or connect an MCP server; keys stay in `.env`.
@@ -117,6 +117,14 @@ Brand-new VPS, still logged in as root? Run `bash <(curl -fsSL https://raw.githu
 
 Install as a normal user, not as root — Iva's shell tool runs as whoever installed it. Headless installs take `--skip-setup` or `--non-interactive`. Prefer to read before you run? Fetch it with `curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh -o install.sh`, read it, then `bash install.sh`. Wizard walkthrough and an SSH primer for first-time VPS owners: [docs/install.md](docs/install.md).
 
+### Updates
+
+- `iva update` installs releases only (`vX.Y.Z` tags) — the default.
+- `main` holds releases only; every accepted change lands in the `beta` branch first.
+- `iva beta` turns on beta updates: the tip of the `beta` branch; `iva stable` turns them off and goes back to `main` (nothing is rolled back — the next release catches up). Then run `iva update`.
+- Any installation, 0.4.8 included, switches to beta with one command: `curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/beta/beta.sh | bash`. A new installation on beta: `curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/beta/install.sh | IVA_BETA=1 bash`.
+- The same switch is in Telegram: `/menu` → 🛠 Maintenance → 🧪 Updates. `iva version` shows which one is on.
+
 ### The first minute
 
 Three messages, and you can watch the memory work:
@@ -141,7 +149,7 @@ The installer reuses the existing checkout instead of re-cloning, keeps `.env` a
 
 ## Providers & cost
 
-Four model providers. Pick one and fill its block in `.env`:
+Six model providers. Pick one and fill its block in `.env`:
 
 | Provider         | How you pay                            |
 | ---------------- | -------------------------------------- |
@@ -149,6 +157,8 @@ Four model providers. Pick one and fill its block in `.env`:
 | Ollama Cloud     | API key, ~$20/mo                       |
 | OpenRouter       | API key, pay-as-you-go, 300+ models    |
 | OpenAI (ChatGPT) | your Plus/Pro subscription, no API key |
+| Claude (Pro/Max) | your Pro/Max subscription, no API key  |
+| Custom           | your own OpenAI-compatible endpoint    |
 
 Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo all-in ($10 model + $4–5 VPS; the model's first month is $5), no markup; voice rides Deepgram's free starter credit. Model lists, limits and the search matrix: [docs/providers.md](docs/providers.md).
 
@@ -161,47 +171,44 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.4.4 · 17.09.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.12 · 05.10.2026 — expand the latest releases</b></summary>
 
-### 17.09.2026
+### 05.10.2026
 
-#### v0.4.4
+#### v0.4.12
 
-- ⏰ **A reminder is an instruction Iva gives her future self**: at the due minute the text of the reminder is the prompt of one fresh turn with tools, not a line to read back — "in 3 minutes find the news and send it" arrives as the news, not as its own wording. A turn that could not run, failed or came back empty still delivers: the code sends your text verbatim and names the cause in the row.
-- ⏰ **A reminder comes back to the chat it was asked in**: the row remembers the chat and the topic of the turn, so a reminder set in a group topic lands in that topic instead of a private chat; old rows and requests that did not come from Telegram still go to the owner's chat. `iva doctor` stopped claiming "the dispatcher has not ticked yet" — it was reading the pulse from the wrong folder.
-- 🔁 **`/update --force` works from the chat too**: the word after `/update` is read now, so the running build can be rebuilt from Telegram exactly as `iva update --force` does on the server — the way out of a broken edit in Iva's own code. The flag travels in the request file, so a restarted update rebuilds as well.
-- 🩺 **The doctor names the cure for stuck workflows**: "running count 7 exceeds 5" now says in the same line that such runs are stale rather than live, and that `iva reset` quarantines them and restarts the services; memory is left alone.
+- 👀 **Iva tells you what you missed**: once an hour code checks unread private chats, mentions in Telegram and Gmail without newsletters; the model wakes only for something new and sends one message per item with buttons «To tasks», «Remind later», «Mute this one». Quiet hours at night, at most 5 messages a day, one toggle «Writes on her own» in `/menu` → Notices.
+- ☀️ **The Brief replaces the morning digest**: at 08:30 and 14:00 Iva sends an overview of tasks, calendar, mail, Telegram, connections and plugins. Change the time with a phrase («brief at 9»); `/digest` returns the same overview.
+- 🚨 **Failed jobs reach you with the cause and a Fix button**: user timers and plugin services are checked hourly; Iva's own failed jobs are explained instead of silently self-fixed and come first in the morning Brief. `iva signal <source> <text>` lets any local script hand Iva a message.
+- 🧩 **Iva writes her own plugins**: say «make a plugin that…». A plugin of skills and scripts she installs herself; one with code or MCP she only proposes, and it is installed after you tap Install in a private chat.
+- 🗜 **A long conversation is compacted between turns, not in the middle of an answer**: after a turn that reached 60% of the model window or 275k tokens, Iva compacts the conversation while nobody waits. A message sent meanwhile gets «Compacting the conversation, I'll answer in a moment.» and its answer right after.
+- 🧹 **Iva no longer asks you to press /new**: the «context window is N% full» line is gone; `/new` works as before.
+- 🎬 **Video, audio and files are handled by Iva herself, and she sees an image on disk**: the model gets facts about an attachment instead of orders not to touch it, and `read_file` on an image returns its description from the vision model.
 
-### 14.09.2026
+### 03.10.2026
 
-#### v0.4.3
+#### v0.4.11
 
-- 🔁 **One updater, the way pi does it**: the old in-place update path (stash and rebase inside the working folder with a byte-level check of stray files, ~15k lines) is gone together with the guesswork "developer or installation" by branches and shims that kept people with a second branch on the fragile path forever. Every Iva folder now updates through versions: build beside, probe, switch, roll back. A developer checkout is marked with an empty `.iva-dev` file. Edits to Iva's own code are no longer promised or kept — your own skills, tools and plugins live in `data/custom`. `repair.sh` and a re-run of `install.sh` hand an existing installation to the same updater. An update cut off mid-way (a server reboot) is restarted once by the bridge itself with a line in the chat. Older flat installs need two `/update`s: the first fetches the new code, the second moves onto versions.
-- 🔘 **Menu buttons two per row again**: the classic menu lays buttons out in pairs as before 0.4.2; the new rich menu shows the same pairs as compact pills with a "button — what it does" caption under the row, no more one long full-width button.
-- 🔌 **A tool schema the provider rejects no longer kills the turn**: OpenAI (codex) rejects the whole request when any tool carries a regex with lookaround; Iva now retries once without those patterns, and if it still fails, the error names the field and where the tool lives.
-- 🧷 **Codex tools without strict mode**: tools go to codex with `strict: false`, so optional fields stay optional and reminders are set on the first call instead of looping.
-- 🧰 **`diagnose.sh` collects more**: the plugin list, the reminder dispatcher pulse and the schedule lines of the last day.
+- 🌙 **Nightly memory works on a ChatGPT subscription again**: the night call now streams on every provider. Since 0.4.9 the subscription backend answered 400 on the first call of every night. The night's own low reasoning effort is no longer overridden by the chat default.
+- 🗂️ **A vault `.gitignore` no longer stops the night**: files the owner excludes are skipped and named in the log, the rest is committed and the day closes. Ignored files stay on disk, outside the backup.
+- 🔁 **A short provider failure no longer fails the turn**: before the answer starts, Iva makes up to three attempts with 5 and 15 second waits and honours `Retry-After`. An opened stream or an executed tool is never replayed.
+- 🤖 **`gpt-6.1-sol` in the ChatGPT subscription list**: Iva identifies as Codex client 0.159.2, so `/model` and `iva config` show the new model.
+- 📅 **Task deadlines are stored as dates**: "tomorrow" becomes `YYYY-MM-DD` in the owner's timezone before it is saved, and a deadline can be corrected with `update`. Old deadlines written as words stay as they are.
+- 🔧 **Google CLI updates without root**: `iva update` installs and refreshes `gws` under the service user's `~/.local`. Google sign-in and settings stay as they are.
+- ⏰ **The nightly memory time is configurable**: `MEMORY_NIGHT_TIME=HH:mm` in `.env`, 04:00 by default. It takes effect after `iva update --force`.
+- 🔀 **OpenCode Go models over Responses**: `OPENCODE_PROTOCOL=responses` in `.env` switches the Go text wire, with the same key and model settings. chat/completions stays the default.
+- 📝 **The nightly Report reads like a note**: 2–5 plain lines in the owner's language, built by code from the night's results. The Report is still off by default.
+- 🃏 **A Card status on the owner's word**: "the project is closed" sets the Card status at once through `write_card`, and the night of that day keeps it.
 
-### 13.09.2026
+### 29.09.2026
 
-#### v0.4.2
+#### v0.4.10
 
-- 🎤 **The voice key is no longer required at install**: the Deepgram step of the wizard is skipped with Enter (console.deepgram.com does not open from some countries, and people got stuck on install for an optional feature); without the key voice notes are saved and Iva suggests `/menu` → 🎤 Voice, and `iva doctor` shows a warning instead of a failure.
-- 🔘 **A new menu, on request: buttons inside the message**: by default the menu, the `/model` and `/think` wizards, the update offer and the "Working" status look as before (a message with buttons under it); `/menu` → Maintenance → **✨ New menu** switches them to Telegram rich messages — every button a full-width row with what it does right under it, headings, status and timers as tables, and **◀︎ Classic menu** at the bottom brings the old look back. Iva also offers buttons in her own replies when there are two to four options, and a tap comes back to her as your message; the `rich-replies` skill covers the whole palette. The new menu needs a Telegram client from August 2026; in groups the reply buttons don't work. [ADR-0015](docs/adr/0015-buttons-live-inside-the-message.md)
-- 💬 **Rich replies and voice are set from the menu**: two new `/menu` screens — a switch for rich replies (`Auto`: tables, task lists, folds and formulas go as rich messages; `Plain text`: ordinary messages) and `🎤 Voice` with the Deepgram key and the recognition language (`Auto`/`Русский`/`English`/`Oʻzbek`); the key is taken from your next message in a private chat and deleted from the chat, and both screens offer a restart after saving.
-- 📦 **Dependencies cleaned up**: the unused `@vercel/connect` is gone, `fast-uri`, `hono` and `qs` under `@modelcontextprotocol/sdk` are bumped past their vulnerabilities (`npm audit`: 0 high, 0 moderate), and the `ai` pin is lifted to `^7.0.82`, the peer eve 0.51.1 requires.
-
-#### v0.4.1
-
-- ⏰ **A reminder is an instruction Iva gives her future self**: a `data/` row moves "pending → fired" in one atomic transition, and at the due minute the text of the reminder is the prompt of one fresh turn — Iva does what it says with her tools and the code sends the final text of that turn back to the chat and topic you asked in, so "in 3 minutes find the news and send it" arrives as the news, not as its own wording. A turn that could not run, failed or came back empty still delivers: the code sends your text verbatim and names the cause in the row. The firing fact (`fired_at`, `delivered`, `error`) sits in the row, `iva doctor` shows it, and rows from the old schema survive the update.
-- 🔔 **One `remind` tool with `add`, `list`, `remove`**: one-off reminders ("in 30 minutes", "at 14:30") and repeating ones (a cron expression in your time zone) are set, listed and removed by a single tool with an `action` field instead of three. The moment is computed in code and handed to the agent as a ready time, schedules firing more often than every 10 minutes are refused, and the destination is always your chat. [ADR-0013](docs/adr/0013-reminders-live-in-data-with-a-minute-dispatcher.md)
-- 🛡 **`bash` cannot set timers of its own or talk to Telegram anymore**: `systemd-run`, writing `crontab`, `at`/`batch`, units under `~/.config/systemd/user`, `~/.iva-scripts`, `sleep` chains and direct calls to api.telegram.org are refused before they run, and the refusal names the replacement; reading (`crontab -l`, `systemctl status`, `journalctl`) still passes.
-- 📋 **Every schedule run leaves a fact, and the agent wakes up with it**: each run writes a row to `data/jobs.json` (reason, exit code, secret-free tail, kept seven days). On success Iva stays silent; on failure she fixes the cause and tells the owner, open failures are visible to every turn and in `iva doctor` and close on the next success or with `iva jobs ack <name>`, and if the agent cannot wake at all, one message a day reaches you. A wake turn that ended by waiting for the next message is a normal end now, not a failure. The schedules section of `iva doctor` works without systemd.
-- 🔎 **A complaint turns into an evidence bundle with no secrets in it**: `iva diagnose` puts versions, OS and node, the `iva doctor` output, the last 200 service log lines, reminder and turn-failure facts and the schedule table into `data/diagnose/<date>.md`, cutting the values of every `.env` key except settings, plus the bot token, owner chat id and e-mail; the `report-problem` skill reads the bundle, explains the failure in two lines and offers a ready issue link or a message for the support group.
-- 🧹 **An interrupted update cleans up after itself and names the reason**: the retiring checkout wears a marker with its own identity, deletes `.git` last and finishes on a repeat; stale shim-refresh claims in `~/.local/bin` are swept by age even under a live pid; a failed optional step now logs its exit code and the last output line (for example `exit 127: uv: command not found`) instead of a silent "… did not run".
-- 🧩 **Your rules live beside the bundled persona and load every turn**: markdown files in `data/custom/agent/instructions/` reach the prompt live without a rebuild, so a behavior rule written into `rules.md` (with `write_file`, after your confirmation) works at once; the old `instructions.md` replacement is obsolete, and `iva doctor` shows the rule count and warns when it overruns the limit.
-- 🧭 **The vault directory is computed by one formula everywhere**: file tools, media, the diary, nightly memory, the CLI, the menu, the build and the installer call a single resolver. An empty value or stray spaces is now a clear error naming the variable instead of a silent directory swap, a relative path resolves against the caller's base, and a bad setting reaches the user as one line, not a stack trace.
-- 🧩 **Iva runs on eve 0.51.1** (0.4.0 shipped 0.47.3): the local patch is ported and rebuilt for the new runtime.
+- 🚑 **A tool name from Claude no longer fails the turn**: an Iva tool runs only under its exact or `mcp__iva__` name, with no guessing by case, dash or another prefix. Any other name, Claude's own `Bash` and `Read` included, returns a tool error listing the available tools, and the model goes on in the same turn.
+- 🔌 **Unparsable tool arguments on Claude no longer fail the turn**: arguments that are not JSON reach eve as sent, the model gets an input error and corrects the call in the same turn. A stream cut before the end of the message still fails.
+- ♻️ **A restart mid-reply no longer blocks the next messages**: on the next start Iva moves the interrupted workflow state to quarantine, Bridge closes the broken turn with one line and drains the saved queue, and `/new` answers without `iva reset`. A second start in a row leaves the workflow state alone, and a failed recovery is one journal line that does not keep Iva down.
+- 🔎 **File search no longer hangs the turn**: one `grep` or `glob` call stops after 20 seconds, 20 000 files or when the turn is stopped, and returns what it found with a hint to narrow the path. `node_modules`, `.git` and `*.trash-*` quarantines are skipped.
+- 🧠 **Sonnet 5.5 takes the place of Sonnet 5 on Claude**: the model screen and setup offer Fable 5.1, Opus 5.5 and Sonnet 5.5 and write `claude-sonnet-5-5` to `.env`. A Claude Code that does not know Sonnet 5.5 yet keeps Sonnet 5 on the same button, and `claude-sonnet-5` in `.env` still works. The OpenRouter list offers `anthropic/claude-sonnet-5.5`.
 
 </details>
 

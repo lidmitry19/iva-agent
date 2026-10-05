@@ -28,6 +28,7 @@ type ConfigSelection = {
   dataDir?: string;
   // Адрес эндпоинта у провайдера, чей base задаёт владелец (custom).
   base?: string;
+  opencodeProtocol?: string;
 };
 type ConfigTransactionTarget = {
   envPath: string;

@@ -98,7 +98,7 @@ test("R1: the dynamic time instruction reports UTC for invalid input", () => {
   const program = [
     `const instruction = (await import(${JSON.stringify(moduleUrl)})).default;`,
     `const result = instruction.events["turn.started"]();`,
-    `process.stdout.write(result.markdown);`,
+    `process.stdout.write(result.content);`,
   ].join("\n");
   const child = spawnSync(
     process.execPath,
@@ -114,42 +114,20 @@ test("R1: the dynamic time instruction reports UTC for invalid input", () => {
   assert.doesNotMatch(child.stdout, /Mars\/Olympus/u);
 });
 
-test("R1: the Python process consumes validated TZ and falls back to UTC", () => {
-  const autograph = join(ROOT, "scripts/autograph");
-  const program = [
-    "from datetime import datetime, timezone",
-    "from zoneinfo import ZoneInfo",
-    "import graph",
-    "actual = graph._local_today().isoformat()",
-    "expected = datetime.now(timezone.utc).date().isoformat()",
-    "print(actual + ' ' + expected)",
-  ].join("; ");
-  const child = spawnSync(
-    "uv",
-    ["run", "--no-project", "python", "-c", program],
-    {
-      cwd: autograph,
-      env: {
-        HOME: process.env.HOME,
-        PATH: process.env.PATH,
-        TZ: "Mars/Olympus",
-      },
-      encoding: "utf8",
-    },
-  );
-  assert.equal(child.status, 0, child.stderr);
-  const [actual, expected] = child.stdout.trim().split(" ");
-  assert.equal(actual, expected);
+test("R1: operational and authored consumers share the invalid-value fallback", () => {
+  assert.equal(resolveAuthoredTimeZone("Mars/Olympus"), "UTC");
+  assert.equal(resolveOperationalTimeZone("Mars/Olympus"), "UTC");
 });
 
 test("R1: every TypeScript time consumer calls the shared resolver", () => {
+  assert.equal(resolveAuthoredTimeZone("Mars/Olympus"), "UTC");
+  assert.equal(resolveOperationalTimeZone("Mars/Olympus"), "UTC");
+  assertValidTimeZone(resolveOperationalTimeZone("Mars/Olympus"));
   const consumers = [
     "agent/instrumentation.ts",
     "agent/instructions/now.ts",
     "agent/lib/vault-daily.ts",
-    "agent/tools/write_card.ts",
-    "scripts/memory/rollup.ts",
-    "scripts/memory/brain.ts",
+    "scripts/memory/night.ts",
     "scripts/lib/usage.ts",
     "scripts/cli/systemd.ts",
   ];

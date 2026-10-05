@@ -1,62 +1,18 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { relative, sep } from "node:path";
+import {
+  globToRegExp,
+  eachFile,
+  resolveVaultToolRoot,
+  WALK_HINT,
+  walkBound,
+  type WalkBound,
+} from "../lib/vault-file-search.ts";
 
 // Host-native grep. Переопределяет встроенный grep eve: regex-поиск по содержимому
-// реальных файлов на ФС VPS (node:fs + RegExp). Самодостаточно (eve/tools, zod,
-// node-builtins) — вспомогательные walk/globToRegExp продублированы инлайн, а не
-// импортированы из glob.ts (cross-authored relative import ломает eve dev 0.11.4).
-
-function globToRegExp(pattern: string): RegExp {
-  const p = pattern.split(sep).join("/");
-  let re = "";
-  for (let i = 0; i < p.length; i++) {
-    const c = p[i];
-    if (c === "*") {
-      if (p[i + 1] === "*") {
-        re += "(?:.*)";
-        i++;
-        if (p[i + 1] === "/") i++;
-      } else {
-        re += "[^/]*";
-      }
-    } else if (c === "?") {
-      re += "[^/]";
-    } else if ("\\^$+.()|{}[]".includes(c)) {
-      re += "\\" + c;
-    } else {
-      re += c;
-    }
-  }
-  return new RegExp("^" + re + "$");
-}
-
-const IGNORE_DIRS = new Set([
-  ".git",
-  "node_modules",
-  ".next",
-  "dist",
-  ".cache",
-]);
-
-async function walk(root: string, dir: string, out: string[]): Promise<void> {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (IGNORE_DIRS.has(entry.name)) continue;
-      await walk(root, full, out);
-    } else if (entry.isFile()) {
-      out.push(full);
-    }
-  }
-}
+// реальных файлов на ФС VPS (node:fs + RegExp). Обход и резолв корня общие с glob.
 
 interface Match {
   file: string;
@@ -66,63 +22,85 @@ interface Match {
 
 const MAX_MATCHES = 1000;
 
+async function* filesAt(
+  root: string,
+  bound: WalkBound,
+): AsyncGenerator<string> {
+  if ((await stat(root)).isFile()) yield root;
+  else yield* eachFile(root, bound);
+}
+
+async function readLines(file: string): Promise<string[] | null> {
+  try {
+    return (await readFile(file, "utf8")).split("\n");
+  } catch {
+    return null;
+  }
+}
+
+async function matchesInFile(
+  file: string,
+  expression: RegExp,
+): Promise<Match[]> {
+  const lines = await readLines(file);
+  if (lines === null) return [];
+  const matches: Match[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    expression.lastIndex = 0;
+    if (!expression.test(lines[index])) continue;
+    const text =
+      lines[index].length > 300
+        ? `${lines[index].slice(0, 300)}…`
+        : lines[index];
+    matches.push({ file, line: index + 1, text });
+  }
+  return matches;
+}
+
+function result(matches: Match[], full: boolean, bound: WalkBound) {
+  const truncated = full || bound.truncated;
+  const hint = bound.truncated ? { hint: WALK_HINT } : {};
+  return { count: matches.length, truncated, ...hint, matches };
+}
+
+async function findMatches(
+  root: string,
+  expression: RegExp,
+  globExpression: RegExp | null,
+  bound: WalkBound,
+): Promise<ReturnType<typeof result>> {
+  const matches: Match[] = [];
+  for await (const file of filesAt(root, bound)) {
+    const relativePath = relative(root, file).split(sep).join("/");
+    if (globExpression !== null && !globExpression.test(relativePath)) continue;
+    const remaining = MAX_MATCHES - matches.length;
+    const additions = await matchesInFile(file, expression);
+    matches.push(...additions.slice(0, remaining));
+    if (additions.length >= remaining) return result(matches, true, bound);
+  }
+  return result(matches, false, bound);
+}
+
 export default defineTool({
   description:
-    "Regex-поиск по файлам хоста. path — файл или директория (по умолчанию cwd, " +
-    "рекурсивно); glob фильтрует по пути; flags — RegExp-флаги ('i', 'm'). " +
+    "Regex-поиск по файлам хоста. path — абсолютный или от корня vault файл либо " +
+    "директория (по умолчанию корень vault, рекурсивно); glob фильтрует по пути; " +
+    "flags — RegExp-флаги ('i', 'm'). " +
     "Возвращает { file, line, text }, до 1000; бинарные пропускаются.",
   inputSchema: z.object({
     pattern: z.string().min(1).describe("Регулярное выражение"),
-    path: z.string().optional().describe("Абсолютный путь, по умолчанию cwd"),
+    path: z.string().optional().describe("Абсолютный или от корня vault путь"),
     glob: z.string().optional().describe("Glob-фильтр, напр. **/*.ts"),
     flags: z.string().optional().describe("Напр. 'i' или 'm'"),
   }),
-  async execute({ pattern, path, glob, flags }) {
-    const root = path ?? process.cwd();
-    const re = new RegExp(pattern, flags ?? "");
-    const globRe = glob ? globToRegExp(glob) : null;
-
-    // Собираем список файлов.
-    let files: string[];
-    const info = await stat(root);
-    if (info.isFile()) {
-      files = [root];
-    } else {
-      files = [];
-      await walk(root, root, files);
-    }
-
-    const matches: Match[] = [];
-    let truncated = false;
-
-    for (const file of files) {
-      if (globRe) {
-        const rel = relative(root, file).split(sep).join("/");
-        if (!globRe.test(rel)) continue;
-      }
-      let content: string;
-      try {
-        content = await readFile(file, "utf8");
-      } catch {
-        continue; // нечитаемый/бинарный файл
-      }
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        re.lastIndex = 0;
-        if (re.test(lines[i])) {
-          // Усекаем длинные строки (минифайлы), чтобы не раздуть контекст.
-          const text =
-            lines[i].length > 300 ? lines[i].slice(0, 300) + "…" : lines[i];
-          matches.push({ file, line: i + 1, text });
-          if (matches.length >= MAX_MATCHES) {
-            truncated = true;
-            break;
-          }
-        }
-      }
-      if (truncated) break;
-    }
-
-    return { count: matches.length, truncated, matches };
+  async execute({ pattern, path, glob, flags }, { abortSignal }) {
+    const root = resolveVaultToolRoot(path);
+    const bound = walkBound(abortSignal);
+    return findMatches(
+      root,
+      new RegExp(pattern, flags ?? ""),
+      glob ? globToRegExp(glob) : null,
+      bound,
+    );
   },
 });

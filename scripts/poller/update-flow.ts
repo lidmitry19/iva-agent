@@ -66,21 +66,33 @@ function messageEditSucceeded(value: unknown): boolean {
 // killed with us). --collect GC's the unit after exit. The updater reads a 0600 job
 // file and posts each phase directly through Bot API, so no bridge process survives.
 export function launchSelfUpdate(jobId: string): Promise<LaunchResult> {
-  const updater = [
-    join(ROOT, "bin/iva.mjs"),
+  return launchIvaCommand("iva-self-update", [
     "update",
     "--telegram-job",
     jobId,
-  ];
+  ]);
+}
+
+/**
+ * Any `iva` subcommand the bridge starts on the owner's tap, the way the self-update is
+ * started: its own transient unit (or a detached process without systemd), so it survives
+ * the restart of this bridge. The plugin installer (`iva plugin install-proposal`) is the
+ * second one.
+ */
+export function launchIvaCommand(
+  unitPrefix: string,
+  ivaArgs: readonly string[],
+): Promise<LaunchResult> {
+  const command = [join(ROOT, "bin/iva.mjs"), ...ivaArgs];
   const args = [
     "--user",
     "--collect",
-    `--unit=iva-self-update-${Date.now()}`,
+    `--unit=${unitPrefix}-${Date.now()}`,
     `--working-directory=${ROOT}`,
     `--setenv=PATH=${process.env.PATH || ""}`,
     `--setenv=ASSISTANT_DATA_DIR=${DATA_DIR}`,
     NODE,
-    ...updater,
+    ...command,
   ];
   return new Promise<LaunchResult>((resolve) =>
     execFile("systemd-run", args, (err, out, e) => {
@@ -90,7 +102,7 @@ export function launchSelfUpdate(jobId: string): Promise<LaunchResult> {
       // (hasSystemd). Прецедент 13.09.2026: «Не удалось запустить обновление» ×3 в Docker.
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
         try {
-          const child = spawn(NODE, updater, {
+          const child = spawn(NODE, command, {
             cwd: ROOT,
             env: { ...process.env, ASSISTANT_DATA_DIR: DATA_DIR },
             detached: true,
@@ -98,7 +110,7 @@ export function launchSelfUpdate(jobId: string): Promise<LaunchResult> {
           });
           child.unref();
           log(
-            "systemd-run not found; self-update launched as a detached process",
+            `systemd-run not found; ${unitPrefix} launched as a detached process`,
           );
           resolve({ ok: true, msg: "detached" });
         } catch (spawnError) {
@@ -129,6 +141,7 @@ export async function handleUpdateCheck(
     force
       ? tr("◇ Rebuilding the current version", "◇ Пересобираю текущую версию")
       : tr("◇ Checking for updates", "◇ Проверяю обновления"),
+    { silent: true },
   )) as TelegramMessage | null;
   if (!status || typeof status.message_id !== "number") return false;
   // The same rebuild `iva update --force` does on the server, asked from the chat: no

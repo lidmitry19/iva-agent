@@ -219,17 +219,14 @@ function failureFact(event: Record<string, unknown>): string | null {
 
 /**
  * Таблица фактов расписаний (T20 §5): последний запуск каждого имени и незакрытые провалы
- * за сутки. Разбор не дублируем: отчёт собирает doctor.scheduleFactsReport теми же
+ * (до починки, ADR-0020). Разбор не дублируем: отчёт собирает doctor.scheduleFactsReport теми же
  * authored-функциями, что и раздел доктора; хвост уже вырезан при записи, а пакет
  * целиком проходит общее вырезание секретов ниже.
  */
-async function schedulesSection(
-  dataDir: string,
-  nowMs: number,
-): Promise<string> {
+async function schedulesSection(dataDir: string): Promise<string> {
   let report;
   try {
-    report = await scheduleFactsReport(dataDir, nowMs);
+    report = await scheduleFactsReport(dataDir);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return authoredTreeMissing(error)
@@ -537,7 +534,7 @@ export function createDiagnoseCommand(
       journal: journalSection(cap, dataDirectory, units),
       updateLog: updateLogSection(dataDirectory),
       redaction: redactionLine(envFound, secrets.length),
-      schedules: await schedulesSection(dataDirectory, collectedAt.getTime()),
+      schedules: await schedulesSection(dataDirectory),
     });
     const file = join(
       dataDirectory,

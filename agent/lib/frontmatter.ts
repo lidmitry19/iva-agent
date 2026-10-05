@@ -15,14 +15,12 @@ export type FmValue = string | string[];
 export type FmFields = Record<string, FmValue>;
 
 export interface ParsedFrontmatter {
-  /** null — frontmatter отсутствует (тогда body === весь текст). */
   fields: FmFields | null;
   body: string;
-  /** Исходные строки frontmatter (без ограничителей `---`) — нужны writeFrontmatter. */
   lines: string[];
+  eol?: "\n" | "\r\n";
 }
 
-/** Ожидаемая ошибка повреждённого frontmatter, которую caller может обработать. */
 export class FrontmatterParseError extends Error {
   override readonly name = "FrontmatterParseError";
 }
@@ -53,124 +51,126 @@ export function parseFrontmatterOrSkip(
   }
 }
 
+type ParseState = {
+  fields: Record<string, FmValue | null>;
+  key: string | null;
+  mode: "fold" | "literal" | "list" | "pending" | null;
+  sep: string;
+  blanks: number;
+};
+
+function appendMultiline(state: ParseState, text: string): void {
+  const key = state.key!;
+  if (state.mode === "pending") {
+    state.mode = text.startsWith("- ") ? "list" : "fold";
+    state.fields[key] = state.mode === "list" ? [] : "";
+  }
+  if (state.mode === "list") {
+    appendList(state.fields[key] as string[], text);
+  } else {
+    const before = (state.fields[key] as string) || "";
+    const separator = multilineSeparator(state);
+    state.fields[key] = (before + separator + text).trim();
+  }
+  state.blanks = 0;
+}
+
+function appendList(items: string[], text: string): void {
+  const item = text.startsWith("- ") ? text.slice(2).trim() : text;
+  if (item) items.push(unquote(item));
+}
+
+function multilineSeparator(state: ParseState): string {
+  if (!state.blanks) return state.sep;
+  return "\n".repeat(state.blanks + (state.mode === "literal" ? 1 : 0));
+}
+
+function startMultiline(
+  state: ParseState,
+  key: string,
+  value: string,
+): boolean {
+  const exact = {
+    ">-": ["fold", " "],
+    ">": ["fold", " "],
+    "|-": ["literal", "\n"],
+    "|": ["literal", "\n"],
+  }[value] as [ParseState["mode"], string] | undefined;
+  if (exact) {
+    Object.assign(state, { key, mode: exact[0], sep: exact[1] });
+    state.fields[key] = "";
+    return true;
+  }
+  const marker = value[0];
+  if (marker === ">" || marker === "|") {
+    const literal = marker === "|";
+    Object.assign(state, {
+      key,
+      mode: literal ? "literal" : "fold",
+      sep: literal ? "\n" : " ",
+    });
+    state.fields[key] = value.slice(1).replace(/^-/, "").trim();
+    return true;
+  }
+  if (value) return false;
+  Object.assign(state, { key, mode: "pending", sep: " " });
+  state.fields[key] = null;
+  return true;
+}
+
+function startField(state: ParseState, key: string, value: string): void {
+  if (startMultiline(state, key, value)) return;
+  if (value.startsWith("[") && value.endsWith("]")) {
+    const inner = value.slice(1, -1);
+    state.fields[key] = inner.trim()
+      ? splitFlowItems(inner).map((item) => unquote(item.trim()))
+      : [];
+  } else state.fields[key] = unquote(value);
+}
+
+function continueField(state: ParseState, line: string, text: string): boolean {
+  if (!state.key) return false;
+  if (!text) {
+    state.blanks++;
+    return true;
+  }
+  if (/^[ \t]/u.test(line)) {
+    appendMultiline(state, text);
+    return true;
+  }
+  if (state.fields[state.key] == null) state.fields[state.key] = "";
+  Object.assign(state, { key: null, mode: null, sep: " ", blanks: 0 });
+  return false;
+}
+
+function parseLine(state: ParseState, line: string): void {
+  const text = line.trim();
+  if (continueField(state, line, text)) return;
+  if (!text || text.startsWith("#")) return;
+  const colon = text.indexOf(":");
+  if (colon < 0) return;
+  startField(state, text.slice(0, colon).trim(), text.slice(colon + 1).trim());
+}
+
 export function parseFrontmatter(content: string): ParsedFrontmatter {
   const { frontmatter, body } = splitCard(content);
-  if (frontmatter === null) return { fields: null, body, lines: [] };
-
-  const rawLines = frontmatter.split("\n");
-  const fields: Record<string, FmValue | null> = {};
-  let multilineKey: string | null = null;
-  let multilineMode: "fold" | "literal" | "list" | "pending" | null = null;
-  let multilineSep = " ";
-  let multilineBlankLines = 0;
-
-  for (const line of rawLines) {
-    const stripped = line.trim();
-    // ЛЮБОЙ ведущий пробел/таб = continuation: YAML допускает и одиночный пробел.
-    const indented = /^[ \t]/.test(line);
-
-    // Пустая строка внутри block scalar разделяет абзацы и не завершает ключ.
-    if (multilineKey && !stripped) {
-      multilineBlankLines++;
-      continue;
-    }
-
-    if (multilineKey && indented) {
-      if (multilineMode === "pending") {
-        if (stripped.startsWith("- ")) {
-          multilineMode = "list";
-          fields[multilineKey] = [];
-        } else {
-          multilineMode = "fold";
-          multilineSep = " ";
-          fields[multilineKey] = "";
-        }
-      }
-      if (multilineMode === "list") {
-        const item = stripped.startsWith("- ")
-          ? stripped.slice(2).trim()
-          : stripped;
-        if (item) (fields[multilineKey] as string[]).push(unquote(item));
-      } else {
-        const prev = (fields[multilineKey] as string) || "";
-        const separator = multilineBlankLines
-          ? "\n".repeat(
-              multilineBlankLines + (multilineMode === "literal" ? 1 : 0),
-            )
-          : multilineSep;
-        fields[multilineKey] = (prev + separator + stripped).trim();
-      }
-      multilineBlankLines = 0;
-      continue;
-    }
-
-    if (multilineKey && !indented) {
-      if (fields[multilineKey] == null) fields[multilineKey] = "";
-      multilineKey = null;
-      multilineMode = null;
-      multilineSep = " ";
-      multilineBlankLines = 0;
-    }
-
-    if (!stripped || stripped.startsWith("#")) continue;
-    const colon = stripped.indexOf(":");
-    if (colon === -1) continue;
-
-    const key = stripped.slice(0, colon).trim();
-    const val = stripped.slice(colon + 1).trim();
-
-    if (val === ">-" || val === ">") {
-      multilineKey = key;
-      multilineMode = "fold";
-      multilineSep = " ";
-      fields[key] = "";
-      continue;
-    }
-    if (val === "|-" || val === "|") {
-      multilineKey = key;
-      multilineMode = "literal";
-      multilineSep = "\n";
-      fields[key] = "";
-      continue;
-    }
-    if (val.startsWith(">")) {
-      multilineKey = key;
-      multilineMode = "fold";
-      multilineSep = " ";
-      fields[key] = val.replace(/^[>-]+/, "").trim();
-      continue;
-    }
-    if (val.startsWith("|")) {
-      multilineKey = key;
-      multilineMode = "literal";
-      multilineSep = "\n";
-      fields[key] = val.replace(/^[|-]+/, "").trim();
-      continue;
-    }
-    if (val === "") {
-      multilineKey = key;
-      multilineMode = "pending";
-      multilineSep = " ";
-      fields[key] = null;
-      continue;
-    }
-    if (val.startsWith("[") && val.endsWith("]")) {
-      // Квото-осознанный сплит: formatItem пишет `["a, b", c]` — наивный split(",")
-      // разорвал бы квотированный элемент и сломал round-trip.
-      const inner = val.slice(1, -1);
-      fields[key] = inner.trim()
-        ? splitFlowItems(inner).map((x) => unquote(x.trim()))
-        : [];
-    } else {
-      fields[key] = unquote(val);
-    }
-  }
-
-  if (multilineKey && fields[multilineKey] == null) fields[multilineKey] = "";
-
-  const clean: FmFields = {};
-  for (const [k, v] of Object.entries(fields)) clean[k] = v ?? "";
-  return { fields: clean, body, lines: rawLines };
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  if (frontmatter === null) return { fields: null, body, lines: [], eol };
+  const lines = frontmatter.split("\n");
+  const state: ParseState = {
+    fields: {},
+    key: null,
+    mode: null,
+    sep: " ",
+    blanks: 0,
+  };
+  for (const line of lines) parseLine(state, line);
+  if (state.key && state.fields[state.key] == null)
+    state.fields[state.key] = "";
+  const fields: FmFields = {};
+  for (const [key, value] of Object.entries(state.fields))
+    fields[key] = value ?? "";
+  return { fields, body, lines, eol };
 }
 
 /** Элементы flow-списка `[...]` с учётом кавычек и экранированных `\"`. */
@@ -253,7 +253,6 @@ function unquote(s: string): string {
   return s;
 }
 
-/** Новый string всегда JSON-quoted: тип не меняется в любом YAML-reader. */
 export function formatItem(v: string): string {
   return JSON.stringify(String(v));
 }
@@ -277,60 +276,70 @@ function valuesEqual(left: FmValue | undefined, right: FmValue): boolean {
   return left === right;
 }
 
-/**
- * Пересобрать frontmatter: порядок исходных строк сохраняется, значения известных
- * ключей заменяются, неизвестные строки остаются нетронутыми, новые ключи дописываются
- * в конец. Continuation-строки перезаписанного ключа пропускаются ПО ОТСТУПУ (не по
- * наличию двоеточия) — иначе `description: >-` дублируется на каждой перезаписи.
- */
+type WriteState = {
+  out: string[];
+  written: Set<string>;
+  skip: boolean;
+  fields: FmFields;
+  original: FmFields | null;
+  removed: readonly string[];
+};
+const CONTINUED = new Set([">-", ">", "|-", "|", ""]);
+
+function keepRawLine(state: WriteState, line: string, text: string): boolean {
+  if (state.skip && /^[ \t]/u.test(line)) return true;
+  if (text && !text.startsWith("#") && text.includes(":")) return false;
+  if (!state.skip) state.out.push(line);
+  return true;
+}
+
+function rewriteField(state: WriteState, line: string, text: string): void {
+  state.skip = false;
+  const colon = text.indexOf(":");
+  const key = text.slice(0, colon).trim();
+  const value = text.slice(colon + 1).trim();
+  state.written.add(key);
+  if (state.removed.includes(key)) {
+    state.skip = CONTINUED.has(value);
+  } else if (Object.prototype.hasOwnProperty.call(state.fields, key)) {
+    const unchanged = valuesEqual(state.original?.[key], state.fields[key]);
+    state.out.push(unchanged ? line : formatField(key, state.fields[key]));
+    state.skip = !unchanged && CONTINUED.has(value);
+  } else state.out.push(line);
+}
+
 export function writeFrontmatter(
   fields: FmFields,
   originalLines: string[],
+  removed: readonly string[] = [],
 ): string {
   const originalFields = originalLines.length
     ? parseFrontmatter(`---\n${originalLines.join("\n")}\n---\n`).fields
     : null;
-  const written = new Set<string>();
-  const out: string[] = [];
-  let skipContinuation = false;
-
+  const state: WriteState = {
+    out: [],
+    written: new Set(),
+    skip: false,
+    fields,
+    original: originalFields,
+    removed,
+  };
   for (const line of originalLines) {
-    const stripped = line.trim();
-    const indented = /^[ \t]/.test(line);
-    if (skipContinuation && indented) continue;
-
-    if (!stripped || stripped.startsWith("#")) {
-      // Пустая строка/коммент ВНУТРИ пропускаемого блока (folded-скаляр с абзацем) —
-      // часть блока, не разделитель: не сбрасываем skip и не выводим.
-      if (!skipContinuation) out.push(line);
-      continue;
-    }
-    if (!stripped.includes(":")) {
-      if (!skipContinuation) out.push(line);
-      continue;
-    }
-
-    skipContinuation = false;
-    const colon = stripped.indexOf(":");
-    const key = stripped.slice(0, colon).trim();
-    const valPart = stripped.slice(colon + 1).trim();
-    written.add(key);
-    if (Object.prototype.hasOwnProperty.call(fields, key)) {
-      const unchanged = valuesEqual(originalFields?.[key], fields[key]);
-      out.push(unchanged ? line : formatField(key, fields[key]));
-      // '' покрывает блочные списки и pending-значения: их отступные строки тоже
-      // заменяются целиком.
-      if (!unchanged && [">-", ">", "|-", "|", ""].includes(valPart)) {
-        skipContinuation = true;
-      }
-    } else {
-      out.push(line);
-    }
+    const text = line.trim();
+    if (!keepRawLine(state, line, text)) rewriteField(state, line, text);
   }
-
   for (const [key, val] of Object.entries(fields)) {
-    if (!written.has(key)) out.push(formatField(key, val));
+    if (!state.written.has(key)) state.out.push(formatField(key, val));
   }
+  return state.out.join("\n");
+}
 
-  return out.join("\n");
+export function renderCardDocument(
+  parsed: ParsedFrontmatter,
+  fields: FmFields,
+  body: string,
+  removed: readonly string[] = [],
+): string {
+  const text = `---\n${writeFrontmatter(fields, parsed.lines, removed)}\n---\n${body.trim()}\n`;
+  return parsed.eol === "\r\n" ? text.replace(/\n/gu, "\r\n") : text;
 }

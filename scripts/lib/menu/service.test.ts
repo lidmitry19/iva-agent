@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node's test runner owns registrations and injected service doubles preserve asynchronous boundaries. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -216,10 +216,7 @@ test("up: хендофф в deps.handleUpdateCheck с chatId", async () => {
   assert.equal(called, 10);
 });
 
-// Регрессия 0.3.2: кнопка спавнила cleanup.py по пути ВНУТРИ vault'а, куда его клал синк.
-// Юзеры с 0.3.0 прыжком на 0.3.2 получали «Failed to spawn … (os error 2)». Скрипт обязан
-// браться из репо и реально существовать, а vault остаётся только рабочим каталогом.
-test("cln: cleanup.py берётся из репо, cwd — vault", async () => {
+test("cln: TypeScript cleaner берётся из репо, cwd — vault", async () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
   const dataDir = mkdtempSync(join(tmpdir(), "iva-data-"));
   const h = makeCtx({
@@ -227,10 +224,13 @@ test("cln: cleanup.py берётся из репо, cwd — vault", async () => 
   });
   const spec = await commandSpec("cln", h.ctx);
   assert.equal(spec.kind, "proc");
-  assert.deepEqual(spec.argv.slice(0, 2), ["uv", "run"]);
-  assert.equal(spec.argv[2], join(repoRoot, "scripts/autograph/cleanup.py"));
-  assert.ok(existsSync(spec.argv[2]), `нет скрипта: ${spec.argv[2]}`);
-  assert.deepEqual(spec.argv.slice(3), [".", "--apply"]);
+  assert.deepEqual(spec.argv.slice(0, 2), [
+    process.execPath,
+    join(repoRoot, "scripts/vault-cleanup.ts"),
+  ]);
+  assert.ok(existsSync(spec.argv[1]), `нет скрипта: ${spec.argv[1]}`);
+  assert.deepEqual(spec.argv.slice(2), [".", "--apply"]);
+  assert.equal(spec.argv.length, 4);
   assert.equal(spec.cwd, join(repoRoot, "vault"));
 });
 
@@ -280,7 +280,7 @@ test("go:cln: сводка парсит финальную строку cleanup"
       root: "/nonexistent",
       envPath: join(dataDir, ".env"),
       svcRun: fastRun,
-      // Строка ДОСЛОВНО как её печатает scripts/autograph/cleanup.py (режим — applied).
+      // Строка дословно как её печатает scripts/vault-cleanup.ts.
       svcSpec: () => ({
         kind: "proc",
         argv: [
@@ -301,6 +301,68 @@ test("go:cln: сводка парсит финальную строку cleanup"
   assert.ok(final);
   assert.match(final.text, /3 файл/);
   assert.match(final.text, /224(\.0)? МБ/);
+});
+
+// Чистка идёт процессом, пока мост свободен: правки владельца в Obsidian ложатся в vault
+// рядом с её работой, и без пары коммитов они уехали бы в ночной `add -A` неотличимо от
+// результата чистки. Шов тот же, что у обновлятора: снимок «до» и результат после.
+test("go:cln: чистка оставляет в vault пару коммитов — снимок до и результат", async (t) => {
+  resetForTests();
+  t.after(() => {
+    cancelRun();
+    resetForTests();
+  });
+  const vault = mkdtempSync(join(tmpdir(), "iva-vault-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: vault,
+      encoding: "utf8",
+    }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "vault@example.com");
+  git("config", "user.name", "Vault");
+  writeFileSync(join(vault, "CORE.md"), "# CORE\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "vault");
+  // Правка владельца в Obsidian, ещё не в истории: она уезжает в снимок «до».
+  writeFileSync(join(vault, "CORE.md"), "# CORE\n\nправка владельца\n");
+
+  const dataDir = mkdtempSync(join(tmpdir(), "iva-data-"));
+  const h = makeCtx({
+    deps: {
+      dataDir,
+      root: "/nonexistent",
+      envPath: join(dataDir, ".env"),
+      svcRun: fastRun,
+      // Чистка — чужой процесс: правит vault мимо инструментов памяти. cwd процесса и есть
+      // vault, поэтому коммиты ложатся в него.
+      svcSpec: () => ({
+        kind: "proc",
+        cwd: vault,
+        argv: [
+          process.execPath,
+          "-e",
+          "require('node:fs').writeFileSync('карточка.md', '# Починено\\n')",
+        ],
+      }),
+    },
+  });
+  const st = newState();
+  h.st = st;
+  await service.on("go", ["cln"], st, h.ctx);
+  await waitFor(() => currentRun()?.status === "done");
+  await waitFor(() => git("log", "--pretty=%s").split("\n").length >= 3);
+  assert.deepEqual(git("log", "--pretty=%s").split("\n").slice(0, 2), [
+    "menu: vault cleanup",
+    "menu: vault snapshot",
+  ]);
+  // Снимок «до» держит правку владельца, второй коммит - результат чистки.
+  assert.match(git("show", "--name-only", "--pretty=", "HEAD~1"), /CORE\.md/u);
+  assert.match(
+    git("show", "--name-only", "--pretty=", "HEAD"),
+    /карточка\.md/u,
+  );
+  assert.equal(git("status", "--porcelain"), "");
 });
 
 test("go:mem: юнит через systemctl, финал «Цикл памяти пройден»", async () => {

@@ -121,7 +121,7 @@ export const COMMANDS: ReadonlyArray<Command> = [
     args: { en: "<text>", ru: "<текст>" },
   },
   { command: "tasks", en: "show tasks", ru: "показать задачи" },
-  { command: "digest", en: "morning digest", ru: "утренний дайджест" },
+  { command: "digest", en: "daily brief", ru: "обзор дня" },
 ];
 
 // Текст /help на текущем языке. Генерится на каждый вызов (язык мог смениться).

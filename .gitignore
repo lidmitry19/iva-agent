@@ -59,3 +59,11 @@ AGENTS.md
 docs/agents/
 .scratch/
 .worktrees/
+
+# TLC state dumps (specs/): TLC runs from a temporary copy
+/states/
+
+# Рабочие документы разработки (планы, аудиты, PRD, настройки проверки кода) живут на машине в .scratch/, не в продукте
+docs/quality/
+docs/audits/
+docs/*-prd.md

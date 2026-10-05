@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import fc from "fast-check";
 
@@ -58,6 +61,38 @@ void test("telegram-send loads under bare Node and redacts outbound secrets", as
   );
   assert.equal(requests[0].body.chat_id, "test-chat");
   assert.equal(requests[0].body.text, "[REDACTED]");
+  assert.equal("disable_notification" in requests[0].body, false);
+});
+
+void test("a scheduled model reply keeps quiet delivery through the plain fallback", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests: CapturedRequest[] = [];
+  globalThis.fetch = (url: URL | RequestInfo, options?: RequestInit) => {
+    requests.push(captureRequest(url, options));
+    return Promise.resolve(
+      new Response(requests.length === 1 ? "bad entities" : "", {
+        status: requests.length === 1 ? 400 : 200,
+      }),
+    );
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { sendTelegramHtml } = await import("./telegram-send.ts");
+  const result = await sendTelegramHtml(
+    "test-bot",
+    "test-chat",
+    "<!-- iva:silent -->\nОтчёт по расписанию",
+  );
+
+  assert.deepEqual(result, { ok: true, fellBack: true, error: "" });
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.body.disable_notification, true);
+    assert.doesNotMatch(String(request.body.text), /iva:silent/u);
+  }
+  assert.equal("parse_mode" in requests[1].body, false);
 });
 
 void test("telegram-send keeps redaction when retrying a rejected HTML message", async (t) => {
@@ -537,4 +572,68 @@ void test("property: transient retry is bounded, classified and timed", async ()
     ),
     RUNS,
   );
+});
+
+// Предложение плагина на проводе: кнопка доходит в обоих стилях меню владельца, и тот же
+// outbound-Gate снимает секрет из команды плагина до Bot API.
+void test("sendTelegramScreen carries the button in the owner's menu style, through the Gate", async (t) => {
+  const data = mkdtempSync(join(tmpdir(), "iva-screen-"));
+  const previous = process.env.ASSISTANT_DATA_DIR;
+  process.env.ASSISTANT_DATA_DIR = data;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ASSISTANT_DATA_DIR;
+    else process.env.ASSISTANT_DATA_DIR = previous;
+    rmSync(data, { recursive: true, force: true });
+  });
+  const { sendTelegramScreen } = await import("./telegram-send.ts");
+  const requests: CapturedRequest[] = [];
+  const fetchImpl = (url: URL | RequestInfo, options?: RequestInit) => {
+    requests.push(captureRequest(url, options));
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  };
+  const markdown = `Plugin relay asks to be installed. It will run: mcp x: run api_key=${"x".repeat(24)}.\n\n<tg-button type="callback_data" style="success" data="iva_plugin:ok:0123456789ab">Install</tg-button>`;
+
+  // classic по умолчанию: текст и inline-клавиатура.
+  assert.deepEqual(
+    await sendTelegramScreen("bot", "42", markdown, { fetchImpl }),
+    {
+      ok: true,
+      error: "",
+    },
+  );
+  writeFileSync(join(data, "settings.json"), '{"menuStyle":"rich"}');
+  await sendTelegramScreen("bot", "42", markdown, { fetchImpl });
+
+  const [classic, rich] = requests;
+  assert.equal(classic.url, "https://api.telegram.org/botbot/sendMessage");
+  assert.equal(classic.body.chat_id, "42");
+  assert.deepEqual(
+    (classic.body.reply_markup as { inline_keyboard: unknown }).inline_keyboard,
+    [
+      [
+        {
+          text: "Install",
+          callback_data: "iva_plugin:ok:0123456789ab",
+          style: "success",
+        },
+      ],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(classic.body), /x{24}/u);
+  assert.equal(rich.url, "https://api.telegram.org/botbot/sendRichMessage");
+  const richMarkdown = (rich.body.rich_message as { markdown: string })
+    .markdown;
+  assert.match(richMarkdown, /data="iva_plugin:ok:0123456789ab"/u);
+  assert.doesNotMatch(richMarkdown, /x{24}/u);
+});
+
+void test("sendTelegramScreen reports a refusal instead of falling back to text without the button", async () => {
+  const { sendTelegramScreen } = await import("./telegram-send.ts");
+  const result = await sendTelegramScreen("bot", "42", "Plugin relay", {
+    fetchImpl: () =>
+      Promise.resolve(new Response("Bad Request", { status: 400 })),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^400/u);
 });

@@ -8,9 +8,11 @@ import { join } from "node:path";
 
 import { LEGACY_MEMORY_UNITS as CLI_LEGACY_MEMORY_UNITS } from "../../scripts/lib/legacy-memory-units.ts";
 import {
+  catchUpJob,
   LEGACY_MEMORY_UNITS,
   runScheduleMigration,
 } from "./schedule-migration.ts";
+import { parseCron, SCHEDULE_CRON } from "./schedule-table.ts";
 
 type MigrationOptions = NonNullable<Parameters<typeof runScheduleMigration>[0]>;
 type ExecImplementation = NonNullable<MigrationOptions["execImpl"]>;
@@ -157,7 +159,7 @@ void test("systemctl binary missing (ENOENT): legacy-unit cleanup is skipped, bu
   );
 });
 
-void test("first boot (no status file): seeds a baseline (seededAt, NOT lastSuccessAt) for all four periods and runs nothing", async () => {
+void test("first boot (no status file): seeds a baseline (seededAt, NOT lastSuccessAt) for the night and runs nothing", async () => {
   const homedir = await scaffoldHome();
   const dataDir = join(homedir, "..", "data");
   const statusPath = join(dataDir, "rollup-status.json");
@@ -186,7 +188,7 @@ void test("first boot (no status file): seeds a baseline (seededAt, NOT lastSucc
   const status = parseStatus(await readFile(statusPath, "utf8"));
   // Keyed "memory-<period>" — the same name schedule-runner.ts actually records a real
   // run under (the `name` each agent/schedules/memory-*.ts passes), not the bare period.
-  for (const period of ["daily", "weekly", "monthly", "yearly"]) {
+  for (const period of ["night"]) {
     const entry = status[`memory-${period}`];
     assert.equal(entry?.["seededAt"], fixedNow, `${period} is seeded to now`);
     // The seed is a storm-protection baseline, not a real run — /menu → crons and
@@ -226,9 +228,7 @@ void test("a digest-only status seeds every missing memory key and causes no cat
   assert.deepEqual(ranPeriods, []);
   const status = parseStatus(await readFile(statusPath, "utf8"));
   assert.deepEqual(status["digest"], { lastSuccessAt: 123 });
-  for (const period of ["daily", "weekly", "monthly", "yearly"]) {
-    assert.equal(status[`memory-${period}`]?.["seededAt"], fixedNow);
-  }
+  assert.equal(status["memory-night"]?.["seededAt"], fixedNow);
 });
 
 void test("legacy teardown is not attempted when the seed transaction cannot be committed", async () => {
@@ -408,47 +408,38 @@ void test("a partial systemctl failure does not throw, leaves the file for a ret
   );
 });
 
-void test("catch-up math: due-and-in-grace periods run, an already-succeeded period does not, and a period whose due point is past its grace window is skipped", async () => {
-  // Fixed instant: 2026-08-04T10:00:00Z == Tuesday 15:00 in Asia/Almaty (UTC+5).
-  //   daily   due: 2026-08-04 04:00 Almaty == 2026-08-03T23:00:00Z  (now - due =  11h,   grace 20h  -> in grace)
-  //   weekly  due: Monday 2026-08-03 04:15 Almaty == 2026-08-02T23:15:00Z (now - due ~34.75h, grace 3d -> in grace)
-  //   monthly due: 2026-08-01 04:20 Almaty == 2026-07-31T23:20:00Z (now - due ~82.67h, grace 7d -> in grace)
-  //   yearly  due: 2026-01-01 04:25 Almaty == 2025-12-31T23:25:00Z (now - due ~215d,   grace 14d -> OUT of grace)
-  const fixedNow = Date.UTC(2026, 7, 4, 10, 0, 0);
-  const dailyDue = Date.UTC(2026, 7, 3, 23, 0, 0);
-  const weeklyDue = Date.UTC(2026, 7, 2, 23, 15, 0);
-  const monthlyDue = Date.UTC(2026, 6, 31, 23, 20, 0);
-
-  const homedir = await scaffoldHome();
-  const dataDir = join(homedir, "..", "data");
-  const statusPath = join(dataDir, "rollup-status.json");
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(
-    statusPath,
-    JSON.stringify({
-      "memory-daily": { lastSuccessAt: dailyDue - 60_000 }, // stale by 1 minute -> due, in grace -> RUNS
-      "memory-weekly": { lastSuccessAt: weeklyDue + 60_000 }, // already succeeded AFTER due -> does NOT run
-      "memory-monthly": { lastSuccessAt: monthlyDue - 60_000 }, // stale, in grace -> RUNS
-      "memory-yearly": { lastSuccessAt: 0 }, // ancient, but due point itself is out of grace -> does NOT run
-    }),
-  );
-
-  const { execImpl } = fakeExecImpl();
-  const ranPeriods: Period[] = [];
-  await runScheduleMigration({
-    homedir,
-    execImpl,
-    statusPath,
-    tz: "Asia/Almaty",
-    log: () => {},
-    now: () => fixedNow,
-    runJob: (period) => {
-      ranPeriods.push(period);
-      return Promise.resolve();
-    },
-  });
-
-  assert.deepEqual([...ranPeriods].sort(), ["daily", "monthly"]);
+void test("catch-up math: a stale night in grace runs, an already-succeeded one does not, a due point past its grace is skipped", async () => {
+  // The compiled night clock in Asia/Almaty (UTC+5); grace stays 20h.
+  const clock = parseCron(SCHEDULE_CRON["memory-night"]);
+  const due = Date.UTC(2026, 7, 4, clock.hour - 5, clock.minute);
+  const catchUp = async (now: number, lastSuccessAt: number) => {
+    const homedir = await scaffoldHome();
+    const dataDir = join(homedir, "..", "data");
+    const statusPath = join(dataDir, "rollup-status.json");
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      statusPath,
+      JSON.stringify({ "memory-night": { lastSuccessAt } }),
+    );
+    const ranPeriods: Period[] = [];
+    await runScheduleMigration({
+      homedir,
+      execImpl: fakeExecImpl().execImpl,
+      statusPath,
+      tz: "Asia/Almaty",
+      log: () => {},
+      now: () => now,
+      runJob: (period) => {
+        ranPeriods.push(period);
+        return Promise.resolve();
+      },
+    });
+    return ranPeriods;
+  };
+  const hours = (count: number) => count * 60 * 60 * 1000;
+  assert.deepEqual(await catchUp(due + hours(11), due - 60_000), ["night"]);
+  assert.deepEqual(await catchUp(due + hours(11), due + 60_000), []);
+  assert.deepEqual(await catchUp(due + hours(23), due - 60_000), []);
 });
 
 void test("style-matched integration: a real fake systemctl on PATH, tmpdir HOME, via bin/iva.mjs _install-units", async () => {
@@ -575,4 +566,19 @@ void test("a damaged status file defers the whole pass: no seed, no catch-up, an
     lines.some((l) => l.includes(statusPath)),
     "the journal must name the file the owner has to fix",
   );
+});
+
+void test("the catch-up run of a rollup carries the rollup's stop grace, like its schedule", () => {
+  const job = catchUpJob("night", {
+    root: "/srv/iva",
+    nodeBin: "/usr/bin/node",
+    statusPath: "/srv/iva/data/rollup-status.json",
+    log: () => {},
+  });
+  assert.equal(job.name, "memory-night");
+  assert.deepEqual(job.argv, ["scripts/memory/night.ts"]);
+  assert.equal(job.lockPath, "/srv/iva/.memory.lock");
+  assert.equal(job.factsPath, "/srv/iva/data/jobs.json");
+  // Без него после SIGTERM ребёнку 10 с: сводка не успевает погасить ход до SIGKILL.
+  assert.equal(job.killGraceMs, 90_000);
 });

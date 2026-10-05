@@ -178,7 +178,7 @@ export function schedulerBypassViolation(command: string): string | null {
         `запрещены. Напоминания и пользовательские расписания создаёт только инструмент ` +
         `remind: он посчитает время в зоне владельца, вернёт next_run_at и доставит сам. ` +
         `Поставь напоминание им, обходной путь не ищи. Регулярные задачи Ивы - eve-schedule ` +
-        `в agent/schedules/.`
+        `в agent/schedules/. Файл в чат отправляет инструмент send_file.`
       );
     }
   }

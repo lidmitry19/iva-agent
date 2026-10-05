@@ -1,84 +1,48 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { relative, sep } from "node:path";
+import {
+  globToRegExp,
+  resolveVaultToolRoot,
+  WALK_HINT,
+  walkBound,
+  walkFiles,
+} from "../lib/vault-file-search.ts";
 
 // Host-native glob. Переопределяет встроенный glob eve: ищет файлы на реальной ФС VPS.
 // fast-glob в node_modules отсутствует, поэтому реализовано через рекурсивный обход fs
-// и собственный матчер glob-паттернов. Самодостаточно (eve/tools, zod, node-builtins).
+// и собственный матчер glob-паттернов. Корень резолвится так же, как у read_file.
 
-// Перевод glob-паттерна в RegExp. Поддержка: ** (любые сегменты, вкл. /),
-// * (любые символы кроме /), ? (один символ кроме /).
-function globToRegExp(pattern: string): RegExp {
-  // Нормализуем разделители под posix-стиль (внутри сравниваем по "/").
-  const p = pattern.split(sep).join("/");
-  let re = "";
-  for (let i = 0; i < p.length; i++) {
-    const c = p[i];
-    if (c === "*") {
-      if (p[i + 1] === "*") {
-        // ** — любое число сегментов, опционально со слэшем после
-        re += "(?:.*)";
-        i++;
-        if (p[i + 1] === "/") i++; // съедаем слэш после **
-      } else {
-        re += "[^/]*";
-      }
-    } else if (c === "?") {
-      re += "[^/]";
-    } else if ("\\^$+.()|{}[]".includes(c)) {
-      re += "\\" + c;
-    } else {
-      re += c;
-    }
-  }
-  return new RegExp("^" + re + "$");
-}
-
-// Игнорируем тяжёлые/мусорные директории при обходе.
-const IGNORE_DIRS = new Set([
-  ".git",
-  "node_modules",
-  ".next",
-  "dist",
-  ".cache",
-]);
-
-async function walk(root: string, dir: string, out: string[]): Promise<void> {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return; // нет доступа / директория исчезла — пропускаем
-  }
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (IGNORE_DIRS.has(entry.name)) continue;
-      await walk(root, full, out);
-    } else if (entry.isFile()) {
-      out.push(relative(root, full).split(sep).join("/"));
-    }
-  }
-}
+// Потолок ответа: на c1 `**/*` от ~/iva вернул 43584 пути (6.6 млн знаков) в контекст.
+const MAX_PATHS = 1000;
 
 export default defineTool({
   description:
-    "Glob-поиск файлов: **, * и ?. От cwd (по умолчанию рабочая директория) — " +
-    "пути относительно cwd; .git/node_modules/dist пропускаются.",
+    "Glob-поиск файлов: **, * и ?. По умолчанию ищет от корня vault; cwd — " +
+    "абсолютный или от корня vault. .git/node_modules/dist пропускаются. " +
+    "Не больше 1000 путей.",
   inputSchema: z.object({
     pattern: z
       .string()
       .min(1)
-      .describe("Glob-паттерн, напр. **/*.ts или vault/daily/*.md"),
-    cwd: z.string().optional().describe("Абсолютный путь"),
+      .describe("Glob-паттерн, напр. **/*.ts или daily/*.md"),
+    cwd: z.string().optional().describe("Абсолютный или от корня vault путь"),
   }),
-  async execute({ pattern, cwd }) {
-    const root = cwd ?? process.cwd();
-    const all: string[] = [];
-    await walk(root, root, all);
+  async execute({ pattern, cwd }, { abortSignal }) {
+    const root = resolveVaultToolRoot(cwd);
+    const bound = walkBound(abortSignal);
+    const all = (await walkFiles(root, bound)).map((file) =>
+      relative(root, file).split(sep).join("/"),
+    );
     const re = globToRegExp(pattern);
     const matches = all.filter((p) => re.test(p)).sort();
-    return matches;
+    const hint = bound.truncated ? [`… ${WALK_HINT}`] : [];
+    if (matches.length <= MAX_PATHS) return [...matches, ...hint];
+    const rest = matches.length - MAX_PATHS;
+    return [
+      ...matches.slice(0, MAX_PATHS),
+      `… ещё ${rest} путей из ${matches.length}: сузь pattern или cwd`,
+      ...hint,
+    ];
   },
 });

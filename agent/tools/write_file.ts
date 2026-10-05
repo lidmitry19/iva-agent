@@ -1,107 +1,128 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { existsSync, realpathSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
-import { writeFileAtomic } from "../lib/fs-atomic.js";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { resolveVaultDir } from "@iva/vault-dir";
+import { writeFileAtomic } from "../lib/fs-atomic.js";
+import { parseFrontmatterOrSkip } from "../lib/frontmatter.ts";
+import { writeCore } from "../lib/core-write.ts";
+import { commitVaultWrite } from "../lib/vault-commit.ts";
+import { localStamp } from "../lib/vault-daily.ts";
 import { vaultDirErrorText } from "../lib/vault-error.ts";
+import { brokenLinksIn } from "../lib/vault-links.ts";
 
-// Host-native запись файла. Переопределяет встроенный write_file eve: пишет реальный
-// файл на VPS через каноническую атомарную запись, создавая родительские директории.
-//
-// Единственное ограничение: перезапись СУЩЕСТВУЮЩЕЙ карточки в <vault>/cards/** запрещена —
-// это полная замена файла, из-за которой терялись поля (tier/relevance/phone…) и старый текст.
-// Такие правки идут через write_card (он сливает). Всё остальное (vault/CORE.md, daily,
-// новые файлы в cards/) write_file пишет как раньше — см. instructions/10-map.md.
+// Память пишет её код; write_file оставляет внешние файлы и library/.
+const MEMORY = /^(?:daily|summaries|weekly|monthly|yearly|cards)(?:\/|$)/u;
 
-type PathProbe =
-  | { readonly kind: "path"; readonly path: string }
-  | { readonly kind: "absent" }
-  | { readonly kind: "unreadable"; readonly reason: string };
-
-// Сравниваем РЕАЛЬНЫЕ пути (realpath), а не лексические: симлинк vault/alias → cards
-// не должен обходить гард. Три исхода, а не два: «нет» и «не смог посмотреть» ведут к
-// противоположным решениям, и склеивать их нельзя.
-function probe(path: string): PathProbe {
-  try {
-    return { kind: "path", path: realpathSync(path) };
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? { kind: "absent" }
-      : { kind: "unreadable", reason: (error as Error).message };
+/** Реальный путь файла, которого может ещё не быть: симлинк не обходит запрет. */
+function realTarget(abs: string): string {
+  const rest: string[] = [];
+  for (let current = abs; ; current = dirname(current)) {
+    try {
+      return join(realpathSync(current), ...rest.reverse());
+    } catch {
+      if (dirname(current) === current) return abs;
+      rest.push(basename(current));
+    }
   }
 }
 
-type CardVerdict =
-  { readonly card: boolean } | { readonly undecidable: string };
+/** Перезапись существующего файла, когда vault или его cards/ не видно: проверить,
+ * не Card ли это, нельзя — отказ, а не тихое разрешение. cards/ ещё нет — защищать нечего. */
+function unverifiable(vault: string, path: string): string | null {
+  if (!existsSync(path)) return null;
+  for (const dir of [vault, join(vault, "cards")])
+    try {
+      realpathSync(dir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (dir !== vault && code === "ENOENT") continue;
+      const why = code === "ENOENT" ? "каталога vault нет" : String(error);
+      return `не могу проверить ${dir}: ${why}`;
+    }
+  return null;
+}
 
-// Решить «карточка или нет» можно, только зная, где вольт. Раньше нерезолвимый вольт
-// читался как «не карточка», то есть гвард открывался наружу и молчал: путь к вольту по
-// умолчанию относительный (`vault`), так что любой процесс с другим рабочим каталогом
-// затирал карточку целиком и возвращал модели ok:true.
-function cardVerdict(path: string): CardVerdict {
-  const abs = resolve(path);
-  // Файла нет — перезаписывать нечего, и где вольт, знать не требуется.
-  if (!existsSync(abs)) return { card: false };
+function brokenMarkdown(
+  vault: string,
+  rel: string,
+  path: string,
+  content: string,
+) {
+  if (!rel.endsWith(".md")) return null;
+  const body = parseFrontmatterOrSkip(content, path, () => {})?.body ?? content;
+  return brokenLinksIn(body, { vaultDir: vault, source: rel.slice(0, -3) });
+}
 
-  const vault = resolveVaultDir(process.cwd());
-  const cardsPath = join(vault, "cards");
-  const root = probe(vault);
-  if (root.kind === "absent")
+async function writeVaultFile(
+  vault: string,
+  rel: string,
+  path: string,
+  content: string,
+) {
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (MEMORY.test(rel))
     return {
-      undecidable: `каталога вольта ${vault} нет (ASSISTANT_VAULT_DIR задан относительно рабочего каталога?)`,
+      ok: false,
+      path,
+      error:
+        "write_file не пишет память: сырой день и выжимки ведёт ночь, Card меняет write_card.",
     };
-  if (root.kind === "unreadable") return { undecidable: root.reason };
-
-  const cards = probe(join(root.path, "cards"));
-  // Вольт на месте, а cards/ в нём ещё нет — защищать нечего.
-  if (cards.kind === "absent") return { card: false };
-  if (cards.kind === "unreadable") return { undecidable: cards.reason };
-
-  const real = probe(abs);
-  // Исчез между проверкой и резолвом — перезаписывать снова нечего.
-  if (real.kind === "absent") return { card: false };
-  if (real.kind === "unreadable")
-    return { undecidable: `${cardsPath}: ${real.reason}` };
-
-  return {
-    card: real.path === cards.path || real.path.startsWith(cards.path + sep),
-  };
+  const broken = brokenMarkdown(vault, rel, path, content);
+  if (broken) return { ok: false, path, error: broken };
+  if (rel === "CORE.md") {
+    const result = await writeCore({
+      vault,
+      next: content,
+      reason: "day write_file",
+      date: localStamp().date,
+      mode: "day",
+    });
+    return result.ok
+      ? { ok: true, path, bytes }
+      : { ok: false, path, error: result.error ?? "CORE не записан" };
+  }
+  await writeFileAtomic(path, content);
+  await commitVaultWrite(`file ${rel}: write`, [path], vault);
+  return { ok: true, path, bytes };
 }
 
 export default defineTool({
   description:
-    "Записать файл (UTF-8) на хост; директории создаются, файл перезаписывается целиком. " +
-    "Возвращает { ok, path, bytes }. " +
-    "Карточку vault/cards/** нельзя — используй write_card.",
+    "Записать UTF-8 файл, директории создаются. В vault: CORE.md через общий писатель CORE (лимит, History); daily/, summaries/, weekly/, monthly/, yearly/ и cards/ закрыты (Card меняет write_card); остальное, например library/, пишется и коммитится.",
   inputSchema: z.object({
     path: z.string().min(1).describe("Абсолютный путь"),
-    content: z.string().describe("Содержимое (UTF-8)"),
+    content: z.string().describe("Содержимое UTF-8"),
   }),
   async execute({ path, content }) {
-    let verdict: CardVerdict;
+    const bytes = Buffer.byteLength(content, "utf8");
     try {
-      verdict = cardVerdict(path);
+      const vault = resolveVaultDir(process.cwd());
+      const blocked = unverifiable(vault, resolve(path));
+      if (blocked) {
+        console.error(`[write_file] ${blocked}`);
+        return { ok: false, path, error: blocked };
+      }
+      const rel = relative(realTarget(vault), realTarget(resolve(path)))
+        .split(sep)
+        .join("/");
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        await writeFileAtomic(path, content);
+        return { ok: true, path, bytes };
+      }
+      return await writeVaultFile(vault, rel, path, content);
     } catch (error) {
       const text = vaultDirErrorText(error);
       if (text !== null) return { ok: false, path, error: text };
       throw error;
     }
-    if ("undecidable" in verdict) {
-      const error = `не могу проверить ${join(resolveVaultDir(process.cwd()), "cards")}: ${verdict.undecidable}`;
-      console.error(`[write_file] ${error}`);
-      return { ok: false, path, error };
-    }
-    if (verdict.card) {
-      return {
-        ok: false,
-        path,
-        error:
-          "Карточка уже существует — write_file затёр бы её целиком (поля вне схемы и старый текст). " +
-          "Используй write_card: он сливает новое содержимое со старым.",
-      };
-    }
-    await writeFileAtomic(path, content);
-    return { ok: true, path, bytes: Buffer.byteLength(content, "utf8") };
   },
 });

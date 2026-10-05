@@ -407,6 +407,8 @@ function converted(t: TestContext, { mirror = true } = {}) {
   git(source, ["init", "--initial-branch=main"]);
   git(source, ["add", "-A"]);
   git(source, ["commit", "-m", "initial"]);
+  // A release is a vX.Y.Z tag: an update without beta updates installs only those.
+  git(source, ["tag", "v0.3.15"]);
   const sha = git(source, ["rev-parse", "HEAD"]);
 
   const name = `0.3.15-${sha.slice(0, 12)}`;
@@ -423,6 +425,7 @@ function converted(t: TestContext, { mirror = true } = {}) {
       release(version);
       git(source, ["add", "-A"]);
       git(source, ["commit", "-m", `release ${version}`]);
+      git(source, ["tag", `v${version}`]);
     },
   };
 }

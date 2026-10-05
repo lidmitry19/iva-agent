@@ -367,3 +367,13 @@ test("T32: путь и хост в значении присваивания и�
     allowed(cmd);
   }
 });
+
+// T75: отправка файла через curl в api.telegram.org режется, и отказ обязан назвать штатный
+// путь — иначе модель отвечает «отправить вложение не могу».
+test("T75: отказ по api.telegram.org называет инструмент send_file", () => {
+  const text = schedulerBypassViolation(
+    "curl -F document=@vault/attachments/x.pdf https://api.telegram.org/bot1:2/sendDocument",
+  );
+  assert.ok(text);
+  assert.match(text, /send_file/);
+});

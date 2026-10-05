@@ -242,7 +242,7 @@ const COMMAND_MASK = `command() {
 /**
  * npm as far as install.sh can tell: it records every call, writes the hidden lockfile the
  * way a real `npm ci` does, produces a .output the way a real build does, and drops the
- * global binaries where `npm prefix -g` says they go.
+ * global binaries in the requested prefix, or `npm prefix -g` by default.
  */
 const NPM = `#!/bin/sh
 echo "npm $*" >> "$IVA_TEST_CALLS"
@@ -295,14 +295,20 @@ case "$1" in
     esac
     ;;
   i)
+    install_prefix="$IVA_TEST_NPM_PREFIX"
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = --prefix ]; then install_prefix="$arg"; fi
+      previous="$arg"
+    done
     tool=""
     case "$*" in
       *agent-browser*) tool=agent-browser ;;
       *googleworkspace*|*iva-gws-*) tool=gws ;;
     esac
     if [ -n "$tool" ]; then
-      mkdir -p "$IVA_TEST_NPM_PREFIX/bin"
-      ln -sf "$IVA_TEST_RECORDER" "$IVA_TEST_NPM_PREFIX/bin/$tool"
+      mkdir -p "$install_prefix/bin"
+      ln -sf "$IVA_TEST_RECORDER" "$install_prefix/bin/$tool"
     fi
     ;;
 esac
@@ -448,6 +454,12 @@ chmodSync(join(TOOLS, "npm"), 0o755);
 // the developer's global binaries, and putting that directory on PATH is how a fixture
 // ends up finding a real gws - or launching a real browser and downloading Chromium.
 symlinkSync(process.execPath, join(TOOLS, "node"));
+// git too: on macOS /usr/bin/git is an Xcode shim that exits 69 until the Xcode licence is
+// accepted, so the fixture takes the git this test process itself runs.
+symlinkSync(
+  execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(),
+  join(TOOLS, "git"),
+);
 after(() => rmSync(TOOLS, { recursive: true, force: true }));
 
 /**
@@ -551,6 +563,8 @@ function createWorld(t: TestContext, options: { env?: boolean } = {}): World {
   git("init", "--quiet", "--initial-branch=main");
   git("add", "-A");
   git("commit", "--quiet", "-m", "fixture");
+  // A release is a vX.Y.Z tag: a new installation checks out the newest one.
+  git("tag", "v1.0.0");
   execFileSync("git", ["clone", "--quiet", "--bare", install, remote]);
   git("remote", "add", "origin", remote);
 
@@ -1643,7 +1657,10 @@ void test("a re-run over a finished install skips the stages that are already do
     firstCalls,
     /^npm i -g .*\/iva-agent-browser-[^/\s]+\/[^/\s]+$/mu,
   );
-  assert.match(firstCalls, /^npm i -g .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu);
+  assert.match(
+    firstCalls,
+    /^npm i -g --prefix .*\/home\/\.local .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu,
+  );
   assert.match(firstCalls, /^npm exec -- eve build$/mu);
   // A finished install keeps nothing either.
   assert.deepEqual(leftovers(world.tmp), []);
@@ -1712,7 +1729,7 @@ void test("a first install into an empty directory still runs every stage", (t) 
     /^npm ci$/mu,
     /^npm i -g .*\/iva-agent-browser-[^/\s]+\/[^/\s]+$/mu,
     /^agent-browser install --with-deps$/mu,
-    /^npm i -g .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu,
+    /^npm i -g --prefix .*\/home\/\.local .*\/iva-gws-[^/\s]+\/[^/\s]+$/mu,
     /^npm exec -- eve build$/mu,
   ])
     assert.match(calls, stage);

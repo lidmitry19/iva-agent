@@ -6,10 +6,13 @@ edit to the shipped tree and no fork (ADR-0008). The format is
 [Agent Plugins 1.0.0](https://agent-plugins.org) — the same folder Codex, Cursor and Kiro
 read, so nothing here is Iva's own invention.
 
-Only the owner installs a plugin, and only from the terminal. There is no Telegram command
-and no model tool by design: plugin code runs inside the agent's process with this
-installation's keys in its environment, so an injected message must never be able to install
-one (ADR-0009). What that means for you is at the end, under
+A plugin of skills alone Iva may write and install herself, the way she writes a skill. A
+plugin with `mcp.json` or `sh.iva/` runs code inside the agent's process with this
+installation's keys in its environment, so it is installed from your terminal or by your tap:
+Iva runs `iva plugin propose <folder>`, you get a message built by code with what the plugin
+will run and an **Install** button, and the Bridge installs it after the tap, outside her turn
+(ADR-0009). The tap marks your intent on the regular path; it does not stop a model that has
+already been talked into misusing `bash`. What that means for you is at the end, under
 [What you risk](#what-you-risk).
 
 ## Install one
@@ -30,8 +33,9 @@ iva plugin add ./my-plugin                   # a folder on this machine
 
 Before your first install it prints the accepted risk once. If the plugin brings stdio MCP
 servers or its own services, it prints their commands and asks
-`Start these processes on this machine? [y/N]` — `--trust` answers yes without asking, and a
-non-interactive shell without `--trust` answers no.
+`Start these processes on this machine? [y/N]` — `--trust` answers yes without asking. A
+non-interactive shell (a script, Iva's own `bash`) does not install a plugin with `mcp.json`
+or `sh.iva/` at all: `add` refuses and names `iva plugin propose`.
 
 What happens next depends on what the plugin carries:
 
@@ -60,6 +64,7 @@ What happens next depends on what the plugin carries:
 | `iva plugin remove <name>`                 | Remove the plugin; its data in `data/plugin-data/<name>/` is kept                                         |
 | `iva plugin sync`                          | Repair: rebuild `plugins.json` from the folders and reinstall whatever is missing                         |
 | `iva plugin marketplace add\|remove\|list` | Your lists of plugins that install by name                                                                |
+| `iva plugin propose <folder>`              | Ask the owner in Telegram to install a plugin with code or MCP; the Bridge installs it after the tap      |
 
 `iva plugin` with no arguments prints the same list. Every command that changes state takes
 the same lock as `iva update`, so one run at a time: start a second while an update is in

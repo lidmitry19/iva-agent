@@ -294,29 +294,26 @@ void test("doctor checks the installed brain service and reports a failed one wi
   );
 });
 
-void test("doctor checks all four rollup periods against their own staleness threshold", async (t) => {
+void test("doctor checks the single memory-night schedule", async (t) => {
   const { project, runCommand } = await fixture(t);
   const now = Date.now();
   await mkdir(join(project, "data"), { recursive: true });
   await writeFile(
     join(project, "data/rollup-status.json"),
     JSON.stringify({
-      "memory-daily": { lastSuccessAt: now - 27 * 60 * 60 * 1000 }, // > 26h -> stale
-      "memory-weekly": { lastSuccessAt: now - 2 * 24 * 60 * 60 * 1000 }, // < 8d -> fresh
-      "memory-monthly": { lastSuccessAt: now - 33 * 24 * 60 * 60 * 1000 }, // > 32d -> stale
-      "memory-yearly": { lastSuccessAt: now - 10 * 24 * 60 * 60 * 1000 }, // < 370d -> fresh
+      "memory-night": { lastSuccessAt: now - 27 * 60 * 60 * 1000 },
     }),
   );
 
   const result = runCommand("doctor");
   const output = `${result.stdout}\n${result.stderr}`;
 
-  assert.match(output, /memory-daily schedule hasn't succeeded/);
-  assert.match(output, /memory-monthly schedule hasn't succeeded/);
-  assert.doesNotMatch(output, /memory-weekly schedule hasn't succeeded/);
-  assert.doesNotMatch(output, /memory-yearly schedule hasn't succeeded/);
-  assert.match(output, /memory-weekly schedule last succeeded/);
-  assert.match(output, /memory-yearly schedule last succeeded/);
+  assert.equal(result.status, 1, output);
+  assert.match(output, /memory-night schedule hasn't succeeded/);
+  assert.doesNotMatch(output, /memory-daily schedule/u);
+  assert.doesNotMatch(output, /memory-weekly schedule/u);
+  assert.doesNotMatch(output, /memory-monthly schedule/u);
+  assert.doesNotMatch(output, /memory-yearly schedule/u);
 });
 
 void test("doctor warns on a non-zero last exit code even right after a fresh success", async (t) => {
@@ -326,8 +323,8 @@ void test("doctor warns on a non-zero last exit code even right after a fresh su
   await writeFile(
     join(project, "data/rollup-status.json"),
     JSON.stringify({
-      // Recently succeeded (well inside the 26h daily threshold)...
-      "memory-daily": { lastSuccessAt: now - 60 * 60 * 1000, lastExitCode: 1 },
+      // Recently succeeded (well inside the 26h nightly threshold)...
+      "memory-night": { lastSuccessAt: now - 60 * 60 * 1000, lastExitCode: 1 },
       // ...but the run recorded here is the LATEST attempt, and it failed after that
       // success (e.g. a retry). The staleness check alone would call this fine.
     }),
@@ -336,8 +333,8 @@ void test("doctor warns on a non-zero last exit code even right after a fresh su
   const result = runCommand("doctor");
   const output = `${result.stdout}\n${result.stderr}`;
 
-  assert.match(output, /memory-daily schedule last succeeded/);
-  assert.match(output, /memory-daily schedule's last run exited 1/);
+  assert.match(output, /memory-night schedule last succeeded/);
+  assert.match(output, /memory-night schedule's last run exited 1/);
   // На этой установке нет authored tree: раздел расписаний по data/jobs.json читать
   // нечем, и он обязан молчать — про дерево доктор уже сказал своей строкой.
   assert.match(output, /the agent tree is missing/);
@@ -415,25 +412,22 @@ function updaterMemoryTransferScript(
 
 async function seedCompiledMemorySchedules(project: string): Promise<void> {
   await mkdir(join(project, ".output/server/_virtual"), { recursive: true });
-  for (const period of ["daily", "weekly", "monthly", "yearly"])
-    await writeFile(
-      join(project, `.output/server/_virtual/eve-${period}.schedule.mjs`),
-      scheduleDescriptionMjs(period),
-    );
+  await writeFile(
+    join(project, ".output/server/_virtual/eve-night.schedule.mjs"),
+    scheduleDescriptionMjs("night"),
+  );
 }
 
-void test("legacy memory-timer cleanup proceeds once the build actually contains ALL FOUR memory schedules", async (t) => {
+void test("legacy memory-timer cleanup proceeds once the build contains memory-night", async (t) => {
   const { calls, home, project, runCommand } = await fixture(t);
   const unitDir = join(home, ".config/systemd/user");
   await mkdir(unitDir, { recursive: true });
   await writeFile(join(unitDir, "iva-memory-daily.timer"), "[Unit]\n");
   await mkdir(join(project, ".output/server/_virtual"), { recursive: true });
-  for (const period of ["daily", "weekly", "monthly", "yearly"]) {
-    await writeFile(
-      join(project, `.output/server/_virtual/eve-${period}.schedule.mjs`),
-      scheduleDescriptionMjs(period),
-    );
-  }
+  await writeFile(
+    join(project, ".output/server/_virtual/eve-night.schedule.mjs"),
+    scheduleDescriptionMjs("night"),
+  );
 
   const result = runCommand("restart");
   const output = `${result.stdout}\n${result.stderr}`;
@@ -443,7 +437,7 @@ void test("legacy memory-timer cleanup proceeds once the build actually contains
   assert.equal(
     existsSync(join(unitDir, "iva-memory-daily.timer")),
     false,
-    "a build that has all four schedules lets cleanup proceed",
+    "a build that has the single night schedule lets cleanup proceed",
   );
   const systemctlCalls = (await readFile(calls, "utf8")).trim().split("\n");
   assert.ok(
@@ -539,11 +533,7 @@ void test("a restart fault after unit write keeps legacy memory units and their 
   assert.equal(systemctlCalls.includes(`--user disable --now ${unit}`), false);
 });
 
-void test("a PARTIAL build (only memory-daily compiled) still counts as stale — legacy units are preserved", async (t) => {
-  // Regression test: a build that's missing weekly/monthly/yearly (interrupted build,
-  // one schedule file failed to compile, etc.) must NOT let removeLegacyMemoryUnits()
-  // tear down systemd timers for periods that have no working in-process replacement in
-  // THIS build — that would lose those rollups entirely, not just delay the migration.
+void test("a build without memory-night keeps legacy units", async (t) => {
   const { home, project, runCommand } = await fixture(t);
   const unitDir = join(home, ".config/systemd/user");
   await mkdir(unitDir, { recursive: true });
@@ -563,7 +553,7 @@ void test("a PARTIAL build (only memory-daily compiled) still counts as stale �
   assert.match(
     output,
     /skipping legacy memory-timer cleanup/,
-    "one marker out of four must not be treated as a complete build",
+    "a retired schedule marker must not stand in for memory-night",
   );
   for (const period of ["daily", "weekly", "monthly", "yearly"]) {
     assert.equal(
@@ -1062,28 +1052,19 @@ void test("iva status stays quiet about legacy units once the brain rename is do
   assert.doesNotMatch(output, /iva-memory-doctor/);
 });
 
-void test("doctor surfaces problems from a fresh nightly memory report", async (t) => {
-  const { project, runCommand } = await fixture(t);
-  const graph = join(project, "vault/.graph");
-  await mkdir(graph, { recursive: true });
-  await writeFile(
-    join(graph, "enforce-report.json"),
-    JSON.stringify({
-      review: 2,
-      duplicates: 1,
-      skipped_oversize: 3,
-      unknown: 99,
-    }),
-  );
+// enforce-report.json писал удалённый autograph (enforce.py); новый Brain его не пишет.
+// Живость Brain доктор видит по состоянию iva-brain.service, а не по отчёту.
+void test("doctor does not ask for the enforce report nobody writes any more", async (t) => {
+  const { project, runCommand, seedUnit } = await fixture(t);
+  await seedUnit("iva-brain.timer");
+  await mkdir(join(project, "vault/.graph"), { recursive: true });
 
   const result = runCommand("doctor");
   const output = `${result.stdout}\n${result.stderr}`;
 
-  assert.match(
-    output,
-    /ночной maintenance сообщает о проблемах: review=2, duplicates=1, skipped_oversize=3/,
-  );
-  assert.doesNotMatch(output, /unknown=99/);
+  assert.doesNotMatch(output, /maintenance/u);
+  // Живость Brain по-прежнему проверяется: по состоянию его юнита.
+  assert.match(output, /iva-brain\.service has no failed state/u);
 });
 
 void test("userbot setup restarts an already enabled and active unit for new desired config", async (t) => {

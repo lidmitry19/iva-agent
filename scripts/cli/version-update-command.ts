@@ -14,7 +14,12 @@ import {
   removeTelegramJob,
   reporterFor,
 } from "../lib/telegram-status.ts";
-import { resolveUpdateTarget } from "../lib/update-channel.ts";
+import {
+  BETA_CONFIG,
+  betaChannel,
+  BranchUnavailableError,
+  resolveReleaseTarget,
+} from "../lib/update-channel.ts";
 import {
   gitAt,
   installedVersion,
@@ -145,14 +150,17 @@ export async function ensureMirror(home: string): Promise<string> {
   rmSync(staging, { recursive: true, force: true });
   const git = (root: string, args: string[]): Promise<string> =>
     requireGit(gitAt, root, args);
-  const key = "iva.updateBranch"; // What the installation follows, not the clone.
+  // What the installation follows, not the clone: its branch and beta updates.
+  const keys = ["iva.updateBranch", BETA_CONFIG];
   try {
     await git(home, ["clone", "--mirror", join(home, ".git"), staging]);
     const origin = await git(home, ["remote", "get-url", "origin"]);
     await git(staging, ["remote", "set-url", "origin", origin]);
-    const branch = (await gitAt(home, ["config", "--local", "--get", key]))
-      .stdout;
-    if (branch) await git(staging, ["config", key, branch]);
+    for (const key of keys) {
+      const value = (await gitAt(home, ["config", "--local", "--get", key]))
+        .stdout;
+      if (value) await git(staging, ["config", key, value]);
+    }
     renameSync(staging, repo);
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
@@ -162,27 +170,83 @@ export async function ensureMirror(home: string): Promise<string> {
 }
 
 /**
- * What the next version is built from. An unreachable remote is not a failure: the
- * newest mirrored commit is the honest answer, so an offline update is a no-op.
+ * What the next version is built from: the newest release, or the tip with beta updates
+ * on (ADR-0017, ADR-0018). Neither guesses: offline, with no beta branch or with no
+ * release tag it refuses. `installed` is the commit that runs; no update goes below it.
  */
 export async function resolveTarget(
   repo: string,
-): Promise<{ sha: string; version: string }> {
-  let sha = "";
+  installed?: string,
+): Promise<ReleaseAim> {
+  const git = (...args: string[]) => gitAt(repo, args);
+  let target: Awaited<ReturnType<typeof resolveReleaseTarget>>;
   try {
-    const target = await resolveUpdateTarget({
-      git: (...args) => gitAt(repo, args),
-    });
-    sha = target.targetHead ?? "";
-  } catch {
-    // Offline, or a remote that refuses the fetch.
+    target = await resolveReleaseTarget({ git, installed });
+  } catch (error) {
+    // Бета без ветки (нет сети или ветки): HEAD зеркала — это main, то есть откат.
+    if (!(error instanceof BranchUnavailableError)) throw error;
+    if (!(await betaChannel(git))) throw error;
+    throw new Error(
+      "the beta branch is unavailable (no network or no such branch); nothing was installed",
+      { cause: error },
+    );
   }
-  if (!sha) sha = await requireGit(gitAt, repo, ["rev-parse", "HEAD"]);
+  const [sha, beta] = [target.targetHead, target.beta];
+  const [release, newer] =
+    "tag" in target ? [target.tag, target.newer] : [undefined, false];
   const version = packageVersion(
     await requireGit(gitAt, repo, ["show", `${sha}:package.json`]),
   );
   if (!version) throw new Error(`no package version at ${sha}`);
-  return { sha, version };
+  return { sha, version, beta, release, newer };
+}
+
+/** Цель `iva update`: `release` — новейший выпуск, `newer` — установка новее него. */
+type ReleaseAim = {
+  sha: string;
+  version: string;
+  beta: boolean;
+  release?: string;
+  newer?: boolean;
+};
+
+/** Строка под «уже обновлена» без бета-обновлений: стоит выпуск или сборка новее него. */
+export function releaseNote(aim: ReleaseAim, locale: string): string | null {
+  if (aim.beta) return null;
+  const ru = locale === "ru";
+  if (!aim.newer)
+    return ru
+      ? "Это последняя стабильная версия."
+      : "That is the latest stable release.";
+  return ru
+    ? `Стоит сборка новее последнего выпуска (${aim.release}). Следующий выпуск поставлю, когда выйдет.`
+    : `This build is newer than the latest release (${aim.release}). I'll install the next release when it's out.`;
+}
+
+/** The commit that runs: the active version's, else the checkout's own HEAD. */
+async function installedCommit(home: string): Promise<string | undefined> {
+  const active = createVersionStore(home).currentName();
+  const at = active ? parseVersionName(active)?.sha : undefined;
+  return at ?? ((await gitAt(home, ["rev-parse", "HEAD"])).stdout || undefined);
+}
+
+/**
+ * `iva update` by release: the target is resolved from the commit that runs, and one
+ * already on its newest release says so under the "up to date" line.
+ */
+function releaseUpdate(home: string) {
+  let aim: ReleaseAim | undefined;
+  return {
+    target: async (repo: string) => {
+      aim = await resolveTarget(repo, await installedCommit(home));
+      return aim;
+    },
+    said: (outcome: UpdateOutcome | null, env: Record<string, string>) => {
+      const language = env.AGENT_LANGUAGE || process.env.AGENT_LANGUAGE;
+      const note = aim && releaseNote(aim, language === "ru" ? "ru" : "en");
+      if (outcome?.status === "current" && note) console.log(`   ${note}`);
+    },
+  };
 }
 
 /** The job file of a `/update --force` from the chat carries the flag. */
@@ -371,7 +435,8 @@ export function createVersionUpdateCommand(
   }
 
   async function run(args: readonly string[]): Promise<void> {
-    await pipeline(args, resolveTarget);
+    const update = releaseUpdate(install.home);
+    update.said(await pipeline(args, update.target), runtime.readEnv());
   }
 
   /**

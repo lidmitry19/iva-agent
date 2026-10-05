@@ -1,13 +1,15 @@
-// Экран «🔔 Уведомления»: чем Iva имеет право прервать день. Тумблеры только у Report'ов —
-// плановых сводок; алерты (проблемы и предложения обновиться) не выключаются, о чём экран
-// говорит прямым текстом (ADR-0007).
+// Экран «🔔 Уведомления»: чем Iva имеет право прервать день. Тумблеры у Report'ов (ночные
+// отчёты памяти) и у «Сама пишет»; алерты (проблемы и предложения обновиться) не
+// выключаются, о чём экран говорит прямым текстом (ADR-0007).
 //
-// Тумблер пишется в data/settings.json, который и rollup, и schedule дайджеста читают в
-// момент запуска — переключение применяется без рестарта процессов.
+// Тумблер пишется в data/settings.json, который и rollup, и тик Watch и Brief читают в
+// момент запуска — переключение применяется без рестарта процессов. «Сама пишет» (Watch и
+// Brief, ADR-0020) включён без ключа и выключает их, но не сообщения о сбоях.
 //
 // Правило репо: ни одной module-level const с переведённой строкой — подписи собираются в
 // render() через ctx.tr, иначе язык замёрзнет до рестарта.
-import { readSettings, writeSettings } from "#lib/settings.ts";
+import { parseProactive } from "#lib/proactive-config.ts";
+import { readSettings, updateSettings } from "#lib/settings.ts";
 import { memoryReportsEnabled } from "../notice-policy.ts";
 import { button } from "./buttons.ts";
 
@@ -23,7 +25,7 @@ type MenuContext = {
 // (грамматика в index.ts), а не имя ключа: мусорный аргумент просто не найдёт цели.
 const TOGGLES = {
   rep: "memoryReports",
-  dig: "digestSchedule",
+  pro: "proactive",
 } as const;
 type Toggle = keyof typeof TOGGLES;
 
@@ -31,17 +33,18 @@ function isToggle(value: string): value is Toggle {
   return Object.hasOwn(TOGGLES, value);
 }
 
-function digestEnabled(settings: unknown): boolean {
-  if (typeof settings !== "object" || settings === null) return false;
-  const digest = (settings as { digestSchedule?: unknown }).digestSchedule;
-  if (typeof digest !== "object" || digest === null) return false;
-  return (digest as { enabled?: unknown }).enabled === true;
+/** «08:30 и 14:00» — времена Brief из настроек. */
+function briefTimes(times: readonly string[], and: string): string {
+  return times.length < 2
+    ? times.join("")
+    : `${times.slice(0, -1).join(", ")} ${and} ${times.at(-1)}`;
 }
 
 export default {
   parent: PARENT,
   render(_state: MenuState, ctx: MenuContext) {
     const settings = readSettings();
+    const proactive = parseProactive(settings, () => undefined);
     const T = ctx.tr;
     // Кнопка несёт значение, которое надо получить, а не «переключи»: повторный тап по
     // протухшему меню приводит к тому же состоянию, а не мигает туда-обратно.
@@ -52,12 +55,20 @@ export default {
       )} — ${what}`;
     const text = [
       `# ${T("🔔 Notices", "🔔 Уведомления")}`,
-      T(
-        "Memory reports: what Iva filed overnight and over the week.\n" +
-          "Morning digest: your day ahead at 08:00.",
-        "Отчёты памяти: что Ива разложила за ночь и за неделю.\n" +
-          "Утренний дайджест: план дня в 08:00.",
-      ),
+      [
+        T(
+          "Memory reports: what Iva filed overnight and over the week.",
+          "Отчёты памяти: что Ива разложила за ночь и за неделю.",
+        ),
+        ...(proactive.briefTimes.length === 0
+          ? []
+          : [
+              T(
+                `Daily brief: ${briefTimes(proactive.briefTimes, "and")}`,
+                `Обзор дня: ${briefTimes(proactive.briefTimes, "и")}`,
+              ),
+            ]),
+      ].join("\n"),
       toggle(
         memoryReportsEnabled(settings),
         T("Memory reports", "Отчёты памяти"),
@@ -68,12 +79,12 @@ export default {
         ),
       ),
       toggle(
-        digestEnabled(settings),
-        T("Morning digest", "Утренний дайджест"),
-        "dig",
+        proactive.enabled,
+        T("Writes on her own", "Сама пишет"),
+        "pro",
         T(
-          "turn the 08:00 digest on or off.",
-          "включить или выключить дайджест.",
+          "Watch for missed items and the daily brief. Failures are always reported.",
+          "Присмотр за пропущенным и обзор дня. О сбоях пишу всегда.",
         ),
       ),
       T(
@@ -101,14 +112,18 @@ export default {
     if (value !== "0" && value !== "1") return;
     const key = TOGGLES[target];
     const enabled = value === "1";
-    // writeSettings мержит поверхностно, поэтому вложенный объект патчится целиком —
-    // иначе соседние ключи (расписание дайджеста) были бы стёрты этим тапом.
-    const current = readSettings()[key];
-    const kept =
-      typeof current === "object" && current !== null && !Array.isArray(current)
-        ? (current as Record<string, unknown>)
-        : {};
-    writeSettings({ [key]: { ...kept, enabled } });
+    // Вложенный объект патчится целиком под замком настроек — иначе соседние ключи
+    // (чат отчётов, пределы Watch) были бы стёрты этим тапом.
+    updateSettings((settings) => {
+      const current = settings[key];
+      const kept =
+        typeof current === "object" &&
+        current !== null &&
+        !Array.isArray(current)
+          ? (current as Record<string, unknown>)
+          : {};
+      return { ...settings, [key]: { ...kept, enabled } };
+    });
     await ctx.show(state, "ntc");
   },
 };

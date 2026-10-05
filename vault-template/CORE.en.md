@@ -1,8 +1,8 @@
 # CORE
 
-<!-- Always-on: injected into context every turn (≤~1200 chars). Durable facts only.
+<!-- Always-on: injected into context every turn (≤~3600 chars). Durable facts only.
      Written by the nightly rollup; on an explicit "remember …" the agent appends a line.
-     Rule: scripts/memory/instructions/rules/core-format.md (in the Iva repo) -->
+     The night takes the line format from its CORE step instruction (scripts/memory/instructions/night/core.md) -->
 
 ## User
 - (name, role, how to address — fills in over time)

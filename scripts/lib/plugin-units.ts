@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { servicePath } from "../../packages/claude-command/index.ts";
 import { cleanupSystemdUnits, systemdExecArgument } from "./systemd-control.ts";
 
 type Say = (message: string) => void;
@@ -36,8 +37,6 @@ export const PLUGIN_UNIT_RE = /^iva-(?:mcp|plugin)-.+\.service$/u;
  * generation must load without the authored tree; `plugin-units.test.ts` pins them equal.
  */
 export const UNIT_PART = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-/** The PATH every generated unit runs with: node first, then the usual places. */
-const UNIT_PATH = "%h/.local/bin:/usr/local/bin:/usr/bin:/bin";
 
 /** One unit to be on disk, with the body it must have. */
 export type PluginUnit = {
@@ -112,8 +111,8 @@ export function mcpProxyUnitBody({
       join(root, "services/mcp-proxy/serve.ts"),
     )} --plugin ${argument(plugin)} --server ${argument(server)} --port ${port} --token-file ${argument(tokenFile)}`,
     // No EnvironmentFile: the proxy must not have the installation's secrets to pass on.
-    // node comes first on PATH so an MCP server started as `npx …` finds the same one.
-    `Environment="PATH=${systemdEnvironmentSegment(nodeBinDir)}:${UNIT_PATH}"`,
+    // User-installed CLI tools precede older global copies; npx still finds Node.
+    `Environment="PATH=${servicePath(systemdEnvironmentSegment(nodeBinDir), "%h")}"`,
     "Restart=on-failure",
     "RestartSec=5",
     "",
@@ -171,7 +170,7 @@ export function pluginServiceUnitBody({
     systemdEnvironment("PLUGIN_ROOT", pluginRoot),
     systemdEnvironment("PLUGIN_DATA", pluginData),
     // `%h` is ours and stays a specifier; only the node directory is escaped.
-    `Environment="PATH=${systemdEnvironmentSegment(nodeBinDir)}:${UNIT_PATH}"`,
+    `Environment="PATH=${servicePath(systemdEnvironmentSegment(nodeBinDir), "%h")}"`,
     "Restart=on-failure",
     "RestartSec=5",
     "",

@@ -102,7 +102,7 @@ one-word choices (yes/no) share one row.
 Сниму его.
 
 <tg-button-row><tg-button type="url" url="https://iva-agent.com/docs">Документация</tg-button></tg-button-row>
-Как настроить дайджест.
+Как настроить обзор дня.
 
 <tg-button-row><tg-button type="copy_text" text="ssh c1">Скопировать</tg-button></tg-button-row>
 Команда для входа на сервер.

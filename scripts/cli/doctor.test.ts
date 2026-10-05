@@ -1,9 +1,12 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
+import "../fixtures/no-host-anthropic.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -1164,10 +1167,7 @@ test("doctor rejects an invalid model provider instead of diagnosing Ollama", as
     exit: () => undefined,
   })();
 
-  assert.equal(
-    failures[0],
-    'Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, openrouter, custom — run: iva config',
-  );
+  assert.equal(failures[0], invalidModelProviderMessage("ollmaa"));
   assert.equal(
     failures.some((message) => message.includes("OLLAMA_")),
     false,
@@ -1819,7 +1819,7 @@ test("doctor names a failed schedule run and its open failure", async (t) => {
   await recordFact(
     jobFactsFile(data),
     {
-      name: "memory-daily",
+      name: "memory-night",
       startedAt: finishedAt - 1000,
       finishedAt,
       ok: false,
@@ -1843,7 +1843,7 @@ test("doctor names a failed schedule run and its open failure", async (t) => {
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /расписание memory-daily: провал \(exited 1\)/u.test(message),
+        /расписание memory-night: провал \(exited 1\)/u.test(message),
     ),
     "последний запуск имени виден как провал",
   );
@@ -1851,7 +1851,7 @@ test("doctor names a failed schedule run and its open failure", async (t) => {
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /незакрытый провал: memory-daily .*iva jobs ack memory-daily/u.test(
+        /незакрытый провал: memory-night .*iva jobs ack memory-night/u.test(
           message,
         ),
     ),
@@ -1869,7 +1869,7 @@ test("doctor без systemd печатает раздел расписаний �
   await recordFact(
     jobFactsFile(data),
     {
-      name: "memory-daily",
+      name: "memory-night",
       startedAt: finishedAt - 1000,
       finishedAt,
       ok: false,
@@ -1886,7 +1886,7 @@ test("doctor без systemd печатает раздел расписаний �
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /расписание memory-daily: провал \(exited 1\)/u.test(message),
+        /расписание memory-night: провал \(exited 1\)/u.test(message),
     ),
     `раздела расписаний без systemd нет: ${JSON.stringify(events)}`,
   );
@@ -1894,7 +1894,7 @@ test("doctor без systemd печатает раздел расписаний �
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /незакрытый провал: memory-daily .*iva jobs ack memory-daily/u.test(
+        /незакрытый провал: memory-night .*iva jobs ack memory-night/u.test(
           message,
         ),
     ),
@@ -1962,7 +1962,7 @@ test("rollup-status свежий и здоровый — строка ok", async
   writeFileSync(
     join(root, "data/rollup-status.json"),
     JSON.stringify({
-      "memory-daily": { lastSuccessAt: Date.now(), lastExitCode: 0 },
+      "memory-night": { lastSuccessAt: Date.now(), lastExitCode: 0 },
     }),
   );
 
@@ -1971,7 +1971,7 @@ test("rollup-status свежий и здоровый — строка ok", async
     events.some(
       ([level, message]) =>
         level === "ok" &&
-        /memory-daily schedule last succeeded 0h ago/u.test(message),
+        /memory-night schedule last succeeded 0h ago/u.test(message),
     ),
     `нет ok-строки свежего расписания: ${JSON.stringify(events)}`,
   );
@@ -1983,7 +1983,7 @@ test("rollup-status старый и с провалом — строки пре�
   writeFileSync(
     join(root, "data/rollup-status.json"),
     JSON.stringify({
-      "memory-daily": {
+      "memory-night": {
         lastSuccessAt: Date.now() - 30 * 60 * 60 * 1000,
         lastExitCode: 1,
       },
@@ -1995,7 +1995,7 @@ test("rollup-status старый и с провалом — строки пре�
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /memory-daily schedule hasn't succeeded in 30h \(> 26h\)/u.test(
+        /memory-night schedule hasn't succeeded in 30h \(> 26h\)/u.test(
           message,
         ),
     ),
@@ -2005,8 +2005,127 @@ test("rollup-status старый и с провалом — строки пре�
     events.some(
       ([level, message]) =>
         level === "warn" &&
-        /memory-daily schedule's last run exited 1/u.test(message),
+        /memory-night schedule's last run exited 1/u.test(message),
     ),
     `нет warn-строки кода провала: ${JSON.stringify(events)}`,
+  );
+});
+
+// ─── вендор claude: ключа нет, вход живёт в чужом CLI ────────────────────────────────
+// Ключа в .env у него нет вовсе, поэтому «заполнено» — ещё не «работает»: доктор обязан
+// назвать команду установки, команду входа и план из `claude auth status`. Фейковый CLI
+// стоит на месте настоящего: контракт у них один — `auth status` отвечает JSON.
+
+/** Фейковый `claude`: на `auth status` печатает заданный JSON, на остальное молчит. */
+function fakeClaude(t: TestContext, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "iva-fake-claude-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "claude");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node\nif (process.argv[2] === "auth") process.stdout.write(${JSON.stringify(body)});\n`,
+  );
+  chmodSync(file, 0o755);
+  return file;
+}
+
+async function diagnoseClaude(
+  t: TestContext,
+  env: Record<string, string>,
+): Promise<{ bad: string[]; ok: string[] }> {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "MODEL_PROVIDER=claude\n");
+  const bad: string[] = [];
+  const ok: string[] = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    ok: (message) => ok.push(message),
+    warn: () => undefined,
+    bad: (message) => bad.push(message),
+    readEnv: () => ({
+      ...completeEnv(),
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-fable-5-1",
+      ...env,
+    }),
+    hasSystemd: () => false,
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.0.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+  return { bad, ok };
+}
+
+test("doctor sends a claude installation to the CLI install and to its login", async (t) => {
+  // Пустой HOME: `~/.local/bin` из PATH сервиса пуст, `claude` искать негде.
+  const previousHome = process.env.HOME;
+  process.env.HOME = await sandbox(t);
+  t.after(() => {
+    process.env.HOME = previousHome;
+  });
+  const missing = await diagnoseClaude(t, { CLAUDE_COMMAND: "" });
+  assert.equal(
+    missing.bad.filter((message) => message.includes("Claude Code CLI")).length,
+    1,
+    JSON.stringify(missing),
+  );
+  assert.match(
+    missing.bad.join("\n"),
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
+  // Заданный CLAUDE_COMMAND называется сам: ставить CLI заново тут не поможет.
+  const broken = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: "/nonexistent/claude",
+  });
+  assert.match(
+    broken.bad.join("\n"),
+    /CLAUDE_COMMAND=\/nonexistent\/claude is not found or not executable \(PATH: /u,
+  );
+  assert.equal(
+    broken.bad.some((message) => message.includes("npm install")),
+    false,
+  );
+
+  const loggedOut = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":false}'),
+  });
+  assert.match(loggedOut.bad.join("\n"), /claude auth login/u);
+  assert.equal(
+    loggedOut.bad.some((message) => message.includes("npm install")),
+    false,
+    "установленный CLI объявлен неустановленным",
+  );
+});
+
+test("doctor reports the plan of a signed-in claude CLI", async (t) => {
+  const ready = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":true,"subscriptionType":"max"}'),
+  });
+  assert.deepEqual(
+    ready.ok.filter((message) => message.includes("Claude Code CLI")),
+    ["Claude Code CLI: signed in (plan: max)"],
+  );
+  assert.equal(
+    ready.bad.some((message) => message.includes("Claude")),
+    false,
+  );
+});
+
+// Чужая авторизация в .env увела бы подписку на чужой счёт, поэтому доктор называет её
+// так же, как рантайм: имя переменной, без значения.
+test("doctor names a foreign auth variable instead of reporting claude as healthy", async (t) => {
+  const poisoned = await diagnoseClaude(t, {
+    ANTHROPIC_API_KEY: "sk-ant-not-printed",
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":true,"subscriptionType":"max"}'),
+  });
+  const joined = poisoned.bad.join("\n");
+  assert.match(joined, /ANTHROPIC_API_KEY/u);
+  assert.equal(
+    joined.includes("sk-ant-not-printed"),
+    false,
+    "значение утекло в отчёт",
   );
 });

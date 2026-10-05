@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
-// «Незакрытые провалы за сутки» (T20 п.3): закрытие успехом и ack, окно суток,
+// «Незакрытые провалы» (T20 п.3, ADR-0020): закрытие успехом и ack, окно суток у напоминаний,
 // напоминания рядом с расписаниями, пустой блок.
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -15,7 +15,12 @@ import {
   openJobFailures,
   openReminderFailures,
 } from "./open-failures.ts";
-import { jobFactsFile, recordFact, type JobFact } from "./job-facts.ts";
+import {
+  jobFactsFile,
+  readFactsSync,
+  recordFact,
+  type JobFact,
+} from "./job-facts.ts";
 import type { Reminder } from "./reminder-store.ts";
 
 const NOW = Date.UTC(2026, 8, 13, 12, 0, 0);
@@ -23,7 +28,7 @@ const HOUR = 60 * 60 * 1000;
 
 function fact(overrides: Partial<JobFact> = {}): JobFact {
   return {
-    name: "memory-daily",
+    name: "memory-night",
     startedAt: NOW - 1000,
     finishedAt: NOW,
     ok: true,
@@ -55,44 +60,78 @@ function reminder(overrides: Partial<Reminder> = {}): Reminder {
 test("провал расписания открыт, закрывается успехом и ack", () => {
   const failed = fact({ ok: false, error: "exited 1" });
   assert.deepEqual(
-    openJobFailures([failed], NOW).map((entry) => entry.name),
-    ["memory-daily"],
+    openJobFailures([failed]).map((entry) => entry.name),
+    ["memory-night"],
   );
   assert.equal(
-    openJobFailures([failed, fact({ ok: true, finishedAt: NOW + 1 })], NOW)
-      .length,
+    openJobFailures([failed, fact({ ok: true, finishedAt: NOW + 1 })]).length,
     0,
     "поздний успех закрывает",
   );
   assert.equal(
-    openJobFailures(
-      [
-        fact({
-          ok: false,
-          error: "exited 1",
-          finishedAt: NOW - 2 * HOUR,
-          acked: true,
-        }),
-      ],
-      NOW,
-    ).length,
+    openJobFailures([
+      fact({
+        ok: false,
+        error: "exited 1",
+        finishedAt: NOW - 2 * HOUR,
+        acked: true,
+      }),
+    ]).length,
     0,
     "ack закрывает",
   );
 });
 
-test("провал старше суток не показывается, пустой список — пусто", () => {
+// ADR-0020: непочиненный сбой называется в утреннем Brief каждый день до починки. Провал задания
+// открыт, пока он последний факт своего имени, не закрыт ack и строка жива в jobs.json (ротация —
+// 7 дней); суточного окна у задания нет. Прежний тест закреплял окно и с ADR расходился.
+test("провал старше суток открыт, пока не починен (успех) и не закрыт ack; пустой список — пусто", () => {
   const old = fact({
     ok: false,
     error: "exited 1",
-    finishedAt: NOW - OPEN_FAILURES_WINDOW_MS - HOUR,
+    finishedAt: NOW - 3 * OPEN_FAILURES_WINDOW_MS,
   });
-  assert.equal(openJobFailures([old], NOW).length, 0);
-  assert.equal(openJobFailures([], NOW).length, 0);
+  assert.deepEqual(
+    openJobFailures([old]).map((entry) => entry.name),
+    ["memory-night"],
+  );
+  assert.equal(
+    openJobFailures([old, fact({ finishedAt: NOW - HOUR })]).length,
+    0,
+  );
+  assert.equal(openJobFailures([{ ...old, acked: true }]).length, 0);
+  assert.equal(openJobFailures([]).length, 0);
+});
+
+// Путь потребителя (Brief через openFailures, инструкция 40-open-failures): здесь `now` задан,
+// и суточное окно, вернись оно в openFailuresFrom, спрятало бы провал. Прежний тест звал
+// openJobFailures без `now` и окно не видел.
+test("провал задания старше суток без успеха и ack виден потребителю (openFailuresFrom и openFailures)", async () => {
+  const old = fact({
+    ok: false,
+    error: "exited 1",
+    startedAt: NOW - 3 * OPEN_FAILURES_WINDOW_MS - 1000,
+    finishedAt: NOW - 3 * OPEN_FAILURES_WINDOW_MS,
+  });
+  assert.deepEqual(
+    openFailuresFrom([old], [], NOW).map((entry) => entry.name),
+    ["memory-night"],
+  );
+  const dir = mkdtempSync(join(tmpdir(), "iva-open-failures-old-"));
+  await recordFact(jobFactsFile(dir), old, NOW);
+  const fromDisk = await openFailures({
+    dir,
+    now: NOW,
+    readReminders: () => Promise.resolve([]),
+  });
+  assert.deepEqual(
+    fromDisk.map((entry) => entry.name),
+    ["memory-night"],
+  );
 });
 
 test("причина без error не исчезает", () => {
-  const [failure] = openJobFailures([fact({ ok: false, error: null })], NOW);
+  const [failure] = openJobFailures([fact({ ok: false, error: null })]);
   assert.equal(failure?.reason, "провал без причины");
 });
 
@@ -161,9 +200,9 @@ test("блок для промпта: пусто — пустая строка, 
       NOW,
     ),
   );
-  assert.match(text, /^## Незакрытые провалы за сутки/u);
-  assert.match(text, /memory-daily/u);
-  assert.match(text, /iva jobs ack memory-daily/u);
+  assert.match(text, /^## Незакрытые провалы\n/u);
+  assert.match(text, /memory-night/u);
+  assert.match(text, /iva jobs ack memory-night/u);
   assert.match(text, /reminder-r1/u);
 });
 
@@ -180,7 +219,7 @@ test("openFailures читает факты с диска и напоминани
     readReminders: () => Promise.resolve([reminder()]),
   });
   assert.deepEqual(failures.map((entry) => entry.name).sort(), [
-    "memory-daily",
+    "memory-night",
     "reminder-r1",
   ]);
 });
@@ -227,8 +266,8 @@ test("динамическая инструкция 40-open-failures несёт 
     assert.ok(resolve, "инструкция слушает turn.started");
     const resolved = await resolve(null, {} as never);
     const markdown = (resolved as { markdown?: string } | null)?.markdown ?? "";
-    assert.match(markdown, /^## Незакрытые провалы за сутки/u);
-    assert.match(markdown, /memory-daily.*exited 2/u);
+    assert.match(markdown, /^## Незакрытые провалы\n/u);
+    assert.match(markdown, /memory-night.*exited 2/u);
   } finally {
     if (previous === undefined) delete process.env.ASSISTANT_DATA_DIR;
     else process.env.ASSISTANT_DATA_DIR = previous;
@@ -246,4 +285,35 @@ test("T30 №7: блок инструкции ограничен по числу
   const block = openFailuresMarkdown(failures);
   assert.ok(block.length <= 6000, `блок распух: ${block.length} знаков`);
   assert.match(block, /job-0/);
+});
+
+// Ремонт (Sol P2): снятые расписания (memory-daily, -weekly, -monthly, -yearly) остаются в
+// jobs.json, но провалом не считаются нигде: ни в инструкции хода, ни у сторожа, ни в doctor.
+test("снятое расписание не попадает в открытые провалы и в инструкцию хода", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "t20-open-retired-"));
+  for (const name of [
+    "memory-daily",
+    "memory-weekly",
+    "memory-monthly",
+    "memory-yearly",
+  ])
+    await recordFact(
+      jobFactsFile(dir),
+      fact({
+        name,
+        ok: false,
+        error: "exited 1",
+        exitCode: 1,
+        startedAt: NOW - HOUR,
+        finishedAt: NOW - HOUR + 1,
+      }),
+      NOW,
+    );
+  assert.deepEqual(openJobFailures(readFactsSync(jobFactsFile(dir))), []);
+  const failures = await openFailures({
+    dir,
+    now: NOW,
+    readReminders: () => Promise.resolve([]),
+  });
+  assert.equal(openFailuresMarkdown(failures), "");
 });

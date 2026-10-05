@@ -87,10 +87,15 @@ export function commandPositions(command: string): string[] {
 // Сам CLI: restart|stop|reset|full-reset останавливают iva.service; update перезапускает
 // его в конце; rollback — это флип симлинка current и тот же рестарт; doctor рестартует
 // в ремонтных ветках (см. шапку). Ловим прямые вызовы файла (bin/iva.mjs restart,
-// ./bin/iva.mjs) и форму с разделителем (npm-скрипты сюда не доходят — их снимает
-// WRAPPER только у sh -c, а `npm run iva -- restart` ловится отдельной альтернативой).
+// ./bin/iva.mjs) и npm-формы отдельными альтернативами: `npm run iva [--] restart` и
+// `npx iva [--] restart` (разделитель `--` необязателен — npm передаёт глагол и без него).
+// `npm run iva-something` не матчится: после iva нужен пробел.
+// `plugin trust|enable|update|sync` собирают версию с кодом плагина и тоже рестартуют
+// сервис; плагин с кодом модель предлагает (`iva plugin propose`), ставит Bridge по тапу
+// (ADR-0009). `install-proposal` - тот же `add --trust` с рестартом, его запускает только
+// тап в Bridge своим юнитом. `remove|disable|untrust` намеренно не здесь (решение 04.10.2026).
 const IVA_CLI_LETHAL =
-  /^(?:(?:[\w./~-]*\/)?iva(?:\.mjs)?|npm\s+run\s+iva\s+--)\s+(?:--\s+)?(?:restart|stop|reset|full-reset|update|rollback|doctor)(?![\w-])/;
+  /^(?:(?:[\w./~-]*\/)?iva(?:\.mjs)?|npm\s+run\s+iva|npx\s+iva)\s+(?:--\s+)?(?:restart|stop|reset|full-reset|update|rollback|doctor|plugin\s+(?:trust|enable|update|sync|install-proposal))(?![\w-])/;
 
 // systemctl с летальным глаголом, у которого среди юнитов-аргументов есть ровно "iva"
 // или "iva.service" (iva-telegram-poll и таймеры не матчятся: после iva идёт дефис).

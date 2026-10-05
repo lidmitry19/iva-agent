@@ -7,6 +7,7 @@ import {
 import { LEGACY_BRAIN_UNITS } from "../lib/legacy-memory-units.ts";
 import { SystemdControlError } from "../lib/systemd-control.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
+import { betaOf } from "../lib/update-channel.ts";
 import { createVersionStore, parseVersionName } from "../lib/version-store.ts";
 import { builtWith, versionOverlay } from "../lib/version-update.ts";
 import {
@@ -58,6 +59,8 @@ export function createServiceCommands(
   const awaitHealthy = dependencies.awaitHealthy ?? defaultAwaitHealthy;
 
   function cmdStatus(): void {
+    const updates = betaOf(ROOT) ? "beta" : "stable";
+    console.log(`updates: ${updates} (iva beta / iva stable)`);
     requireSystemd();
     run("systemctl", [
       "--user",

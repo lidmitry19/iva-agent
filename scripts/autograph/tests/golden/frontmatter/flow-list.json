@@ -1,8 +1,0 @@
-{
-  "fields": {
-    "tags": ["a", "b", "c d"],
-    "title": "Hello: world",
-    "nick": "Ива"
-  },
-  "body": "x\n"
-}

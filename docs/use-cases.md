@@ -4,12 +4,12 @@ Iva is a personal agent that lives on your own server and works in your Telegram
 
 ## The highlight reel
 
-- Every morning at 9:00 the digest arrives on its own: today's tasks, inbox, industry news.
+- Twice a day (08:30 and 14:00 by default) the Brief arrives on its own: today's tasks, calendar, mail, chats; in between Iva writes first when something waits for you.
 - "What did we agree with client X about the last shipment?" — found in seconds, months later.
 - A five-minute voice note from the car → a task list, a draft email, a meeting card.
 - A 4,000-line price list reconciled in minutes instead of a day.
 - "Make a quote from this price list, cut the discount by 2.5%, send it to the client" — a finished Google Doc, link right in the chat.
-- "What did I miss in Telegram yesterday?" — a digest of your chats and work groups (userbot mode, beta).
+- "What did I miss in Telegram yesterday?" — a review of your chats and work groups (userbot mode, beta).
 - Tired of paying for Perplexity — research with links to sources, done by Iva.
 - A photo of a business card → a contact card with what you agreed on.
 - A Gmail reply and a calendar invite sent without opening the laptop.
@@ -25,7 +25,7 @@ Iva is a personal agent that lives on your own server and works in your Telegram
 
 **📊 Data at volume.** Price lists, sales reports, reconciliations — she processes them right on your server. What takes a day by hand takes her minutes.
 
-**📰 Industry digests.** What's new with your suppliers, competitors and market — collected on request, with topics and sources tuned to you. Want it regularly — Iva sets up a cron and the summary arrives every morning by itself.
+**📰 Industry news.** What's new with your suppliers, competitors and market — collected on request, with topics and sources tuned to you. Want it regularly — Iva sets up a cron and the summary arrives every morning by itself.
 
 **🔎 Background checks.** Before a deal, Iva gathers what open sources say about the company and the people across the table.
 
@@ -65,17 +65,17 @@ Voice notes and shopping lists. People and dates she actually remembers. Search 
 
 ## Iva grows around you
 
-Out of the box Iva ships with ten skills: web research, a browser, Google Workspace, a morning digest, local document processing, rich Telegram posts, problem reports, update recovery, a personal-account userbot (beta) and injection defense. The rest is yours to add — and adding is cheap:
+Out of the box Iva ships with ten skills: web research, a browser, Google Workspace, a daily brief, local document processing, rich Telegram posts, problem reports, update recovery, a personal-account userbot (beta) and injection defense. The rest is yours to add — and adding is cheap:
 
 - a **skill** is one markdown file with a procedure;
 - an **MCP connector** to your CRM, database or internal service is one config file;
 - a **subagent** for a recurring pipeline is one folder.
 
-The author's own install has grown past 80 skills: Iva runs a Telegram channel, compiles weekly reports, generates images, digests social media exports. Give her a skill with your expertise — and she becomes a second brain that takes the routine off your plate. How to extend: [docs/extending.md](extending.md).
+The author's own install has grown past 80 skills: Iva runs a Telegram channel, compiles weekly reports, generates images, sorts through social media exports. Give her a skill with your expertise — and she becomes a second brain that takes the routine off your plate. How to extend: [docs/extending.md](extending.md).
 
 ## Honest limits
 
-Everything that arrives on its own runs on a schedule: digests are schedules inside Iva, and reminders live in her own table on your server, which she fills when you ask (see [Reminders](reminders.md)). Without a schedule and without a message from you she won't text first — spontaneous initiative is not a thing she has. The model and voice transcription are cloud APIs you choose and pay for directly, with no markup. The userbot mode (acting from your personal account) is a beta, at your own risk.
+Everything that arrives on its own runs on a schedule inside Iva: the Brief twice a day, night reports, and Watch, which checks Telegram and mail once an hour without the model and writes first only when a chat or a letter has waited for you or a regular job failed — never at night (23:00–08:00) unless the sender is on your urgent list, and at most five such messages a day. Reminders live in her own table on your server, which she fills when you ask (see [Reminders](reminders.md)). `iva proactive off` (or the toggle in /menu → Notices) stops Watch and the Brief; failures still reach you. The model and voice transcription are cloud APIs you choose and pay for directly, with no markup. The userbot mode (acting from your personal account) is a beta, at your own risk.
 
 ## Try it
 

@@ -23,7 +23,7 @@ const tr = (_en: string, ru: string) => ru;
 
 function fact(overrides: Partial<JobFact> = {}): JobFact {
   return {
-    name: "memory-daily",
+    name: "memory-night",
     startedAt: NOW - 2 * HOUR,
     finishedAt: NOW - 2 * HOUR + 1000,
     ok: false,
@@ -91,7 +91,7 @@ test("ход до провала не гасит провал: страховк�
   const message = watchdogDecision({
     facts: [
       fact({
-        name: "memory-daily",
+        name: "memory-night",
         startedAt: NOW - 23 * HOUR,
         finishedAt: NOW - 23 * HOUR + 1000,
         ok: true,
@@ -100,7 +100,7 @@ test("ход до провала не гасит провал: страховк�
         wake: { at: NOW - 23 * HOUR + 2000, status: "answered", error: null },
       }),
       fact({
-        name: "digest",
+        name: "jobs-watchdog",
         startedAt: NOW - HOUR,
         finishedAt: NOW - HOUR + 1000,
         wake: null,
@@ -232,7 +232,7 @@ test("нечитаемая таблица: сторож говорит о ней
   // Слепая приёмка T20 (F2): при чужом корне таблицы агент проснуться не может, и сторож
   // раньше падал до всякого решения — страховка умирала ровно в своём состоянии.
   const dataDir = dir();
-  writeFileSync(jobFactsFile(dataDir), JSON.stringify({ "memory-daily": {} }));
+  writeFileSync(jobFactsFile(dataDir), JSON.stringify({ "memory-night": {} }));
   const sent: string[] = [];
   const first = await runJobWatchdog({
     dataDir,
@@ -327,4 +327,23 @@ test("T30 №6: нечитаемое состояние дросселя не р
   assert.equal(first, null, "первый прогон отправил при нечитаемом состоянии");
   assert.equal(second, null);
   assert.deepEqual(sent, [], "сообщение ушло при нечитаемом состоянии");
+});
+
+test("сторож молчит о провале снятого расписания", () => {
+  for (const name of [
+    "memory-daily",
+    "memory-weekly",
+    "memory-monthly",
+    "memory-yearly",
+  ])
+    assert.equal(
+      watchdogDecision({
+        facts: [fact({ name })],
+        now: NOW,
+        lastSentAt: null,
+        tr,
+      }),
+      null,
+      name,
+    );
 });

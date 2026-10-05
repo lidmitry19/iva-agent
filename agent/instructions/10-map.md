@@ -5,21 +5,32 @@ index is in context; search content with `memory_search` (ranked search over
 cards and summaries), then pull the top hits one file at a time with
 `read_file`. Never read the whole vault.
 
-`read_file` paths are relative to the vault root (`CORE.md`, `cards/…` — the
-same shape `memory_search` returns): never prefix them with `vault/`. Shell
-commands (`ls`, `grep`) run from the project root, so there the path does start
-with `vault/`.
+A path has one of two roots. The tools `read_file`, `grep` and `glob` take it
+from the vault root (`CORE.md`, `daily/…`, `cards/…` — the shape
+`memory_search` returns): never prefix it with `vault/`. A shell command run
+through `bash` (`ls`, `grep -r`, `uv run`) and `write_file` start in the project
+root, so there the path does start with `vault/`.
 
 Creating a fact card (contact/project/decision/idea/note) — write it with the
 **`write_card`** tool, not `write_file`: it guarantees a valid type and schema
-(no invented types, no extra fields). Do not use `write_file` for cards.
+(no invented types, no extra fields). Do not use `write_file` for cards. Every
+call names its `operation`: `fact` appends a dated source-backed Card fact,
+`truth` replaces Compiled Truth and archives the displaced value, and `merge`
+joins two duplicates only after the owner explicitly confirms it. `truth`
+may send `description`: a separate one-line summary of the new Compiled Truth.
+Without it, the first phrase becomes the summary; never flatten the whole truth.
+`fact` and `truth` take an optional `status` when the owner says so ("the project
+is closed" → `done`, "the decision is reverted" → `reverted`); the tool names the
+statuses allowed for the Card type if one does not fit. Other
+spellings of a name (language, translit, colloquial, typo) go into `aliases`,
+and that is what makes the card findable by any of them.
 
 ### What lives where (coarse → precise)
 
 - `CORE.md` — who the user is, standing preferences, ≤3 active goals,
   pointers. ALREADY in context (the "CORE" block) — do not re-read it.
-- `MOC.md` — the topic index of the vault: topic hubs → cards. READ FIRST for
-  "what do I know about X".
+- `MOC.md` — an optional owner-maintained topic index. The night does not
+  regenerate it; use `memory_search` for recall.
 - `summaries/daily/YYYY-MM-DD.md` — the day summary (topics + links). Take it
   INSTEAD of the raw log.
 - `weekly/`, `monthly/`, `yearly/` — week/month/year summaries.
@@ -31,14 +42,17 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 
 1. **`memory_search "<free-form query>"`** — the FIRST tool for any "what do
    I know about X / what was the name / when did we decide". It ranks cards
-   and summaries (BM25 + graph proximity), so there is no need to guess exact
-   words; it catches word forms. Read the top 1–3 hits with `read_file`.
+   and summaries (BM25 + graph proximity). Every word is matched by its
+   beginning, so a shorter stem finds longer forms while a different spelling,
+   a typo or a longer inflected form finds nothing: put every spelling of the
+   name into ONE query — Russian and Latin, transliteration, the colloquial
+   name, the base form. Read the top 1–3 hits with `read_file`.
 2. "Last week / in May" → summaries for those dates
-   (`ls vault/summaries/daily/2026-06-*.md`).
+   (the `glob` tool, `summaries/daily/2026-06-*.md`).
 3. Not enough → follow the top hit's `[[...]]` wiki links one step (graph
    neighbors).
-4. Still not enough → `grep` over `vault/daily/` for the month (last resort,
-   the largest files).
+4. Still not enough → the `grep` tool with path `daily/` and glob
+   `2026-06-*.md` for the month (last resort, the largest files).
 5. Stop early. Summaries before raw: a weekly summary is ~35× cheaper than
    its seven days.
 
@@ -61,12 +75,12 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 - Messages and your replies are auto-written to `daily/<today>.md` (the
   transcript hook).
 - Voice, video and audio are transcribed into the daily file before you see
-  them (Deepgram).
-- At night eve schedules run the rollup daily→weekly→monthly→yearly; a
-  separate systemd watchdog runs the Brain pass. They turn the raw day into
-  cards and summaries and update `CORE.md`. Do not run them by hand.
+  them when transcription (Deepgram) is set up.
+- At the installation’s compiled local time (04:00 by default), the single `memory-night` eve schedule processes queued days,
+  cards, links, CORE and ready week/month/year summaries; a separate systemd
+  watchdog runs the Brain pass. Do not run them by hand.
 - Heavy procedures are skills: load one by name and the body arrives
-  (`morning-digest`, `web-research`, `agent-browser`, `google-workspace`,
+  (`brief`, `web-research`, `agent-browser`, `google-workspace`,
   `security-defense`, `telegram-userbot`, `rich-post`, `documents`,
   `rich-replies`). Load `rich-replies` before a structured answer (comparison,
   report, steps) and whenever you offer the user a choice, a link or a value to

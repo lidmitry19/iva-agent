@@ -111,10 +111,6 @@ export function scanOversizeWorkingTreeFiles({
   return oversized;
 }
 
-export function formatMegabytes(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 // Карточки и MOC пишутся «временный файл рядом + rename». Убитый сигналом писатель
 // оставляет такой файл на диске, а ночь делает `git add -A` — огрызок уехал бы в историю
 // vault как настоящая карточка. Шаблонный vault-template/.gitignore до живых вольтов не
@@ -139,7 +135,7 @@ export function ensureVaultGitignore(vaultPath: string): boolean {
   } catch (error) {
     // Только ENOENT значит «файла нет». Нечитаемый .gitignore (EACCES/EIO) не
     // перезаписываем: иначе правила владельца исчезают молча, а ночной git add -A
-    // их уже не видит. Тот же сплит ENOENT/остальное, что в read-core.ts.
+    // их уже не видит. ENOENT — файла нет, остальное — ошибка.
     const code = (error as NodeJS.ErrnoException | null)?.code;
     if (code !== "ENOENT") {
       console.error(
