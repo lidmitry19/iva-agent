@@ -607,7 +607,7 @@ void test("only metadata-only imported templates are empty", () => {
   assert.equal(emptyImportedDay(raw), true);
   assert.equal(
     emptyImportedDay(
-      raw.replace("tier: archive", "tier: cold") + "# 2026-04-17\n",
+      raw.replace("tier: archive", "tier: warm") + "# 2026-04-17\n",
     ),
     true,
   );
