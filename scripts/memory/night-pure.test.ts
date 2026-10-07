@@ -8,6 +8,8 @@ import fc from "fast-check";
 import "../lib/ts-esm-hooks.ts";
 const {
   canonicalHash,
+  emptyImportedDay,
+  selectNightDays,
   markedDone,
   parseDay,
   parseJson,
@@ -590,4 +592,54 @@ void test(`указатель: мусор на входе — без исклю�
     }),
     CHECKS,
   );
+});
+
+void test("legacy processed footer is accepted only at the end", () => {
+  const raw =
+    "## 10:00 [text]\nhello\n---\nprocessed: 2026-04-14T21:00:00\nthoughts: 0\ntasks: 1\n---\n";
+  assert.equal(markedDone(raw), true);
+  assert.equal(markedDone(raw + "## 11:00 [text]\nnew message\n"), false);
+  assert.equal(markedDone("processed: unknown\n"), false);
+});
+void test("only metadata-only imported templates are empty", () => {
+  const raw =
+    "<!-- imported_from: second-brain/daily/2026-04-17.md; imported_at: 2026-06-20 -->\n\n---\ntype: note\nlast_accessed: 2026-04-17\nrelevance: 0.1\ntier: archive\n---\n";
+  assert.equal(emptyImportedDay(raw), true);
+  assert.equal(
+    emptyImportedDay(
+      raw.replace("tier: archive", "tier: cold") + "# 2026-04-17\n",
+    ),
+    true,
+  );
+  assert.equal(emptyImportedDay(raw + "# 2026-04-18\n"), false);
+  assert.equal(emptyImportedDay(raw + "Owner note without a timestamp"), false);
+  assert.equal(
+    emptyImportedDay(raw.replace("type: note", "unrecognized: content")),
+    false,
+  );
+  assert.equal(emptyImportedDay("## 10:00 [text]\nhello"), false);
+});
+void test("current days cannot be starved by a historical queue", () => {
+  const dates = [
+    "2026-04-14",
+    "2026-04-15",
+    "2026-04-16",
+    "2026-10-05",
+    "2026-10-06",
+  ];
+  assert.deepEqual(selectNightDays(dates, "2026-10-07", 3), [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-04-14",
+  ]);
+  assert.deepEqual(
+    selectNightDays(dates.slice(0, 3), "2026-10-07", 3),
+    dates.slice(0, 3),
+  );
+  assert.deepEqual(
+    selectNightDays(["2026-10-07", "2026-10-08"], "2026-10-07", 3),
+    [],
+  );
+  assert.deepEqual(selectNightDays(dates, "2026-10-07", 1), ["2026-10-05"]);
+  assert.deepEqual(selectNightDays(dates, "2026-10-07", 0), []);
 });
