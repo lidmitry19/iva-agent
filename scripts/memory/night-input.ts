@@ -189,7 +189,7 @@ export function emptyImportedDay(raw: string): boolean {
   if (!match) return false;
   const lines = match[2].split("\n");
   return lines.every((line) =>
-    /^(?:type: note|last_accessed: \d{4}-\d{2}-\d{2}|relevance: [\d.]+|tier: (?:archive|cold|active))$/u.test(
+    /^(?:type: note|last_accessed: \d{4}-\d{2}-\d{2}|relevance: [\d.]+|tier: (?:archive|cold|warm|hot|active))$/u.test(
       line,
     ),
   );
