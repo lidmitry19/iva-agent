@@ -1959,3 +1959,22 @@ void test("B: статус сверяется со схемой точной с�
     );
   }
 });
+
+void test("historical backfill preserves the latest-day pointer", async (t) => {
+  const fx = await fixture(t);
+  const file = join(fx.vault, "CORE.md");
+  writeFileSync(
+    file,
+    read(file) +
+      "\n## Указатели\n- Последний день: summaries/daily/2026-09-26 · Индекс: MOC.md\n",
+  );
+  day(fx, "## 10:00 [text]\nЗапустил проект Аврора\n", "2026-04-14");
+  fx.model.replies = [A()];
+  const result = await night(fx, "2026-04-14");
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(
+    read(file),
+    /Последний день: summaries\/daily\/2026-09-26 · Индекс: MOC.md/u,
+  );
+  assert.ok(existsSync(join(fx.vault, "summaries/daily/2026-04-14.md")));
+});

@@ -59,7 +59,7 @@ export function parseDay(raw: string): DayEntry[] {
 
 // Служебный хвост дня: отметка конца, пустые строки и блок итога старой ночи.
 const SERVICE_LINE =
-  /^(?:|<!-- processed[:-].*-->|---|(?:processed|cards|summary): .*)$/u;
+  /^(?:|<!-- processed[:-].*-->|---|(?:processed|cards|summary|thoughts|tasks): .*)$/u;
 
 /** День закрыт отметкой в хвосте: её пишет ночь (совместимо со старой) и `iva jobs skip`. */
 export function markedDone(raw: string): boolean {
@@ -69,7 +69,11 @@ export function markedDone(raw: string): boolean {
     index >= 0 && SERVICE_LINE.test(lines[index]);
     index--
   )
-    if (MARKER.test(lines[index])) return true;
+    if (
+      MARKER.test(lines[index]) ||
+      /^processed: \d{4}-\d{2}-\d{2}T/u.test(lines[index])
+    )
+      return true;
   return false;
 }
 
@@ -175,3 +179,35 @@ export const srcList = z.preprocess(
   (value) => (typeof value === "string" ? [value] : value),
   z.array(z.string()),
 );
+
+/** Empty imported daily templates contain metadata only, never conversation text. */
+export function emptyImportedDay(raw: string): boolean {
+  const match =
+    /^<!-- imported_from: second-brain\/daily\/(\d{4}-\d{2}-\d{2})\.md; imported_at: \d{4}-\d{2}-\d{2} -->\s*---\n([\s\S]*?)\n---\s*(?:# \1\s*)?$/u.exec(
+      raw.replace(/\r\n?/gu, "\n"),
+    );
+  if (!match) return false;
+  const lines = match[2].split("\n");
+  return lines.every((line) =>
+    /^(?:type: note|last_accessed: \d{4}-\d{2}-\d{2}|relevance: [\d.]+|tier: (?:archive|cold|active))$/u.test(
+      line,
+    ),
+  );
+}
+
+/** Keep current conversations moving while reserving one slot for historical debt. */
+export function selectNightDays(
+  dates: readonly string[],
+  today: string,
+  limit: number,
+): string[] {
+  if (limit < 1) return [];
+  const cutoff = new Date(Date.parse(`${today}T12:00:00Z`) - 7 * 86400000)
+    .toISOString()
+    .slice(0, 10);
+  const sorted = [...new Set(dates)].filter((date) => date < today).sort();
+  const recent = sorted.filter((date) => date >= cutoff);
+  const old = sorted.filter((date) => date < cutoff);
+  const fresh = recent.slice(0, old.length && limit > 1 ? limit - 1 : limit);
+  return [...fresh, ...old.slice(0, limit - fresh.length)];
+}

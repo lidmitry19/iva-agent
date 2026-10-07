@@ -9,7 +9,11 @@ import { readSettings } from "#lib/settings.ts";
 import { commitVaultSweep, commitVaultWrite } from "#lib/vault-commit.ts";
 import { writeFileAtomicSync as writeAtomic } from "#lib/fs-atomic.ts";
 import { imageRefsIn } from "#lib/attachment-ref.ts";
-import { SECTION_KIND, setLastDayPointer } from "#lib/core-clamp.ts";
+import {
+  LAST_DAY_LABEL,
+  SECTION_KIND,
+  setLastDayPointer,
+} from "#lib/core-clamp.ts";
 import { coreExcess, textHash, writeCore } from "#lib/core-write.ts";
 import { hasUnclosedFence } from "#lib/card-text.ts";
 import * as cs from "#lib/card-store.ts";
@@ -927,7 +931,9 @@ function dayTodo(date: string): boolean {
   if (summary !== null && input.summaryEdited(summary))
     return fail(`выжимка ${date} изменена вручную; день не разбирается`);
   if (cache) return entries.length > cache.through;
-  return summary === null && !input.markedDone(raw);
+  return (
+    summary === null && !input.markedDone(raw) && !input.emptyImportedDay(raw)
+  );
 }
 
 function dayQueue(today: string): string[] {
@@ -1019,7 +1025,24 @@ async function runCore(lastDay: string | undefined): Promise<void> {
   const base = before || CORE_TEMPLATE;
   const candidates = waiting.flatMap((cache) => cache.core);
   const asked = candidates.length ? await askCore(base, candidates) : null;
-  const written = await writeNightCore(before, asked ?? base, lastDay);
+  // Backfill must not move the latest-day pointer back into the historical archive.
+  const previousDay = before
+    .split("\n")
+    .flatMap((line) => {
+      const path = LAST_DAY_LABEL.exec(line)?.[2] ?? "";
+      return (
+        /^(?:vault\/)?summaries\/daily\/(\d{4}-\d{2}-\d{2})(?:\.md)?$/u.exec(
+          path,
+        )?.[1] ?? []
+      );
+    })
+    .sort()
+    .at(-1);
+  const latestDay = [lastDay, previousDay]
+    .filter((date): date is string => Boolean(date))
+    .sort()
+    .at(-1);
+  const written = await writeNightCore(before, asked ?? base, latestDay);
   if (!written || asked === null) return;
   for (const cache of waiting) writeCache({ ...cache, coreDone: true });
 }
@@ -1126,8 +1149,8 @@ async function alertsAtEnd(today: string, left: string[], fallbacks: string[]) {
     [
       "night-tail",
       old.length,
-      `The night queue holds days older than 7 days: ${old.join(", ")}. Check iva jobs.`,
-      `Очередь ночи старше 7 дней: ${old.join(", ")}. Проверь iva jobs.`,
+      `The night queue holds days older than 7 days: ${old.slice(0, 5).join(", ")} (${old.length} days). Recent days have priority; historical days are processed gradually.`,
+      `Очередь ночи старше 7 дней: ${old.slice(0, 5).join(", ")} (всего ${old.length}). Свежие дни обрабатываются в первую очередь, старые — постепенно.`,
     ],
     [
       "night-transcript",
@@ -1216,12 +1239,12 @@ async function night(manual: string | undefined): Promise<number> {
   const tried = attempts.readAttempts(ATTEMPTS);
   const queue = manual
     ? [manual]
-    : dayQueue(today).slice(0, limits.DAYS_PER_NIGHT);
+    : input.selectNightDays(dayQueue(today), today, limits.DAYS_PER_NIGHT);
   const ready = queue.filter((date) => !attempts.isExhausted(tried[date]));
   const { done, code } = await runDays(ready);
   const queueLeft = dayQueue(today);
   await retryTruth(today);
-  await runCore(done.at(-1));
+  await runCore([...done].sort().at(-1));
   fallbacks.push(...(await periods()));
   cleanupCaches();
   await alertsAtEnd(today, queueLeft, fallbacks);
